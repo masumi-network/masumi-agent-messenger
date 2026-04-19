@@ -43,17 +43,19 @@ export function buildRegistrationPrompts() {
       normalizedEmail: string;
       suggestedSlug: string;
     }) => {
-      const useSuggested = await confirmYesNo({
-        question: `Create public inbox slug /${suggestedSlug} for ${normalizedEmail}?`,
-        defaultValue: true,
-      });
-      if (useSuggested) {
-        return suggestedSlug;
-      }
-      return promptText({
-        question: 'Public inbox slug',
+      const slug = await promptText({
+        question: `Public inbox slug for ${normalizedEmail}`,
         defaultValue: suggestedSlug,
       });
+      const selectedSlug = slug.trim() || suggestedSlug;
+      const publicDescription = await promptMultiline({
+        question: `Public description for /${selectedSlug} (optional).`,
+        doneMessage: 'Press Enter on an empty line to skip or finish.',
+      });
+      return {
+        slug: selectedSlug,
+        publicDescription: publicDescription || null,
+      };
     },
     confirmAgentRegistration: async ({
       actorSlug,

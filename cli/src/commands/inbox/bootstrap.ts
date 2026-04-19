@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import { getMasumiInboxAgentNetwork } from '../../../../shared/inbox-agent-registration';
 import { bootstrapInbox } from '../../services/inbox';
 import { resolvePublicDescriptionOption } from '../../services/public-description';
-import { confirmYesNo, promptMultiline, waitForEnterMessage } from '../../services/prompts';
+import { confirmYesNo, promptMultiline, promptText, waitForEnterMessage } from '../../services/prompts';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
 import { cyan, green, renderKeyValue, yellow } from '../../services/render';
 
@@ -46,6 +46,21 @@ export function registerInboxBootstrapCommand(command: Command): void {
               description: options.publicDescription,
               descriptionFile: options.publicDescriptionFile,
             }),
+            confirmDefaultSlug: async ({ normalizedEmail, suggestedSlug }) => {
+              const slug = await promptText({
+                question: `Public inbox slug for ${normalizedEmail}`,
+                defaultValue: suggestedSlug,
+              });
+              const selectedSlug = slug.trim() || suggestedSlug;
+              const publicDescription = await promptMultiline({
+                question: `Public description for /${selectedSlug} (optional).`,
+                doneMessage: 'Press Enter on an empty line to skip or finish.',
+              });
+              return {
+                slug: selectedSlug,
+                publicDescription: publicDescription || null,
+              };
+            },
             confirmAgentRegistration: async ({ actorSlug, displayName, creditsRemaining }) =>
               confirmYesNo({
                 question: `Create managed inbox agent for ${displayName ?? actorSlug} on ${getMasumiInboxAgentNetwork()}? Credits: ${creditsRemaining ?? 'unknown'}.`,

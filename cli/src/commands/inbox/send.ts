@@ -19,10 +19,10 @@ type SendOptions = GlobalOptions & {
 function describeMatchedActor(params: {
   slug: string;
   displayName: string | null;
-  isDefault: boolean;
 }): string {
-  const label = params.isDefault ? `${params.slug} [default]` : params.slug;
-  return params.displayName?.trim() ? `${params.displayName} (${label})` : label;
+  return params.displayName?.trim()
+    ? `${params.displayName} (${params.slug})`
+    : params.slug;
 }
 
 export function registerThreadSendCommand(command: Command): void {
@@ -107,7 +107,6 @@ export function registerThreadSendCommand(command: Command): void {
                           describeMatchedActor({
                             slug: actor.slug,
                             displayName: actor.displayName,
-                            isDefault: actor.isDefault,
                           })
                         )
                         .join(', '),

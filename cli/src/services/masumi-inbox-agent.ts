@@ -487,6 +487,7 @@ async function registerInboxAgent(params: {
   accessToken: string;
   slug: string;
   displayName: string | null;
+  description: string | null;
 }): Promise<
   | { kind: 'success'; entry: MasumiInboxAgentEntry }
   | { kind: 'insufficient_credits'; creditsRemaining: number | null; error: string }
@@ -504,6 +505,7 @@ async function registerInboxAgent(params: {
     body: JSON.stringify(
       buildMasumiPayInboxAgentCreateRequest({
         name: params.displayName?.trim() || params.slug,
+        description: params.description ?? undefined,
         agentSlug: params.slug,
       })
     ),
@@ -614,7 +616,19 @@ export async function syncMasumiInboxAgentRegistration(params: {
     : null;
 
   let currentMetadata = readActorRegistrationMetadata(params.actor);
-  let creditsRemaining: number | null = null;
+  let creditsRemaining: number;
+  const desiredPublicDescription = params.desiredPublicDescription?.trim() || null;
+
+  if (
+    desiredPublicDescription &&
+    params.actor.publicDescription !== desiredPublicDescription
+  ) {
+    await persistPublicDescription({
+      conn: params.conn,
+      actor: params.actor,
+      description: desiredPublicDescription,
+    });
+  }
 
   params.reporter.info('Phase: lookup');
 
@@ -704,10 +718,7 @@ export async function syncMasumiInboxAgentRegistration(params: {
     return { registration: result, metadata: currentMetadata };
   }
 
-  if (
-    creditsRemaining !== null &&
-    creditsRemaining < MASUMI_INBOX_AGENT_REQUIRED_CREDITS
-  ) {
+  if (creditsRemaining < MASUMI_INBOX_AGENT_REQUIRED_CREDITS) {
     result.status = 'insufficient_credits';
     result.creditsRemaining = creditsRemaining;
     result.error = toInsufficientCreditsMessage({ actorSlug: params.actor.slug });
@@ -741,18 +752,17 @@ export async function syncMasumiInboxAgentRegistration(params: {
           displayName: params.actor.displayName ?? null,
         })
       : true;
-    publicDescription = params.confirmPublicDescription
-      ? await params.confirmPublicDescription({
-          actorSlug: params.actor.slug,
-          displayName: params.actor.displayName ?? null,
-        })
-      : null;
+    publicDescription =
+      desiredPublicDescription ??
+      (params.confirmPublicDescription
+        ? await params.confirmPublicDescription({
+            actorSlug: params.actor.slug,
+            displayName: params.actor.displayName ?? null,
+          })
+        : null);
   } else {
     linkedEmailVisibility = params.desiredLinkedEmailVisibility ?? true;
-    publicDescription =
-      params.desiredPublicDescription?.trim().length
-        ? params.desiredPublicDescription
-        : null;
+    publicDescription = desiredPublicDescription;
   }
 
   result.attempted = true;
@@ -774,6 +784,7 @@ export async function syncMasumiInboxAgentRegistration(params: {
       accessToken,
       slug: params.actor.slug,
       displayName: params.actor.displayName ?? null,
+      description: publicDescription,
     });
 
     if (created.kind === 'insufficient_credits') {

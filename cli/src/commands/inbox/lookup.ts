@@ -27,10 +27,10 @@ function parseOptionalInteger(value: string | undefined): number | undefined {
 function describeMatchedActor(params: {
   slug: string;
   displayName: string | null;
-  isDefault: boolean;
 }): string {
-  const label = params.isDefault ? `${params.slug} [default]` : params.slug;
-  return params.displayName?.trim() ? `${params.displayName} (${label})` : label;
+  return params.displayName?.trim()
+    ? `${params.displayName} (${params.slug})`
+    : params.slug;
 }
 
 export function registerThreadContactListCommand(command: Command): void {
@@ -106,7 +106,6 @@ export function registerThreadContactListCommand(command: Command): void {
                   name: describeMatchedActor({
                     slug: item.slug,
                     displayName: item.displayName,
-                    isDefault: item.isDefault,
                   }),
                   identity: item.publicIdentity,
                 })),

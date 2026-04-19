@@ -257,8 +257,9 @@ const THREAD_RAIL_FILTER_OPTIONS = [
 ] as const;
 
 function describeResolvedActor(actor: ResolvedPublishedActor): string {
-  const baseIdentity = actor.isDefault ? `${actor.slug} [default]` : actor.slug;
-  return actor.displayName?.trim() ? `${actor.displayName} (${baseIdentity})` : baseIdentity;
+  return actor.displayName?.trim()
+    ? `${actor.displayName} (${actor.slug})`
+    : actor.slug;
 }
 
 function describeTargetSubtitle(actor: Agent | ResolvedPublishedActor): string | null {

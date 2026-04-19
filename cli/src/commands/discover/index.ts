@@ -156,7 +156,6 @@ export function registerDiscoverCommands(program: Command): void {
               value: result.selected.publicIdentity ?? 'not published in inbox registry',
               color: dim,
             },
-            { key: 'Default', value: formatOptionalBoolean(result.selected.isDefault) },
             {
               key: 'Inbox published',
               value: formatOptionalBoolean(result.selected.inboxPublished),

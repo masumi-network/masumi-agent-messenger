@@ -43,10 +43,17 @@ export type BootstrapRecoveryReason = 'missing' | 'mismatch' | null;
 
 export type BootstrapRecoveryOption = 'device_share' | 'backup_import' | 'rotate';
 
+export type ConfirmDefaultSlugPromptResult =
+  | string
+  | {
+      slug: string;
+      publicDescription?: string | null;
+    };
+
 export type ConfirmDefaultSlugPrompt = (params: {
   normalizedEmail: string;
   suggestedSlug: string;
-}) => Promise<string>;
+}) => Promise<ConfirmDefaultSlugPromptResult>;
 
 export type BootstrapResult = {
   connected: true;
@@ -227,14 +234,25 @@ export async function bootstrapAuthenticatedInbox(params: {
       const suggestedDefaultSlug = buildPreferredDefaultInboxSlug(normalizedEmail, slug =>
         actors.some(actor => actor.slug === slug)
       );
-      const defaultSlug = !existingDefaultActor
-        ? await (params.confirmDefaultSlug
-            ? params.confirmDefaultSlug({
-                normalizedEmail,
-                suggestedSlug: suggestedDefaultSlug,
-              })
-            : Promise.resolve(suggestedDefaultSlug))
-        : undefined;
+      let setupPublicDescription = params.desiredPublicDescription;
+      let defaultSlug: string | undefined;
+      if (!existingDefaultActor) {
+        const defaultSetup = params.confirmDefaultSlug
+          ? await params.confirmDefaultSlug({
+              normalizedEmail,
+              suggestedSlug: suggestedDefaultSlug,
+            })
+          : suggestedDefaultSlug;
+        if (typeof defaultSetup === 'string') {
+          defaultSlug = defaultSetup;
+        } else {
+          defaultSlug = defaultSetup.slug;
+          const publicDescription = defaultSetup.publicDescription?.trim();
+          if (publicDescription) {
+            setupPublicDescription = publicDescription;
+          }
+        }
+      }
       const publishedKeyPair = existingDefaultActor
         ? toPublishedDefaultActorKeys(existingDefaultActor)
         : null;
@@ -336,7 +354,7 @@ export async function bootstrapAuthenticatedInbox(params: {
         reporter: params.reporter,
         mode: registrationMode,
         desiredLinkedEmailVisibility: params.desiredLinkedEmailVisibility,
-        desiredPublicDescription: params.desiredPublicDescription,
+        desiredPublicDescription: setupPublicDescription,
         confirmRegistration: params.confirmAgentRegistration,
         confirmLinkedEmailVisibility: params.confirmLinkedEmailVisibility,
         confirmPublicDescription: params.confirmPublicDescription,

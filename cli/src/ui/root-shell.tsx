@@ -68,7 +68,7 @@ import { createSecretStore } from '../services/secret-store';
 import { getStoredActorKeyPair } from '../services/actor-keys';
 import { decryptVisibleMessage } from '../services/messages';
 import { findDefaultActorByEmail } from '../../../shared/inbox-state';
-import { normalizeEmail } from '../../../shared/inbox-slug';
+import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import type { VisibleAgentRow, VisibleMessageRow } from '../../../webapp/src/module_bindings/types';
 
 type ShellRoute =
@@ -137,6 +137,7 @@ type TaskPanelState = {
   submitLabel: string;
   fields: TaskPanelField[];
   stepIndex: number;
+  onCancel?: () => Promise<void> | void;
   onSubmit: (values: Record<string, string>) => Promise<void>;
 };
 
@@ -196,6 +197,7 @@ type DiscoverDetailState =
 
 type PendingRegistrationPrompt = {
   slug: string;
+  publicDescription?: string | null;
 };
 
 type ShellConnectionState =
@@ -1240,6 +1242,7 @@ function TaskPanel({
   cursorIndex: number;
 }) {
   const currentField = panel.fields[panel.stepIndex] ?? null;
+  const isLastField = panel.stepIndex >= panel.fields.length - 1;
   const showLookup =
     currentField &&
     lookupState.fieldKey === currentField.key &&
@@ -1311,7 +1314,7 @@ function TaskPanel({
       ) : null}
       <Text color="gray">
         Step {Math.min(panel.stepIndex + 1, Math.max(panel.fields.length, 1)).toString()}/
-        {Math.max(panel.fields.length, 1).toString()} · ←/→ cursor · Enter {currentField ? 'next' : panel.submitLabel.toLowerCase()} · Esc cancel
+        {Math.max(panel.fields.length, 1).toString()} · ←/→ cursor · Enter {currentField && !isLastField ? 'next' : panel.submitLabel.toLowerCase()} · Esc cancel
       </Text>
     </Box>
   );
@@ -1392,6 +1395,7 @@ export function RootShell({
     useState<PendingRegistrationPrompt | null>(null);
   const agentDiscoveryRequestRef = useRef(0);
   const activeTaskFieldKeyRef = useRef<string | null>(null);
+  const initialSetupPublicDescriptionRef = useRef<string | null>(null);
 
   const normalizedEmail =
     connectionState.mode === 'ready'
@@ -2099,13 +2103,70 @@ export function RootShell({
       error: null,
     });
     setTaskLookupIndex(0);
-    setTaskCursorIndex(0);
+    setTaskCursorIndex(panel.fields[0]?.value.length ?? 0);
     activeTaskFieldKeyRef.current = null;
     setTaskPanel({
       ...panel,
       stepIndex: 0,
     });
   };
+
+  const promptDefaultSlugForInitialSetup = (params: {
+    normalizedEmail: string;
+    suggestedSlug: string;
+  }): Promise<{
+    slug: string;
+    publicDescription: string | null;
+  }> =>
+    new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (handler: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        handler();
+      };
+
+      openTaskPanel({
+        title: 'Confirm public slug',
+        help: `Use the generated slug for ${params.normalizedEmail}, or edit it before continuing.`,
+        submitLabel: 'Use slug',
+        fields: [
+          {
+            key: 'slug',
+            label: 'Slug',
+            value: params.suggestedSlug,
+            placeholder: params.suggestedSlug,
+            validate: value =>
+              normalizeInboxSlug(value) ? null : 'Enter a valid slug to continue.',
+          },
+          {
+            key: 'publicDescription',
+            label: 'Description',
+            value: '',
+            placeholder: 'optional public description',
+            allowEmpty: true,
+          },
+        ],
+        onCancel: () => {
+          settle(() => reject(new Error('Slug confirmation cancelled.')));
+        },
+        onSubmit: async values => {
+          setTaskPanel(null);
+          setTaskCursorIndex(0);
+          activeTaskFieldKeyRef.current = null;
+          const publicDescription = values.publicDescription?.trim() || null;
+          initialSetupPublicDescriptionRef.current = publicDescription;
+          settle(() =>
+            resolve({
+              slug: values.slug.trim() || params.suggestedSlug,
+              publicDescription,
+            })
+          );
+        },
+      });
+    });
 
   const setMainRoute = (type: ShellRoute['type']) => {
     if (connectionState.mode !== 'ready' && type !== 'auth' && type !== 'help') {
@@ -2364,7 +2425,7 @@ export function RootShell({
   const openCreateAgentTask = () => {
     openTaskPanel({
       title: 'Create agent',
-      help: 'Create an owned agent with an optional display name.',
+      help: 'Create an owned agent with optional public profile details.',
       submitLabel: 'Create',
       fields: [
         {
@@ -2380,6 +2441,13 @@ export function RootShell({
           placeholder: 'optional',
           allowEmpty: true,
         },
+        {
+          key: 'publicDescription',
+          label: 'Description',
+          value: '',
+          placeholder: 'optional public description',
+          allowEmpty: true,
+        },
       ],
       onSubmit: async values => {
         setTaskPanel(null);
@@ -2390,6 +2458,7 @@ export function RootShell({
               profileName: options.profile,
               slug: values.slug,
               displayName: values.displayName || undefined,
+              desiredPublicDescription: values.publicDescription || undefined,
               reporter,
             }),
           result => {
@@ -2398,7 +2467,10 @@ export function RootShell({
             setRoute({ type: 'agents' });
             setPendingRegistrationPrompt(
               result.registration.status === 'skipped'
-                ? { slug: result.actor.slug }
+                ? {
+                    slug: result.actor.slug,
+                    publicDescription: values.publicDescription || null,
+                  }
                 : null
             );
             setPendingBackupPrompt(
@@ -2946,11 +3018,11 @@ export function RootShell({
       return;
     }
 
-    if (task.busy) {
+    if (task.busy && !taskPanel) {
       return;
     }
 
-    if (pendingRegistrationPrompt) {
+    if (!task.busy && pendingRegistrationPrompt) {
       const prompt = pendingRegistrationPrompt;
 
       if (input === 'q') {
@@ -2971,9 +3043,10 @@ export function RootShell({
 
       if (input.toLowerCase() === 'y' || key.return) {
         const desiredPublicDescription =
-          activeActorRow?.slug === prompt.slug
+          prompt.publicDescription?.trim() ||
+          (activeActorRow?.slug === prompt.slug
             ? activeActorRow.publicDescription ?? undefined
-            : undefined;
+            : undefined);
 
         setPendingRegistrationPrompt(null);
         await performTask(
@@ -3014,9 +3087,11 @@ export function RootShell({
       const currentField = taskPanel.fields[taskPanel.stepIndex] ?? null;
 
       if (key.escape) {
+        const onCancel = taskPanel.onCancel;
         setTaskPanel(null);
         setTaskCursorIndex(0);
         activeTaskFieldKeyRef.current = null;
+        await onCancel?.();
         return;
       }
 
@@ -3386,18 +3461,24 @@ export function RootShell({
       if (input === 'l') {
         await performTask(
           'Signing in',
-          reporter =>
-            login({
+          reporter => {
+            initialSetupPublicDescriptionRef.current = null;
+            return login({
               profileName: options.profile,
               reporter,
               registrationMode: 'skip',
+              confirmDefaultSlug: promptDefaultSlugForInitialSetup,
               waitForEnter: async () => {},
-            }),
+            });
+          },
           result => {
             reconnect();
             setPendingRegistrationPrompt(
               result.agentRegistration.status === 'skipped'
-                ? { slug: result.actor.slug }
+                ? {
+                    slug: result.actor.slug,
+                    publicDescription: initialSetupPublicDescriptionRef.current,
+                  }
                 : null
             );
             setTask(current => ({
@@ -4029,6 +4110,9 @@ export function RootShell({
             Register managed agent for <Text color="yellowBright">{pendingRegistrationPrompt.slug}</Text> now?
           </Text>
           <Text color="gray">This publishes the inbox agent for Masumi SaaS discovery.</Text>
+          {pendingRegistrationPrompt.publicDescription ? (
+            <Text color="gray">Description will be published with this agent.</Text>
+          ) : null}
           <Text color="yellow">Enter/Y yes · N later</Text>
         </Box>
       ) : null}
@@ -4046,6 +4130,32 @@ export function RootShell({
   );
 
   const footerMode: FooterMode = (() => {
+    if (taskPanel) {
+      const currentField = taskPanel.fields[taskPanel.stepIndex] ?? null;
+      const isLastField = taskPanel.stepIndex >= taskPanel.fields.length - 1;
+      return {
+        label: 'Form input',
+        detail: taskPanel.title,
+        items: [
+          { key: 'Type', label: currentField ? `edit ${currentField.label.toLowerCase()}` : 'review' },
+          ...(taskLookup.items.length > 0
+            ? [
+                { key: '↑/↓', label: 'choose suggestion' },
+                { key: 'Tab', label: 'accept suggestion' },
+              ]
+            : []),
+          {
+            key: 'Enter',
+            label:
+              currentField && !isLastField
+                ? 'next field'
+                : taskPanel.submitLabel.toLowerCase(),
+          },
+          { key: 'Esc', label: 'cancel' },
+        ],
+      };
+    }
+
     if (task.busy) {
       return {
         label: 'Working',
@@ -4062,28 +4172,6 @@ export function RootShell({
           { key: 'Y', label: 'register now' },
           { key: 'N/Esc', label: 'skip for now' },
           { key: 'Q', label: 'quit' },
-        ],
-      };
-    }
-
-    if (taskPanel) {
-      const currentField = taskPanel.fields[taskPanel.stepIndex] ?? null;
-      return {
-        label: 'Form input',
-        detail: taskPanel.title,
-        items: [
-          { key: 'Type', label: currentField ? `edit ${currentField.label.toLowerCase()}` : 'review' },
-          ...(taskLookup.items.length > 0
-            ? [
-                { key: '↑/↓', label: 'choose suggestion' },
-                { key: 'Tab', label: 'accept suggestion' },
-              ]
-            : []),
-          {
-            key: 'Enter',
-            label: currentField ? 'next field' : taskPanel.submitLabel.toLowerCase(),
-          },
-          { key: 'Esc', label: 'cancel' },
         ],
       };
     }
@@ -4576,9 +4664,7 @@ export function RootShell({
                         )}
                       </Text>
                       <Text>
-                        Default slug:{' '}
-                        <Text>{selectedDiscoveryDetail.selected.isDefault ? 'yes' : 'no'}</Text>
-                        <Text color="gray"> · inbox published </Text>
+                        Inbox published:{' '}
                         <Text>{selectedDiscoveryDetail.selected.inboxPublished ? 'yes' : 'no'}</Text>
                       </Text>
                       <Text>

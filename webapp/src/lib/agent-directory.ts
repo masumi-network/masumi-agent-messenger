@@ -10,8 +10,9 @@ type DescribableActor = {
 export function describeActor(actor: DescribableActor | undefined): string {
   if (!actor) return 'Unknown actor';
 
-  const baseIdentity = actor.isDefault ? `${actor.slug} [default]` : actor.slug;
-  return actor.displayName?.trim() ? `${actor.displayName} (${baseIdentity})` : baseIdentity;
+  return actor.displayName?.trim()
+    ? `${actor.displayName} (${actor.slug})`
+    : actor.slug;
 }
 
 export function buildDirectThreadKey(
