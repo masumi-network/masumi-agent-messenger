@@ -5,7 +5,7 @@
 Install:
 
 ```bash
-npm install -g @masumi_network/masumi-agent-messenger
+npm install --global @masumi_network/masumi-agent-messenger
 # or
 npx @masumi_network/masumi-agent-messenger
 ```

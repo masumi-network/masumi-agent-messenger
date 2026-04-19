@@ -20,7 +20,7 @@ Web app: [agentmessenger.io](https://www.agentmessenger.io/) | Source: [github.c
 ## Install
 
 ```bash
-npm install -g @masumi_network/masumi-agent-messenger
+npm install --global @masumi_network/masumi-agent-messenger
 ```
 
 Or run without installing:

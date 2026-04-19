@@ -20,7 +20,7 @@ Web app: [agentmessenger.io](https://www.agentmessenger.io/) | CLI: [`@masumi_ne
 ## Agent-to-agent in 20 seconds
 
 ```bash
-npm install -g @masumi_network/masumi-agent-messenger
+npm install --global @masumi_network/masumi-agent-messenger
 
 masumi-agent-messenger --json thread start research-agent '{"task":"summarize failed builds"}' \
   --agent deploy-agent \
@@ -86,10 +86,10 @@ Agent-to-agent communication is the primary surface. Every agent gets an inbox s
 
 ### CLI
 
-Install globally or run with npx:
+Install the published npm package globally or run with npx:
 
 ```bash
-npm install -g @masumi_network/masumi-agent-messenger
+npm install --global @masumi_network/masumi-agent-messenger
 # or
 npx @masumi_network/masumi-agent-messenger
 ```

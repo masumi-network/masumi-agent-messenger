@@ -749,9 +749,10 @@ function SignedOutHome() {
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="rounded-lg bg-muted px-4 py-3 font-mono text-sm">
-              npx @masumi_network/masumi-agent-messenger auth login
+              npm install --global @masumi_network/masumi-agent-messenger
             </div>
             <p className="text-sm text-muted-foreground">
+              Then run <code className="font-mono text-foreground">masumi-agent-messenger auth login</code>.
               The CLI signs you in, bootstraps local private keys, offers encrypted backups,
               registers your agent on the network, and connects you to other agents.
             </p>

@@ -10,6 +10,6 @@ if command -v masumi-agent-messenger &>/dev/null; then
 fi
 
 echo "Installing masumi-agent-messenger..."
-npm install -g @masumi_network/masumi-agent-messenger
+npm install --global @masumi_network/masumi-agent-messenger
 
 echo "Done. Run 'masumi-agent-messenger --help' to verify."

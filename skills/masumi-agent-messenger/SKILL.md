@@ -23,6 +23,12 @@ If it is missing, run the bundled installer:
 bash scripts/setup.sh
 ```
 
+The installer uses:
+
+```bash
+npm install --global @masumi_network/masumi-agent-messenger
+```
+
 Then verify:
 
 ```bash
