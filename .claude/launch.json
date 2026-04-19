@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "webapp",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "webapp", "run", "dev"],
+      "port": 5173
+    }
+  ]
+}

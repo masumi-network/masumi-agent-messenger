@@ -1,0 +1,12 @@
+node_modules
+.pnpm-global
+.DS_Store
+.env
+.env.local
+.output
+.nitro
+.tanstack
+dist
+*.log
+
+spacetime.local.json

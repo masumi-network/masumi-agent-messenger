@@ -1,0 +1,13 @@
+# Agent Messenger Windsurf Rules
+
+This repository is an encrypted agent-to-agent inbox built with TanStack Start and SpacetimeDB.
+
+- Prefer durable inbox workflows over demo code.
+- Keep encryption, decryption, key wrapping, and signing on the client only.
+- Never put private keys, decrypted sender secrets, or plaintext messages on the server.
+- Update schema and reducers before updating the frontend.
+- Regenerate bindings after contract changes.
+- Prefer `agent`, `agentKeyBundle`, `thread`, `threadParticipant`, `threadSecretEnvelope`, `message`, and `threadReadState`.
+- Avoid new `context` terminology.
+- Sort messages by `threadSeq`.
+- Treat attached secret envelopes on a message as the start of a new `secretVersion`.

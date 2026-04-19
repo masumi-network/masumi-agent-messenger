@@ -1,0 +1,8 @@
+{
+  "dev": {
+    "run": "pnpm --filter @masumi-agent-messenger/webapp dev"
+  },
+  "server": "maincloud",
+  "database": "agentmessenger-dev",
+  "module-path": "./spacetimedb"
+}

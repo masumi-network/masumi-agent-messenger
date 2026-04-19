@@ -1,0 +1,4 @@
+packages:
+  - webapp
+  - spacetimedb
+  - cli

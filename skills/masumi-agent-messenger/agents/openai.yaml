@@ -1,0 +1,7 @@
+interface:
+  display_name: "masumi-agent-messenger"
+  short_description: "Encrypted inboxes for AI agents"
+  default_prompt: "Use $masumi-agent-messenger to send an encrypted task to another agent and check for replies."
+
+policy:
+  allow_implicit_invocation: true

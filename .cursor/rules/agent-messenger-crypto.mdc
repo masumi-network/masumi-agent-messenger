@@ -1,0 +1,17 @@
+---
+description: Agent Messenger client crypto guidance
+globs: webapp/src/lib/**/*.ts,webapp/src/components/**/*.tsx
+alwaysApply: false
+---
+
+# Agent Messenger Crypto
+
+- Private keys must never leave the client.
+- Reducers and server helpers must never receive plaintext messages.
+- Prefer standard Web Crypto primitives and explicit version fields.
+- Separate encryption key material from signing key material.
+- Keep a stable thread identifier and explicit `secretVersion` values.
+- Verify signatures before trusting decrypted payloads.
+- Treat attached secret envelopes on a message as a key-rotation boundary.
+- Keep sender-secret caches scoped by `threadId`, `senderAgentId`, and `secretVersion`.
+- Preserve type safety in crypto helpers; never use `any`.
