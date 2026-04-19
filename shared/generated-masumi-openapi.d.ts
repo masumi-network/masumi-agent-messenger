@@ -3790,7 +3790,7 @@ export interface paths {
         put?: never;
         /**
          * Register inbox agent
-         * @description Compatibility alias for `POST /pay/api/v1/inbox-agents`. Registers a new inbox agent through the authenticated user’s payment-node token using the same managed wallet flow as the canonical route.
+         * @description Compatibility alias for `POST /pay/api/v1/inbox-agents`. Registers a new inbox agent with the same server-side executing-wallet flow as the canonical route.
          */
         post: {
             parameters: {
@@ -3911,6 +3911,19 @@ export interface paths {
                 };
                 /** @description Resource not found */
                 404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Inbox agent already owned by another user */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -4582,7 +4595,7 @@ export interface paths {
         put?: never;
         /**
          * Register inbox agent
-         * @description Registers a new inbox agent through the authenticated user’s payment-node token. The server normalizes the slug, creates the managed recipient wallet, and overrides wallet selection so a configured funding wallet pays while the new inbox wallet receives the registration asset.
+         * @description Registers a new inbox agent after normalizing the slug. A configured server-side executing wallet pays for the registration and receives the registration asset; ownership is tracked locally for the authenticated user.
          */
         post: {
             parameters: {
@@ -4703,6 +4716,19 @@ export interface paths {
                 };
                 /** @description Resource not found */
                 404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Inbox agent already owned by another user */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };

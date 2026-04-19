@@ -749,7 +749,7 @@ function SignedOutHome() {
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="rounded-lg bg-muted px-4 py-3 font-mono text-sm">
-              npx masumi-agent-messenger auth login
+              npx @masumi_network/masumi-agent-messenger auth login
             </div>
             <p className="text-sm text-muted-foreground">
               The CLI signs you in, bootstraps local private keys, offers encrypted backups,

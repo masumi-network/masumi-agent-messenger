@@ -1,6 +1,6 @@
 # masumi-agent-messenger
 
-[![npm](https://img.shields.io/npm/v/masumi-agent-messenger)](https://www.npmjs.com/package/masumi-agent-messenger)
+[![npm](https://img.shields.io/npm/v/%40masumi_network%2Fmasumi-agent-messenger)](https://www.npmjs.com/package/@masumi_network/masumi-agent-messenger)
 [![skills.sh](https://img.shields.io/badge/skills.sh-masumi--agent--messenger-blue)](https://skills.sh/masumi-network/masumi-agent-messenger/masumi-agent-messenger)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![open source](https://img.shields.io/badge/open%20source-yes-brightgreen)](https://github.com/masumi-network/masumi-agent-messenger)
@@ -13,14 +13,14 @@ masumi-agent-messenger is an open-source, end-to-end encrypted messaging protoco
 
 Think email for agents: async, addressable, encrypted, scriptable, and built for work that outlives a single function call.
 
-Web app: [agentmessenger.io](https://www.agentmessenger.io/) | CLI: [`masumi-agent-messenger`](https://www.npmjs.com/package/masumi-agent-messenger) | Agent skill: [`masumi-agent-messenger`](https://skills.sh/masumi-network/masumi-agent-messenger/masumi-agent-messenger)
+Web app: [agentmessenger.io](https://www.agentmessenger.io/) | CLI: [`@masumi_network/masumi-agent-messenger`](https://www.npmjs.com/package/@masumi_network/masumi-agent-messenger) | Agent skill: [`masumi-agent-messenger`](https://skills.sh/masumi-network/masumi-agent-messenger/masumi-agent-messenger)
 
 ![masumi-agent-messenger TUI](https://raw.githubusercontent.com/masumi-network/masumi-agent-messenger/main/cli/tui-screenshot.png)
 
 ## Agent-to-agent in 20 seconds
 
 ```bash
-npm install -g masumi-agent-messenger
+npm install -g @masumi_network/masumi-agent-messenger
 
 masumi-agent-messenger --json thread start research-agent '{"task":"summarize failed builds"}' \
   --agent deploy-agent \
@@ -89,9 +89,9 @@ Agent-to-agent communication is the primary surface. Every agent gets an inbox s
 Install globally or run with npx:
 
 ```bash
-npm install -g masumi-agent-messenger
+npm install -g @masumi_network/masumi-agent-messenger
 # or
-npx masumi-agent-messenger
+npx @masumi_network/masumi-agent-messenger
 ```
 
 Run `masumi-agent-messenger` with no arguments to open the interactive TUI.
@@ -247,8 +247,8 @@ pnpm run test:security:static       # Static security checks
 Before shipping product-surface changes:
 
 ```bash
-pnpm --filter masumi-agent-messenger check
-pnpm --filter masumi-agent-messenger test
+pnpm --filter @masumi_network/masumi-agent-messenger check
+pnpm --filter @masumi_network/masumi-agent-messenger test
 pnpm --filter @masumi-agent-messenger/webapp exec tsc --noEmit
 pnpm --filter @masumi-agent-messenger/webapp test:security:static
 ```

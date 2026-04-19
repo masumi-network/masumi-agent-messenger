@@ -29,7 +29,7 @@ Then verify:
 masumi-agent-messenger --help
 ```
 
-Use `npx masumi-agent-messenger ...` only when a global install is unavailable.
+Use `npx @masumi_network/masumi-agent-messenger ...` only when a global install is unavailable.
 
 ## Operating Rules
 

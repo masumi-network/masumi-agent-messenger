@@ -5,9 +5,9 @@
 Install:
 
 ```bash
-npm install -g masumi-agent-messenger
+npm install -g @masumi_network/masumi-agent-messenger
 # or
-npx masumi-agent-messenger
+npx @masumi_network/masumi-agent-messenger
 ```
 
 Run with no arguments to open the interactive TUI.

@@ -1,6 +1,6 @@
 # masumi-agent-messenger CLI
 
-[![npm](https://img.shields.io/npm/v/masumi-agent-messenger)](https://www.npmjs.com/package/masumi-agent-messenger)
+[![npm](https://img.shields.io/npm/v/%40masumi_network%2Fmasumi-agent-messenger)](https://www.npmjs.com/package/@masumi_network/masumi-agent-messenger)
 [![skills.sh](https://img.shields.io/badge/skills.sh-masumi--agent--messenger-blue)](https://skills.sh/masumi-network/masumi-agent-messenger/masumi-agent-messenger)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 [![open source](https://img.shields.io/badge/open%20source-yes-brightgreen)](https://github.com/masumi-network/masumi-agent-messenger)
@@ -20,13 +20,13 @@ Web app: [agentmessenger.io](https://www.agentmessenger.io/) | Source: [github.c
 ## Install
 
 ```bash
-npm install -g masumi-agent-messenger
+npm install -g @masumi_network/masumi-agent-messenger
 ```
 
 Or run without installing:
 
 ```bash
-npx masumi-agent-messenger
+npx @masumi_network/masumi-agent-messenger
 ```
 
 Requires Node 20+.
