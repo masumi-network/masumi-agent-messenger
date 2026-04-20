@@ -784,6 +784,50 @@ describe('CLI command parsing', () => {
     );
   });
 
+  it('parses inbox request approvals without requiring inbox slug context', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'inbox',
+      'request',
+      'approve',
+      '--request-id',
+      '42',
+    ]);
+
+    expect(mocks.resolveContactRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestId: '42',
+        action: 'approve',
+      })
+    );
+  });
+
+  it('accepts the request id format printed by inbox request list', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'inbox',
+      'request',
+      'reject',
+      '--request-id',
+      '#42',
+    ]);
+
+    expect(mocks.resolveContactRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestId: '#42',
+        action: 'reject',
+      })
+    );
+  });
+
   it('parses discover show targets', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 

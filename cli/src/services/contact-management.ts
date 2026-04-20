@@ -58,9 +58,44 @@ function resolveOwnedActorBySlug(params: {
   return actor;
 }
 
+function resolveContactRequestTargetActor(params: {
+  actors: VisibleAgentRow[];
+  normalizedEmail: string;
+  request: VisibleContactRequestRow;
+  actorSlug?: string;
+}): VisibleAgentRow {
+  if (params.actorSlug) {
+    const actor = resolveOwnedActorBySlug({
+      actors: params.actors,
+      normalizedEmail: params.normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
+    if (params.request.targetAgentDbId !== actor.id) {
+      throw userError('This request does not belong to the selected agent.', {
+        code: 'CONTACT_REQUEST_TARGET_INVALID',
+      });
+    }
+    return actor;
+  }
+
+  const defaultActor = requireDefaultOwnedActor(params.actors, params.normalizedEmail);
+  const targetActor = params.actors.find(
+    actor =>
+      actor.inboxId === defaultActor.inboxId && actor.id === params.request.targetAgentDbId
+  );
+  if (!targetActor) {
+    throw userError('This request does not belong to any owned agent in this inbox.', {
+      code: 'CONTACT_REQUEST_TARGET_INVALID',
+    });
+  }
+
+  return targetActor;
+}
+
 function parseRequestId(value: string): bigint {
+  const normalizedValue = value.startsWith('#') ? value.slice(1) : value;
   try {
-    const parsed = BigInt(value);
+    const parsed = BigInt(normalizedValue);
     if (parsed < 1n) {
       throw new Error('invalid');
     }
@@ -526,33 +561,27 @@ export async function resolveContactRequest(params: {
     try {
       const read = () => readContactRows(conn);
       const snapshot = read();
-      const selectedActor = params.actorSlug
-        ? resolveOwnedActorBySlug({
-            actors: snapshot.actors,
-            normalizedEmail,
-            actorSlug: params.actorSlug,
-          })
-        : requireDefaultOwnedActor(snapshot.actors, normalizedEmail);
       const request = findRequestById(snapshot.contactRequests, parsedRequestId);
       if (request.direction !== 'incoming') {
         throw userError('Only incoming contact requests can be resolved from this inbox.', {
           code: 'CONTACT_REQUEST_DIRECTION_INVALID',
         });
       }
-      if (request.targetAgentDbId !== selectedActor.id) {
-        throw userError('This request does not belong to the selected agent.', {
-          code: 'CONTACT_REQUEST_TARGET_INVALID',
-        });
-      }
+      const selectedActor = resolveContactRequestTargetActor({
+        actors: snapshot.actors,
+        normalizedEmail,
+        request,
+        actorSlug: params.actorSlug,
+      });
 
       if (params.action === 'approve') {
         await conn.reducers.approveContactRequest({
-          agentDbId: request.targetAgentDbId,
+          agentDbId: selectedActor.id,
           requestId: parsedRequestId,
         });
       } else {
         await conn.reducers.rejectContactRequest({
-          agentDbId: request.targetAgentDbId,
+          agentDbId: selectedActor.id,
           requestId: parsedRequestId,
         });
       }
