@@ -10,6 +10,7 @@ import {
   deserializeMasumiRegistrationMetadata,
   getMasumiInboxAgentNetwork as getGeneratedMasumiInboxAgentNetwork,
   isNonDeregisteredInboxAgentState,
+  isPendingMasumiInboxAgentState,
   isMissingRequiredScopeMessage,
   type MasumiInboxAgentNetwork,
   MASUMI_INBOX_AGENT_REQUIRED_CREDITS,
@@ -27,6 +28,7 @@ import {
   type SerializedMasumiActorRegistrationSubject,
   type SerializedMasumiRegistrationResponse,
 } from '../../../shared/inbox-agent-registration';
+import { normalizeInboxSlug } from '../../../shared/inbox-slug';
 import type { AuthenticatedRequestBrowserSession } from './oidc-auth.server';
 import { fetchMasumiApi } from './masumi-api';
 
@@ -98,7 +100,7 @@ export async function loadMasumiCreditsForSession(
   return payload.creditsRemaining;
 }
 
-async function fetchMasumiInboxAgentRegistrationsForSession(params: {
+async function fetchMasumiInboxAgentRegistrationsForSessionRaw(params: {
   session: AuthenticatedRequestBrowserSession;
   take?: number;
   page?: number;
@@ -157,6 +159,59 @@ async function fetchMasumiInboxAgentRegistrationsForSession(params: {
     page,
     take,
     hasNextPage,
+  };
+}
+
+async function refreshPendingMasumiInboxAgentEntriesForSession(params: {
+  session: AuthenticatedRequestBrowserSession;
+  entries: MasumiInboxAgentEntry[];
+}): Promise<MasumiInboxAgentEntry[]> {
+  return Promise.all(
+    params.entries.map(async entry => {
+      if (!isPendingMasumiInboxAgentState(entry.state)) {
+        return entry;
+      }
+
+      const slug = normalizeInboxSlug(entry.agentSlug) ?? entry.agentSlug.trim();
+      if (!slug) {
+        return entry;
+      }
+
+      try {
+        const refreshed = await fetchMasumiInboxAgentRegistrationsForSessionRaw({
+          session: params.session,
+          agentSlug: slug,
+          take: 20,
+          page: 1,
+          filterStatuses: ['Pending', 'Verified'],
+        });
+        return (
+          pickNewestExactInboxAgentMatch({
+            entries: refreshed.agents,
+            slug,
+          }) ?? entry
+        );
+      } catch {
+        return entry;
+      }
+    })
+  );
+}
+
+async function fetchMasumiInboxAgentRegistrationsForSession(params: {
+  session: AuthenticatedRequestBrowserSession;
+  take?: number;
+  page?: number;
+  filterStatuses?: MasumiRegistryInboxAgentStatus[];
+  agentSlug?: string;
+}): Promise<SerializedMasumiInboxAgentSearchResponse> {
+  const result = await fetchMasumiInboxAgentRegistrationsForSessionRaw(params);
+  return {
+    ...result,
+    agents: await refreshPendingMasumiInboxAgentEntriesForSession({
+      session: params.session,
+      entries: result.agents,
+    }),
   };
 }
 
@@ -225,7 +280,10 @@ async function searchMasumiInboxAgentRegistrationsForSession(params: {
   }
 
   return {
-    agents,
+    agents: await refreshPendingMasumiInboxAgentEntriesForSession({
+      session: params.session,
+      entries: agents,
+    }),
     page,
     take,
     hasNextPage,
@@ -261,6 +319,40 @@ export async function listMasumiInboxAgentsForSession(params: {
     ...params,
     filterStatuses: ['Pending', 'Verified'],
   });
+}
+
+export async function lookupMasumiInboxAgentForSession(params: {
+  session: AuthenticatedRequestBrowserSession;
+  slug: string;
+}): Promise<SerializedMasumiInboxAgentSearchResponse> {
+  const slug = normalizeInboxSlug(params.slug);
+  if (!slug) {
+    return {
+      agents: [],
+      page: 1,
+      take: normalizeMasumiDiscoveryTake(undefined),
+      hasNextPage: false,
+    };
+  }
+
+  const result = await fetchMasumiInboxAgentRegistrationsForSession({
+    session: params.session,
+    agentSlug: slug,
+    take: 20,
+    page: 1,
+    filterStatuses: ['Pending', 'Verified'],
+  });
+  const exactMatch = pickNewestExactInboxAgentMatch({
+    entries: result.agents,
+    slug,
+  });
+
+  return {
+    agents: exactMatch ? [exactMatch] : [],
+    page: 1,
+    take: result.take,
+    hasNextPage: false,
+  };
 }
 
 async function discoverInboxAgentBySlug(params: {

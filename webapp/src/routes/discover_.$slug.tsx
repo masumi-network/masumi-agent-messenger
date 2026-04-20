@@ -15,7 +15,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { buildWorkspaceSearch } from '@/lib/app-shell';
 import { buildRouteHead } from '@/lib/seo';
 import {
-  discoverMasumiNetworkAgents,
+  lookupMasumiNetworkAgent,
   type DiscoveredNetworkAgent,
 } from '@/lib/published-actor-search';
 import { useWorkspaceShell } from '@/features/workspace/use-workspace-shell';
@@ -75,15 +75,12 @@ function DiscoveredAgentDetailsPage() {
 
     let cancelled = false;
 
-    void discoverMasumiNetworkAgents({
-      identifier: params.slug,
+    void lookupMasumiNetworkAgent({
+      slug: params.slug,
       session,
-      take: 5,
     })
-      .then(result => {
+      .then(match => {
         if (cancelled) return;
-        const match =
-          result.agents.find(entry => entry.slug === params.slug) ?? null;
         if (!match) {
           setLookupState({
             requestKey: lookupRequestKey,

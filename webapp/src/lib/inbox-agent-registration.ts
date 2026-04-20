@@ -255,6 +255,19 @@ export async function listMasumiInboxAgents(
   return parseFindAgentsResponse(await fetchBrowserRegistrationApi(url));
 }
 
+export async function lookupMasumiInboxAgent(
+  _session: AuthenticatedBrowserSession,
+  params: {
+    slug: string;
+  }
+): Promise<SerializedMasumiInboxAgentSearchResponse> {
+  const url = new URL('/api/masumi/inbox-agent/find-agents', window.location.origin);
+  url.searchParams.set('mode', 'lookup');
+  url.searchParams.set('search', params.slug.trim());
+
+  return parseFindAgentsResponse(await fetchBrowserRegistrationApi(url));
+}
+
 export async function syncBrowserInboxAgentRegistration(params: {
   session: AuthenticatedBrowserSession;
   actor: Agent;

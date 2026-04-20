@@ -11,6 +11,7 @@ import {
   applyRegistrationMetadataToActor,
   findMasumiInboxAgents,
   listMasumiInboxAgents,
+  lookupMasumiInboxAgentBySlug,
   syncMasumiInboxAgentRegistration,
 } from './masumi-inbox-agent';
 
@@ -348,6 +349,26 @@ describe('findMasumiInboxAgents', () => {
             ],
           },
         })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          status: 'success',
+          data: {
+            registrations: [
+              {
+                id: 'lisa-kuepers',
+                name: 'Lisa Kuepers',
+                description: null,
+                agentSlug: 'lisa-kuepers',
+                status: 'Verified',
+                createdAt: '2026-04-14T00:00:00.000Z',
+                updatedAt: '2026-04-14T00:05:00.000Z',
+                statusUpdatedAt: '2026-04-14T00:05:00.000Z',
+                agentIdentifier: 'did:masumi:lisa',
+              },
+            ],
+          },
+        })
       ) as typeof fetch;
 
     const result = await findMasumiInboxAgents({
@@ -364,6 +385,7 @@ describe('findMasumiInboxAgents', () => {
     });
 
     expect(result.map(entry => entry.agentSlug)).toEqual(['lisa-kuepers']);
+    expect(result[0]?.state).toBe('RegistrationConfirmed');
     const calls = vi.mocked(global.fetch).mock.calls;
     expect(String(calls[1]?.[0])).toBe(
       `https://issuer.example.com/registry/api/v1/inbox-agent-registration?network=${configuredNetwork}`
@@ -373,6 +395,18 @@ describe('findMasumiInboxAgents', () => {
         body: JSON.stringify({
           network: configuredNetwork,
           limit: 10,
+          filter: {
+            agentSlug: 'lisa-kuepers',
+            status: ['Pending', 'Verified'],
+          },
+        }),
+      })
+    );
+    expect(calls[2]?.[1]).toEqual(
+      expect.objectContaining({
+        body: JSON.stringify({
+          network: configuredNetwork,
+          limit: 20,
           filter: {
             agentSlug: 'lisa-kuepers',
             status: ['Pending', 'Verified'],
@@ -421,6 +455,27 @@ describe('findMasumiInboxAgents', () => {
             ],
           },
         })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          status: 'success',
+          data: {
+            registrations: [
+              {
+                id: 'elena',
+                name: 'Elena',
+                description: null,
+                agentSlug: 'elena-serviceplan-agents-com',
+                linkedEmail: 'elena@serviceplan-agents.com',
+                status: 'Verified',
+                createdAt: '2026-04-14T00:00:00.000Z',
+                updatedAt: '2026-04-14T00:05:00.000Z',
+                statusUpdatedAt: '2026-04-14T00:05:00.000Z',
+                agentIdentifier: 'did:masumi:elena',
+              },
+            ],
+          },
+        })
       ) as typeof fetch;
 
     const result = await findMasumiInboxAgents({
@@ -437,7 +492,8 @@ describe('findMasumiInboxAgents', () => {
     });
 
     expect(result.map(entry => entry.agentSlug)).toEqual(['elena-serviceplan-agents-com']);
-    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(3);
+    expect(result[0]?.state).toBe('RegistrationConfirmed');
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(4);
   });
 });
 
@@ -544,6 +600,125 @@ describe('listMasumiInboxAgents', () => {
       })
     );
     expect(calls).toHaveLength(2);
+  });
+
+  it('refreshes pending browse entries with exact slug lookups before returning', async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          status: 'success',
+          data: {
+            registrations: [
+              {
+                id: 'pending-agent',
+                name: 'Pending Agent',
+                description: null,
+                agentSlug: 'pending-agent',
+                status: 'Pending',
+                createdAt: '2026-04-14T00:00:00.000Z',
+                updatedAt: '2026-04-14T00:00:00.000Z',
+                statusUpdatedAt: '2026-04-14T00:00:00.000Z',
+                agentIdentifier: 'did:masumi:pending-agent',
+              },
+            ],
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          status: 'success',
+          data: {
+            registrations: [
+              {
+                id: 'pending-agent',
+                name: 'Pending Agent',
+                description: null,
+                agentSlug: 'pending-agent',
+                status: 'Verified',
+                createdAt: '2026-04-14T00:00:00.000Z',
+                updatedAt: '2026-04-14T00:05:00.000Z',
+                statusUpdatedAt: '2026-04-14T00:05:00.000Z',
+                agentIdentifier: 'did:masumi:pending-agent',
+              },
+            ],
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await listMasumiInboxAgents({
+      issuer: 'https://issuer.example.com',
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      take: 10,
+      allowPending: true,
+    });
+
+    expect(result.agents[0]?.state).toBe('RegistrationConfirmed');
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(2);
+  });
+
+  it('uses exact slug lookup and refreshes pending entries for direct lookup', async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          status: 'success',
+          data: {
+            registrations: [
+              {
+                id: 'direct-agent',
+                name: 'Direct Agent',
+                description: null,
+                agentSlug: 'direct-agent',
+                status: 'Pending',
+                createdAt: '2026-04-14T00:00:00.000Z',
+                updatedAt: '2026-04-14T00:00:00.000Z',
+                statusUpdatedAt: '2026-04-14T00:00:00.000Z',
+                agentIdentifier: 'did:masumi:direct-agent',
+              },
+            ],
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          status: 'success',
+          data: {
+            registrations: [
+              {
+                id: 'direct-agent',
+                name: 'Direct Agent',
+                description: null,
+                agentSlug: 'direct-agent',
+                status: 'Verified',
+                createdAt: '2026-04-14T00:00:00.000Z',
+                updatedAt: '2026-04-14T00:05:00.000Z',
+                statusUpdatedAt: '2026-04-14T00:05:00.000Z',
+                agentIdentifier: 'did:masumi:direct-agent',
+              },
+            ],
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await lookupMasumiInboxAgentBySlug({
+      issuer: 'https://issuer.example.com',
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      slug: 'direct-agent',
+    });
+
+    expect(result?.state).toBe('RegistrationConfirmed');
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(2);
   });
 });
 

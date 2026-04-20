@@ -65,6 +65,7 @@ import {
   STANDARD_MESSAGE_CONTENT_TYPES,
   STANDARD_MESSAGE_HEADER_NAMES,
 } from '../../../shared/message-format';
+import type { Agent } from '@/module_bindings/types';
 
 export const Route = createFileRoute('/agents')({
   head: () =>
@@ -78,6 +79,12 @@ export const Route = createFileRoute('/agents')({
 });
 
 type ManagedAgentDetailsTab = 'profile' | 'registration';
+
+type RefreshedOwnedAgentRegistration = {
+  sourceSyncKey: string | null;
+  actor: Agent;
+  registration: MasumiRegistrationResult;
+};
 
 function AgentsPage() {
   const navigate = useNavigate();
@@ -105,6 +112,12 @@ function AgentsPage() {
   const [publicDescriptionBusy, setPublicDescriptionBusy] = useState(false);
   const [managedAgentRegistration, setManagedAgentRegistration] =
     useState<MasumiRegistrationResult>(createEmptyMasumiRegistrationResult());
+  const [refreshedRegistrationByActorId, setRefreshedRegistrationByActorId] =
+    useState<Record<string, RefreshedOwnedAgentRegistration>>({});
+  const [completedOwnedAgentRegistrationRefreshKey, setCompletedOwnedAgentRegistrationRefreshKey] =
+    useState<string | null>(null);
+  const [ownedAgentRegistrationRefreshBusy, setOwnedAgentRegistrationRefreshBusy] =
+    useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -131,9 +144,49 @@ function AgentsPage() {
   );
   const existingDefaultActor =
     workspace.status === 'ready' ? workspace.existingDefaultActor : null;
-  const ownedAgentEntries = useMemo(
+  const subscribedOwnedAgentEntries = useMemo(
     () => (workspace.status === 'ready' ? workspace.ownedInboxAgents : []),
     [workspace]
+  );
+  const ownedAgentRegistrationRefreshTargets = useMemo(
+    () => subscribedOwnedAgentEntries,
+    [subscribedOwnedAgentEntries]
+  );
+  const ownedAgentRegistrationRefreshKey = useMemo(
+    () =>
+      ownedAgentRegistrationRefreshTargets
+        .map(entry => buildMasumiRegistrationSyncKey(entry.actor) ?? '')
+        .join('\n'),
+    [ownedAgentRegistrationRefreshTargets]
+  );
+  const ownedAgentRegistrationRefreshTargetIds = useMemo(
+    () =>
+      new Set(
+        ownedAgentRegistrationRefreshTargets.map(entry => entry.actor.id.toString())
+      ),
+    [ownedAgentRegistrationRefreshTargets]
+  );
+  const ownedAgentEntries = useMemo(
+    () =>
+      subscribedOwnedAgentEntries.map(entry => {
+        const actorId = entry.actor.id.toString();
+        const sourceSyncKey = buildMasumiRegistrationSyncKey(entry.actor);
+        const refreshed = refreshedRegistrationByActorId[actorId];
+        const actor =
+          refreshed && refreshed.sourceSyncKey === sourceSyncKey
+            ? refreshed.actor
+            : entry.actor;
+        const registration = registrationResultFromMetadata(
+          readActorRegistrationMetadata(actor)
+        );
+        return {
+          ...entry,
+          actor,
+          managed: readActorRegistrationMetadata(actor) !== null,
+          registered: registration.status === 'registered',
+        };
+      }),
+    [refreshedRegistrationByActorId, subscribedOwnedAgentEntries]
   );
   const ownedAgents = useMemo(
     () => ownedAgentEntries.map(entry => entry.actor),
@@ -228,55 +281,107 @@ function AgentsPage() {
     if (inboxAgentBusy) {
       return;
     }
-    if (!session || !selectedOwnedAgent) {
+
+    return deferEffectStateUpdate(() => {
+      setManagedAgentRegistration(
+        selectedOwnedAgent
+          ? selectedOwnedAgentRegistrationBase
+          : createEmptyMasumiRegistrationResult()
+      );
+    });
+  }, [
+    inboxAgentBusy,
+    selectedOwnedAgent,
+    selectedOwnedAgentRegistrationBase,
+    selectedOwnedAgentRegistrationSyncKey,
+  ]);
+
+  useEffect(() => {
+    if (inboxAgentBusy) {
+      return;
+    }
+
+    if (!session || ownedAgentRegistrationRefreshTargets.length === 0) {
       return deferEffectStateUpdate(() => {
-        setManagedAgentRegistration(createEmptyMasumiRegistrationResult());
+        setOwnedAgentRegistrationRefreshBusy(false);
+        setCompletedOwnedAgentRegistrationRefreshKey(
+          ownedAgentRegistrationRefreshKey || ''
+        );
       });
     }
 
     let cancelled = false;
     deferEffectStateUpdate(() => {
       if (!cancelled) {
-        setManagedAgentRegistration(selectedOwnedAgentRegistrationBase);
+        setOwnedAgentRegistrationRefreshBusy(true);
+        setCompletedOwnedAgentRegistrationRefreshKey(null);
       }
     });
 
-    void syncBrowserInboxAgentRegistration({
-      session,
-      actor: selectedOwnedAgent,
-      persistRegistration: async payload => {
-        await Promise.resolve(upsertMasumiInboxAgentRegistrationReducer(payload));
-      },
-    })
-      .then(result => {
-        if (!cancelled) {
-          setManagedAgentRegistration(result.registration);
-        }
-      })
-      .catch(syncError => {
-        if (!cancelled) {
-          setManagedAgentRegistration({
-            ...selectedOwnedAgentRegistrationBase,
-            status:
-              selectedOwnedAgentRegistrationBase.status !== 'skipped'
-                ? selectedOwnedAgentRegistrationBase.status
-                : 'service_unavailable',
-            error:
-              syncError instanceof Error
-                ? syncError.message
-                : 'Unable to sync managed agent status right now.',
+    void (async () => {
+      const nextRefreshed: Record<string, RefreshedOwnedAgentRegistration> = {};
+
+      for (const entry of ownedAgentRegistrationRefreshTargets) {
+        const actor = entry.actor;
+        const actorId = actor.id.toString();
+        const sourceSyncKey = buildMasumiRegistrationSyncKey(actor);
+        const baseRegistration = registrationResultFromMetadata(
+          readActorRegistrationMetadata(actor)
+        );
+
+        try {
+          const result = await syncBrowserInboxAgentRegistration({
+            session,
+            actor,
+            persistRegistration: async payload => {
+              await Promise.resolve(upsertMasumiInboxAgentRegistrationReducer(payload));
+            },
           });
+          nextRefreshed[actorId] = {
+            sourceSyncKey,
+            actor: result.actor,
+            registration: result.registration,
+          };
+        } catch (syncError) {
+          nextRefreshed[actorId] = {
+            sourceSyncKey,
+            actor,
+            registration: {
+              ...baseRegistration,
+              status:
+                baseRegistration.status !== 'skipped'
+                  ? baseRegistration.status
+                  : 'service_unavailable',
+              error:
+                syncError instanceof Error
+                  ? syncError.message
+                  : 'Unable to sync managed agent status right now.',
+            },
+          };
         }
-      });
+      }
+
+      if (cancelled) {
+        return;
+      }
+
+      setRefreshedRegistrationByActorId(current => ({
+        ...current,
+        ...nextRefreshed,
+      }));
+      setCompletedOwnedAgentRegistrationRefreshKey(
+        ownedAgentRegistrationRefreshKey
+      );
+      setOwnedAgentRegistrationRefreshBusy(false);
+    })();
 
     return () => {
       cancelled = true;
     };
   }, [
     inboxAgentBusy,
-    selectedOwnedAgent,
-    selectedOwnedAgentRegistrationBase,
-    selectedOwnedAgentRegistrationSyncKey,
+    ownedAgentRegistrationRefreshKey,
+    ownedAgentRegistrationRefreshTargets,
     session,
     upsertMasumiInboxAgentRegistrationReducer,
   ]);
@@ -399,6 +504,14 @@ function AgentsPage() {
           await Promise.resolve(upsertMasumiInboxAgentRegistrationReducer(payload));
         },
       });
+      setRefreshedRegistrationByActorId(current => ({
+        ...current,
+        [selectedOwnedAgent.id.toString()]: {
+          sourceSyncKey: buildMasumiRegistrationSyncKey(selectedOwnedAgent),
+          actor: result.actor,
+          registration: result.registration,
+        },
+      }));
       setManagedAgentRegistration(result.registration);
       if (result.registration.status === 'registered') {
         setFeedback('Registration is confirmed on the Masumi network.');
@@ -659,26 +772,35 @@ function AgentsPage() {
                 const rowRegistration = registrationResultFromMetadata(
                   readActorRegistrationMetadata(actor)
                 );
+                const rowRegistrationRefreshPending =
+                  ownedAgentRegistrationRefreshBusy &&
+                  ownedAgentRegistrationRefreshTargetIds.has(actor.id.toString()) &&
+                  completedOwnedAgentRegistrationRefreshKey !==
+                    ownedAgentRegistrationRefreshKey;
                 const rowIsRegistered = rowRegistration.status === 'registered';
                 const rowIsPending = rowRegistration.status === 'pending';
                 const rowHasError =
                   rowRegistration.status === 'failed' ||
                   rowRegistration.status === 'service_unavailable' ||
                   rowRegistration.status === 'scope_missing';
-                const statusLabel = rowIsRegistered
-                  ? 'Registered'
-                  : rowIsPending
-                    ? 'Pending'
-                    : rowHasError
-                      ? 'Error'
-                      : 'Unregistered';
-                const statusClass = rowIsRegistered
-                  ? 'bg-emerald-500/10 text-emerald-500 ring-emerald-500/30'
-                  : rowIsPending
-                    ? 'bg-sky-500/10 text-sky-500 ring-sky-500/30'
-                    : rowHasError
-                      ? 'bg-rose-500/10 text-rose-500 ring-rose-500/30'
-                      : 'bg-amber-500/10 text-amber-500 ring-amber-500/30';
+                const statusLabel = rowRegistrationRefreshPending
+                  ? 'Refreshing'
+                  : rowIsRegistered
+                    ? 'Registered'
+                    : rowIsPending
+                      ? 'Pending'
+                      : rowHasError
+                        ? 'Error'
+                        : 'Unregistered';
+                const statusClass = rowRegistrationRefreshPending
+                  ? 'bg-muted text-muted-foreground ring-border'
+                  : rowIsRegistered
+                    ? 'bg-emerald-500/10 text-emerald-500 ring-emerald-500/30'
+                    : rowIsPending
+                      ? 'bg-sky-500/10 text-sky-500 ring-sky-500/30'
+                      : rowHasError
+                        ? 'bg-rose-500/10 text-rose-500 ring-rose-500/30'
+                        : 'bg-amber-500/10 text-amber-500 ring-amber-500/30';
 
                 return (
                   <div
@@ -733,7 +855,9 @@ function AgentsPage() {
                             <span
                               className={cn(
                                 'h-1.5 w-1.5 rounded-full',
-                                rowIsRegistered
+                                rowRegistrationRefreshPending
+                                  ? 'bg-muted-foreground'
+                                  : rowIsRegistered
                                   ? 'bg-emerald-500'
                                   : rowHasError
                                     ? 'bg-rose-500'

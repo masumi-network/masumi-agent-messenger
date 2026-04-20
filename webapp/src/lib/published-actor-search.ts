@@ -2,6 +2,7 @@ import type { AuthenticatedBrowserSession } from './auth-session';
 import {
   findMasumiInboxAgents,
   listMasumiInboxAgents,
+  lookupMasumiInboxAgent,
 } from './inbox-agent-registration';
 import type { DbConnection } from '@/module_bindings';
 import { normalizeInboxSlug } from '../../../shared/inbox-slug';
@@ -76,6 +77,16 @@ function dedupeMasumiAgentsBySlug(entries: MasumiInboxAgentEntry[]): MasumiInbox
   return deduped;
 }
 
+function toDiscoveredNetworkAgent(entry: MasumiInboxAgentEntry): DiscoveredNetworkAgent {
+  return {
+    slug: normalizeInboxSlug(entry.agentSlug) ?? entry.agentSlug.trim(),
+    displayName: entry.name ?? null,
+    description: entry.description ?? null,
+    agentIdentifier: entry.agentIdentifier ?? null,
+    linkedEmail: extractEmailFromResult(entry),
+  };
+}
+
 export async function discoverMasumiNetworkAgents(params: {
   identifier?: string;
   session: AuthenticatedBrowserSession;
@@ -96,15 +107,7 @@ export async function discoverMasumiNetworkAgents(params: {
       });
   const remoteMatches = dedupeMasumiAgentsBySlug(result.agents);
 
-  const agents = await Promise.all(
-    remoteMatches.map(async entry => ({
-      slug: normalizeInboxSlug(entry.agentSlug) ?? entry.agentSlug.trim(),
-      displayName: entry.name ?? null,
-      description: entry.description ?? null,
-      agentIdentifier: entry.agentIdentifier ?? null,
-      linkedEmail: extractEmailFromResult(entry),
-    }))
-  );
+  const agents = remoteMatches.map(toDiscoveredNetworkAgent);
 
   return {
     agents,
@@ -114,6 +117,17 @@ export async function discoverMasumiNetworkAgents(params: {
     mode,
     query: identifier || null,
   };
+}
+
+export async function lookupMasumiNetworkAgent(params: {
+  slug: string;
+  session: AuthenticatedBrowserSession;
+}): Promise<DiscoveredNetworkAgent | null> {
+  const result = await lookupMasumiInboxAgent(params.session, {
+    slug: params.slug,
+  });
+  const entry = result.agents[0] ?? null;
+  return entry ? toDiscoveredNetworkAgent(entry) : null;
 }
 
 export async function resolvePublishedActorsForIdentifier(params: {

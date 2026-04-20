@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  listMasumiInboxAgentsForSession,
+  lookupMasumiInboxAgentForSession,
   prioritizeVerifiedMasumiInboxAgents,
   syncMasumiInboxAgentRegistrationForSession,
 } from '@/lib/inbox-agent-registration.server';
@@ -12,6 +14,24 @@ import {
 const originalFetch = global.fetch;
 const originalMasumiNetwork = process.env.MASUMI_NETWORK;
 const configuredNetwork = getMasumiInboxAgentNetwork();
+
+function testSession() {
+  return {
+    authenticated: true,
+    idToken: 'id-token',
+    accessToken: 'access-token',
+    grantedScopes: ['openid', 'profile', 'email'],
+    expiresAt: '2026-04-16T00:00:00.000Z',
+    user: {
+      issuer: 'https://issuer.example.com',
+      subject: 'user-123',
+      audience: ['masumi-agent-messenger'],
+      email: 'agent@example.com',
+      emailVerified: true,
+      name: 'Verified Agent',
+    },
+  } as const;
+}
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -84,6 +104,123 @@ describe('Masumi inbox-agent discovery ordering', () => {
     });
 
     expect(ordered).toEqual([]);
+  });
+
+  it('refreshes pending browse entries before returning them', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          status: 'success',
+          data: {
+            registrations: [
+              {
+                id: 'pending-agent',
+                name: 'Pending Agent',
+                description: null,
+                agentSlug: 'pending-agent',
+                linkedEmail: null,
+                status: 'Pending',
+                createdAt: '2026-04-15T10:00:00.000Z',
+                updatedAt: '2026-04-15T10:00:00.000Z',
+                statusUpdatedAt: '2026-04-15T10:00:00.000Z',
+                agentIdentifier: 'did:masumi:pending-agent',
+              },
+            ],
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          status: 'success',
+          data: {
+            registrations: [
+              {
+                id: 'pending-agent',
+                name: 'Pending Agent',
+                description: null,
+                agentSlug: 'pending-agent',
+                linkedEmail: null,
+                status: 'Verified',
+                createdAt: '2026-04-15T10:00:00.000Z',
+                updatedAt: '2026-04-15T10:05:00.000Z',
+                statusUpdatedAt: '2026-04-15T10:05:00.000Z',
+                agentIdentifier: 'did:masumi:pending-agent',
+              },
+            ],
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await listMasumiInboxAgentsForSession({
+      session: testSession(),
+      take: 20,
+      page: 1,
+    });
+
+    expect(result.agents[0]?.state).toBe('RegistrationConfirmed');
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(2);
+  });
+
+  it('refreshes pending exact SaaS slug lookup before returning it', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          status: 'success',
+          data: {
+            registrations: [
+              {
+                id: 'direct-agent',
+                name: 'Direct Agent',
+                description: null,
+                agentSlug: 'direct-agent',
+                linkedEmail: null,
+                status: 'Pending',
+                createdAt: '2026-04-15T10:00:00.000Z',
+                updatedAt: '2026-04-15T10:00:00.000Z',
+                statusUpdatedAt: '2026-04-15T10:00:00.000Z',
+                agentIdentifier: 'did:masumi:direct-agent',
+              },
+            ],
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          status: 'success',
+          data: {
+            registrations: [
+              {
+                id: 'direct-agent',
+                name: 'Direct Agent',
+                description: null,
+                agentSlug: 'direct-agent',
+                linkedEmail: null,
+                status: 'Verified',
+                createdAt: '2026-04-15T10:00:00.000Z',
+                updatedAt: '2026-04-15T10:05:00.000Z',
+                statusUpdatedAt: '2026-04-15T10:05:00.000Z',
+                agentIdentifier: 'did:masumi:direct-agent',
+              },
+            ],
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await lookupMasumiInboxAgentForSession({
+      session: testSession(),
+      slug: 'direct-agent',
+    });
+
+    expect(result.agents).toHaveLength(1);
+    expect(result.agents[0]?.state).toBe('RegistrationConfirmed');
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toBe(
+      `https://issuer.example.com/registry/api/v1/inbox-agent-registration?network=${configuredNetwork}`
+    );
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(2);
   });
 
   it('refreshes stale pending registration state from the registry', async () => {

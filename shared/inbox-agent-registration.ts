@@ -334,6 +334,12 @@ export function masumiRegistrationOutcomeFromState(
   }
 }
 
+export function isPendingMasumiInboxAgentState(
+  state: MasumiInboxAgentState | null | undefined
+): boolean {
+  return masumiRegistrationOutcomeFromState(state) === 'pending';
+}
+
 export function fromMasumiRegistryInboxAgentRecord(
   record: MasumiRegistryInboxAgentRecord
 ): MasumiInboxAgentEntry {

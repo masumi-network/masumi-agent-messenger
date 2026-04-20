@@ -17,6 +17,7 @@ import {
   parseMasumiPayInboxAgentEntry,
   isMasumiInboxAgentState,
   isNonDeregisteredInboxAgentState,
+  isPendingMasumiInboxAgentState,
   isMissingRequiredScopeMessage,
   getMasumiInboxAgentNetwork,
   type MasumiInboxAgentNetwork,
@@ -193,7 +194,7 @@ async function fetchCredits(params: {
   return payload.creditsRemaining;
 }
 
-async function fetchMasumiInboxAgentRegistrations(
+async function fetchMasumiInboxAgentRegistrationsRaw(
   params: PaginatedInboxAgentParams
 ): Promise<SerializedMasumiInboxAgentSearchResponse> {
   if (!hasMasumiAccessToken(params.session)) {
@@ -252,6 +253,58 @@ async function fetchMasumiInboxAgentRegistrations(
     page,
     take,
     hasNextPage,
+  };
+}
+
+async function refreshPendingMasumiInboxAgentEntries(params: {
+  issuer: string;
+  session: StoredOidcSession;
+  entries: MasumiInboxAgentEntry[];
+}): Promise<MasumiInboxAgentEntry[]> {
+  return Promise.all(
+    params.entries.map(async entry => {
+      if (!isPendingMasumiInboxAgentState(entry.state)) {
+        return entry;
+      }
+
+      const slug = normalizeInboxSlug(entry.agentSlug) ?? entry.agentSlug.trim();
+      if (!slug) {
+        return entry;
+      }
+
+      try {
+        const refreshed = await fetchMasumiInboxAgentRegistrationsRaw({
+          issuer: params.issuer,
+          session: params.session,
+          agentSlug: slug,
+          take: 20,
+          page: 1,
+          filterStatuses: ['Pending', 'Verified'],
+        });
+        return (
+          pickNewestExactInboxAgentMatch({
+            entries: refreshed.agents,
+            slug,
+          }) ?? entry
+        );
+      } catch {
+        return entry;
+      }
+    })
+  );
+}
+
+async function fetchMasumiInboxAgentRegistrations(
+  params: PaginatedInboxAgentParams
+): Promise<SerializedMasumiInboxAgentSearchResponse> {
+  const result = await fetchMasumiInboxAgentRegistrationsRaw(params);
+  return {
+    ...result,
+    agents: await refreshPendingMasumiInboxAgentEntries({
+      issuer: params.issuer,
+      session: params.session,
+      entries: result.agents,
+    }),
   };
 }
 
@@ -371,6 +424,31 @@ export async function listMasumiInboxAgents(params: {
   return fetchMasumiInboxAgentRegistrations({
     ...params,
     filterStatuses: discoveryStatuses(params),
+  });
+}
+
+export async function lookupMasumiInboxAgentBySlug(params: {
+  issuer: string;
+  session: StoredOidcSession;
+  slug: string;
+  allowPending?: boolean;
+}): Promise<MasumiInboxAgentEntry | null> {
+  const normalizedSlug = normalizeInboxSlug(params.slug);
+  if (!normalizedSlug) {
+    return null;
+  }
+
+  const entries = await fetchMasumiInboxAgentRegistrations({
+    issuer: params.issuer,
+    session: params.session,
+    agentSlug: normalizedSlug,
+    take: 20,
+    page: 1,
+    filterStatuses: ['Pending', 'Verified'],
+  });
+  return pickNewestExactInboxAgentMatch({
+    entries: entries.agents,
+    slug: normalizedSlug,
   });
 }
 

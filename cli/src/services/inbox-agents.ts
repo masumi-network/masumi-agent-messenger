@@ -1,8 +1,18 @@
 import { normalizeEmail } from '../../../shared/inbox-slug';
+import {
+  isMasumiInboxAgentState,
+  registrationResultFromMetadata,
+  type MasumiActorRegistrationMetadata,
+  type MasumiRegistrationResult,
+} from '../../../shared/inbox-agent-registration';
 import type { VisibleAgentRow } from '../../../webapp/src/module_bindings/types';
 import { ensureAuthenticatedSession } from './auth';
 import type { TaskReporter } from './command-runtime';
 import { connectivityError, isCliError, userError } from './errors';
+import {
+  applyRegistrationMetadataToActor,
+  syncMasumiInboxAgentRegistration,
+} from './masumi-inbox-agent';
 import {
   connectAuthenticated,
   disconnectConnection,
@@ -18,6 +28,7 @@ export type OwnedInboxAgent = {
   managed: boolean;
   agentIdentifier: string | null;
   registrationState: string | null;
+  registration: MasumiRegistrationResult;
 };
 
 export type OwnedInboxAgentsResult = {
@@ -28,17 +39,33 @@ export type OwnedInboxAgentsResult = {
   agents: OwnedInboxAgent[];
 };
 
-function sortOwnedAgents(left: OwnedInboxAgent, right: OwnedInboxAgent): number {
+function sortOwnedAgentRows(left: VisibleAgentRow, right: VisibleAgentRow): number {
   if (left.isDefault !== right.isDefault) {
     return left.isDefault ? -1 : 1;
   }
   return left.slug.localeCompare(right.slug);
 }
 
-export function buildOwnedInboxAgents(
+function readActorRegistrationMetadata(
+  actor: VisibleAgentRow
+): MasumiActorRegistrationMetadata | null {
+  const metadata: MasumiActorRegistrationMetadata = {
+    masumiRegistrationNetwork: actor.masumiRegistrationNetwork ?? undefined,
+    masumiInboxAgentId: actor.masumiInboxAgentId ?? undefined,
+    masumiAgentIdentifier: actor.masumiAgentIdentifier ?? undefined,
+    masumiRegistrationState:
+      actor.masumiRegistrationState && isMasumiInboxAgentState(actor.masumiRegistrationState)
+        ? actor.masumiRegistrationState
+        : undefined,
+  };
+
+  return Object.values(metadata).some(value => value !== undefined) ? metadata : null;
+}
+
+function selectOwnedActorRows(
   actors: VisibleAgentRow[],
   normalizedEmail: string
-): OwnedInboxAgent[] {
+): VisibleAgentRow[] {
   const defaultActor = actors.find(
     actor => actor.normalizedEmail === normalizedEmail && actor.isDefault
   );
@@ -50,16 +77,29 @@ export function buildOwnedInboxAgents(
         ? actor.inboxId === ownInboxId
         : actor.normalizedEmail === normalizedEmail
     )
-    .map(actor => ({
-      slug: actor.slug,
-      displayName: actor.displayName ?? null,
-      publicIdentity: actor.publicIdentity,
-      isDefault: actor.isDefault,
-      managed: Boolean(actor.masumiAgentIdentifier || actor.masumiInboxAgentId),
-      agentIdentifier: actor.masumiAgentIdentifier ?? null,
-      registrationState: actor.masumiRegistrationState ?? null,
-    }))
-    .sort(sortOwnedAgents);
+    .sort(sortOwnedAgentRows);
+}
+
+function toOwnedInboxAgent(actor: VisibleAgentRow): OwnedInboxAgent {
+  const metadata = readActorRegistrationMetadata(actor);
+  const registration = registrationResultFromMetadata(metadata);
+  return {
+    slug: actor.slug,
+    displayName: actor.displayName ?? null,
+    publicIdentity: actor.publicIdentity,
+    isDefault: actor.isDefault,
+    managed: metadata !== null,
+    agentIdentifier: actor.masumiAgentIdentifier ?? null,
+    registrationState: actor.masumiRegistrationState ?? null,
+    registration,
+  };
+}
+
+export function buildOwnedInboxAgents(
+  actors: VisibleAgentRow[],
+  normalizedEmail: string
+): OwnedInboxAgent[] {
+  return selectOwnedActorRows(actors, normalizedEmail).map(toOwnedInboxAgent);
 }
 
 export async function listOwnedInboxAgents(params: {
@@ -88,7 +128,24 @@ export async function listOwnedInboxAgents(params: {
 
     try {
       const { actors } = readInboxRows(conn);
-      const ownedActors = buildOwnedInboxAgents(actors, normalizedEmail);
+      const ownedRows = selectOwnedActorRows(actors, normalizedEmail);
+      const refreshedRows: VisibleAgentRow[] = [];
+
+      for (const actor of ownedRows) {
+        const syncedRegistration = await syncMasumiInboxAgentRegistration({
+          profile,
+          session,
+          conn,
+          actor,
+          reporter: params.reporter,
+          mode: 'skip',
+        });
+        refreshedRows.push(
+          applyRegistrationMetadataToActor(actor, syncedRegistration.metadata)
+        );
+      }
+
+      const ownedActors = refreshedRows.map(toOwnedInboxAgent);
 
       params.reporter.success(
         `Loaded ${ownedActors.length} owned agent${ownedActors.length === 1 ? '' : 's'}`

@@ -59,6 +59,8 @@ describe('workspace route contracts', () => {
   it('offers an encrypted-thread CTA from the discovered agent details page', () => {
     const source = readRoute('src/routes/discover_.$slug.tsx');
 
+    expect(source).toContain('lookupMasumiNetworkAgent');
+    expect(source).not.toContain('discoverMasumiNetworkAgents({');
     expect(source).toContain("to: '/$slug'");
     expect(source).toContain('buildWorkspaceSearch');
     expect(source).toContain('lookup: params.slug');

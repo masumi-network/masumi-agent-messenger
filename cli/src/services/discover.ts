@@ -11,6 +11,7 @@ import { connectivityError, isCliError, userError } from './errors';
 import {
   findMasumiInboxAgents,
   listMasumiInboxAgents,
+  lookupMasumiInboxAgentBySlug,
   searchMasumiInboxAgents,
 } from './masumi-inbox-agent';
 import {
@@ -442,15 +443,26 @@ export async function showDiscoveredAgent(params: {
   const agentSlug = await resolvePreferredAgentSlug(params.profileName, params.actorSlug);
   const { inputKind, normalizedIdentifier } = normalizeDiscoverIdentifier(params.identifier);
   const { profile, session } = await ensureAuthenticatedSession(params);
-  const remoteMatches = dedupeMasumiAgentsBySlug(
-    await findMasumiInboxAgents({
-      issuer: profile.issuer,
-      session,
-      search: normalizedIdentifier,
-      take: 20,
-      allowPending: params.allowPending,
-    })
-  );
+  const exactSlugMatch =
+    inputKind === 'slug'
+      ? await lookupMasumiInboxAgentBySlug({
+          issuer: profile.issuer,
+          session,
+          slug: normalizedIdentifier,
+          allowPending: params.allowPending,
+        })
+      : null;
+  const remoteMatches = exactSlugMatch
+    ? [exactSlugMatch]
+    : dedupeMasumiAgentsBySlug(
+        await findMasumiInboxAgents({
+          issuer: profile.issuer,
+          session,
+          search: normalizedIdentifier,
+          take: 20,
+          allowPending: params.allowPending,
+        })
+      );
 
   if (remoteMatches.length === 0) {
     throw userError(

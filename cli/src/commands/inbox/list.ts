@@ -9,6 +9,7 @@ import {
   cyan,
   dim,
   green,
+  red,
   renderEmptyWithTry,
   renderTable,
   yellow,
@@ -47,6 +48,8 @@ export function registerInboxListCommand(command: Command): void {
             flags: string[];
             unreadTotal: number;
             updatedAt: string;
+            registrationStatus: string;
+            registrationState: string | null;
           }> = [];
 
           for (const agent of agentsResult.agents) {
@@ -79,6 +82,8 @@ export function registerInboxListCommand(command: Command): void {
               flags,
               unreadTotal,
               updatedAt: updatedAtIso,
+              registrationStatus: agent.registration.status,
+              registrationState: agent.registration.registrationState,
             });
           }
 
@@ -118,12 +123,14 @@ export function registerInboxListCommand(command: Command): void {
                   { header: 'Name', key: 'name' },
                   { header: 'Identity', key: 'identity' },
                   { header: 'Flags', key: 'flags' },
+                  { header: 'Agent', key: 'agent' },
                   { header: 'Unread', key: 'unread', align: 'right' },
                   { header: 'Updated', key: 'updated', color: dim },
                 ]
               : [
                   { header: 'Slug', key: 'slug', color: cyan },
                   { header: 'Name', key: 'name' },
+                  { header: 'Agent', key: 'agent' },
                   { header: 'Unread', key: 'unread', align: 'right' },
                   { header: 'Updated', key: 'updated', color: dim },
                 ];
@@ -136,6 +143,18 @@ export function registerInboxListCommand(command: Command): void {
             flags
               .map(flag => badge(flag, FLAG_COLORS[flag] ?? dim))
               .join(' ');
+          const renderRegistrationStatus = (status: string): string => {
+            if (status === 'registered') return badge('registered', green);
+            if (status === 'pending') return badge('pending', yellow);
+            if (
+              status === 'failed' ||
+              status === 'service_unavailable' ||
+              status === 'scope_missing'
+            ) {
+              return badge('error', red);
+            }
+            return badge('unregistered', dim);
+          };
 
           return {
             summary:
@@ -151,6 +170,7 @@ export function registerInboxListCommand(command: Command): void {
                       name: row.name,
                       identity: row.identity,
                       flags: renderFlags(row.flags),
+                      agent: renderRegistrationStatus(row.registrationStatus),
                       unread: row.unreadTotal > 0 ? badge(`${row.unreadTotal} new`, green) : '',
                       updated: row.updatedAt ? formatRelativeTime(row.updatedAt) : '',
                     })),

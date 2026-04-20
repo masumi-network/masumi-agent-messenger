@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router';
 import {
   findMasumiInboxAgentsForSession,
   listMasumiInboxAgentsForSession,
+  lookupMasumiInboxAgentForSession,
 } from '@/lib/inbox-agent-registration.server';
 import { readAuthenticatedBrowserSession } from '@/lib/oidc-auth.server';
 import { appendStandardSecurityHeaders } from '@/lib/security';
@@ -66,10 +67,17 @@ export const Route = createFileRoute('/api/masumi/inbox-agent/find-agents')({
           const search = url.searchParams.get('search')?.trim() ?? '';
           const take = parseTake(url.searchParams.get('take'));
           const page = parsePage(url.searchParams.get('page'));
-          const mode = url.searchParams.get('mode') === 'browse' ? 'browse' : 'search';
+          const rawMode = url.searchParams.get('mode');
+          const mode =
+            rawMode === 'browse' || rawMode === 'lookup' ? rawMode : 'search';
 
           const result =
-            mode === 'browse' || !search
+            mode === 'lookup'
+              ? await lookupMasumiInboxAgentForSession({
+                  session,
+                  slug: search,
+                })
+              : mode === 'browse' || !search
               ? await listMasumiInboxAgentsForSession({
                   session,
                   take,
