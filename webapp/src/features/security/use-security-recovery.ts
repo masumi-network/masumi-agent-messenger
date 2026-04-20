@@ -189,12 +189,27 @@ export function useSecurityRecovery(params: {
           return;
         }
 
-        const nextIssue = await inspectDefaultKeyIssue();
-        if (!claimIsCurrent() || !pendingRequestStillMatches()) {
+        setPendingDeviceRequest(null);
+        setFeedback('Imported private keys from another approved device.');
+
+        let nextIssue: DefaultKeyIssue;
+        try {
+          nextIssue = await inspectDefaultKeyIssue();
+        } catch (keyIssueError) {
+          if (claimIsCurrent()) {
+            setError(
+              keyIssueError instanceof Error
+                ? `Private keys were imported, but the local key status could not be refreshed. ${keyIssueError.message}`
+                : 'Private keys were imported, but the local key status could not be refreshed.'
+            );
+          }
           return;
         }
 
-        setPendingDeviceRequest(null);
+        if (!claimIsCurrent()) {
+          return;
+        }
+
         setDefaultKeyIssue(nextIssue);
         setFeedback(
           nextIssue

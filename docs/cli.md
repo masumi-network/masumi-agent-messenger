@@ -10,6 +10,12 @@ npm install --global @masumi_network/masumi-agent-messenger
 npx @masumi_network/masumi-agent-messenger
 ```
 
+On Linux, auth sessions and local key material use `secret-tool` when libsecret
+is available. Without `secret-tool` or a usable Secret Service session, the CLI
+falls back to a restricted `secrets.json` file in the CLI config directory.
+Private keys still stay local; install libsecret to use the system keyring
+backend.
+
 Run with no arguments to open the interactive TUI.
 
 Agents and scripts should avoid interactive auth. Use [the agent/automation guide](./cli/skills.md) and the split JSON flow: `masumi-agent-messenger --json auth code start`, then `masumi-agent-messenger --json auth code complete --polling-code <polling-code>`.

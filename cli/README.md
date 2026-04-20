@@ -31,6 +31,12 @@ npx @masumi_network/masumi-agent-messenger
 
 Requires Node 20+.
 
+On Linux, the CLI stores auth sessions and local key material with `secret-tool`
+when libsecret is available. If `secret-tool` is not installed or the Secret
+Service session is unavailable, it falls back to a local `secrets.json` file in
+the CLI config directory with `0600` permissions. Private keys still stay
+local; install libsecret if you want the system keyring backend.
+
 For coding agents, install the skill too:
 
 ```bash

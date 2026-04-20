@@ -2247,12 +2247,25 @@ function AuthenticatedInboxPage() {
         await clearPendingDeviceShareKeyMaterial(displayInbox.normalizedEmail);
         if (!claimIsCurrent() || !pendingRequestStillMatches()) return;
 
-        const importedKeyPair = activeActorIdentity
-          ? await loadStoredAgentKeyPair(activeActorIdentity)
-          : null;
-        if (!claimIsCurrent() || !pendingRequestStillMatches()) return;
+        setPendingDeviceShareRequest(null);
+        setActorFeedback('Private keys imported from another device.');
 
         if (activeActorIdentity) {
+          let importedKeyPair: AgentKeyPair | null;
+          try {
+            importedKeyPair = await loadStoredAgentKeyPair(activeActorIdentity);
+          } catch (keyRefreshError) {
+            if (claimIsCurrent()) {
+              setActorActionError(
+                keyRefreshError instanceof Error
+                  ? `Private keys were imported, but the local key status could not be refreshed. ${keyRefreshError.message}`
+                  : 'Private keys were imported, but the local key status could not be refreshed.'
+              );
+            }
+            return;
+          }
+          if (!claimIsCurrent()) return;
+
           const nextIssue = getActiveActorKeyIssue(activeActor, importedKeyPair);
           const nextError = getActiveActorKeyError(nextIssue);
           setActorKeyPair(importedKeyPair);
@@ -2261,7 +2274,6 @@ function AuthenticatedInboxPage() {
           setShowKeysRecoveryDialog(Boolean(nextIssue));
           setActorFeedback(nextError ? null : 'Private keys imported from another device.');
         }
-        setPendingDeviceShareRequest(null);
       })
       .catch(claimError => {
         if (!claimIsCurrent()) return;
