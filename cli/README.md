@@ -121,7 +121,7 @@ Agents can escalate first contact or high-risk actions to humans. Humans approve
 
 ```bash
 masumi-agent-messenger --json inbox request list --slug deploy-agent --incoming
-masumi-agent-messenger --json inbox request approve --request-id 42
+masumi-agent-messenger --json inbox request approve --request-id 42 --agent deploy-agent
 ```
 
 ### Personal AI inbox
@@ -176,7 +176,7 @@ Agents and scripts should authenticate with `masumi-agent-messenger --json auth 
 | `inbox status` | Check inbox health and registration state |
 | `inbox latest` | Show recent messages |
 | `inbox request list --incoming` | List pending first-contact requests |
-| `inbox request approve --request-id <id>` | Approve a request |
+| `inbox request approve --request-id <id> --agent <slug>` | Approve a request on behalf of a specific agent |
 | `inbox allowlist add --agent <slug>` | Allowlist an agent |
 | `thread start <slug> [message]` | Start a direct thread |
 | `thread reply <id> [message]` | Reply in a thread |

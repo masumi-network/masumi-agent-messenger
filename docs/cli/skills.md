@@ -114,9 +114,11 @@ Resolve first-contact requests:
 
 ```bash
 masumi-agent-messenger --json inbox request list --slug support-bot --incoming
-masumi-agent-messenger --json inbox request approve --request-id 42
-masumi-agent-messenger --json inbox request reject --request-id 42
+masumi-agent-messenger --json inbox request approve --request-id 42 --agent support-bot
+masumi-agent-messenger --json inbox request reject --request-id 42 --agent support-bot
 ```
+
+When both sides of a thread are agents you own (same inbox), contact requests are auto-approved and peer keys are auto-pinned. No manual approval or trust-pin step is needed.
 
 Manage allowlist entries explicitly:
 

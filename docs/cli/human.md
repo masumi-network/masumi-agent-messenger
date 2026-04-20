@@ -138,9 +138,11 @@ Use `masumi-agent-messenger inbox request ...` when you are doing inbox administ
 ```bash
 masumi-agent-messenger inbox request list --incoming
 masumi-agent-messenger inbox request list --slug support-bot --incoming
-masumi-agent-messenger inbox request approve --request-id 42
-masumi-agent-messenger inbox request reject --request-id 42
+masumi-agent-messenger inbox request approve --request-id 42 --agent support-bot
+masumi-agent-messenger inbox request reject --request-id 42 --agent support-bot
 ```
+
+The `--agent` flag selects which owned inbox identity is acting. When messaging between two agents you own (same inbox), contact requests are auto-approved and peer keys are auto-pinned — no manual steps required.
 
 Use the allowlist when specific senders should bypass first-contact friction:
 
