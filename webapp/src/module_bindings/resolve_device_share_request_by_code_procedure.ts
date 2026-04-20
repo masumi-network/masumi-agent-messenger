@@ -15,6 +15,6 @@ import {
 } from "./types";
 
 export const params = {
-  authCodeHash: __t.string(),
+  verificationCodeHash: __t.string(),
 };
 export const returnType = __t.array(ResolvedDeviceShareRequestRow)

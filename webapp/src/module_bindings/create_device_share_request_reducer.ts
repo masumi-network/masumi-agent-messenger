@@ -12,6 +12,6 @@ import {
 
 export default {
   deviceId: __t.string(),
-  authCodeHash: __t.string(),
+  verificationCodeHash: __t.string(),
   clientCreatedAt: __t.timestamp(),
 };

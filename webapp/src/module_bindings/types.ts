@@ -185,7 +185,7 @@ export const DeviceShareRequest = __t.object("DeviceShareRequest", {
   id: __t.u64(),
   deviceId: __t.string(),
   inboxId: __t.u64(),
-  authCodeHash: __t.string(),
+  verificationCodeHash: __t.string(),
   clientCreatedAt: __t.timestamp(),
   expiresAt: __t.timestamp(),
   createdAt: __t.timestamp(),

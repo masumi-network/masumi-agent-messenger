@@ -30,14 +30,14 @@ export type LocalDeviceShareRequest = {
   clientCreatedAt: Date;
   verificationCode: string;
   parsedCode: ParsedDeviceVerificationCode;
-  authCodeHash: string;
+  verificationCodeHash: string;
   expiresAt: Date;
 };
 
 export type DeviceShareRequestLookupConnection = {
   procedures: {
     resolveDeviceShareRequestByCode(params: {
-      authCodeHash: string;
+      verificationCodeHash: string;
     }): Promise<
       Array<{
         requestId: bigint;
@@ -86,7 +86,7 @@ export async function prepareLocalDeviceShareRequest(
     clientCreatedAt,
   });
   const parsedCode = parseDeviceVerificationCode(verificationCode);
-  const authCodeHash = await hashDeviceVerificationCode(verificationCode);
+  const verificationCodeHash = await hashDeviceVerificationCode(verificationCode);
   const expiresAt = deviceShareRequestExpiresAt(clientCreatedAt);
 
   return {
@@ -94,7 +94,7 @@ export async function prepareLocalDeviceShareRequest(
     clientCreatedAt,
     verificationCode,
     parsedCode,
-    authCodeHash,
+    verificationCodeHash,
     expiresAt,
   };
 }
@@ -104,9 +104,9 @@ export async function resolveVerifiedDeviceShareRequest(params: {
   verificationCode: string;
 }): Promise<VerifiedDeviceShareRequest> {
   const parsedCode = parseDeviceVerificationCode(params.verificationCode);
-  const authCodeHash = await hashDeviceVerificationCode(params.verificationCode);
+  const verificationCodeHash = await hashDeviceVerificationCode(params.verificationCode);
   const requestRows = await params.liveConnection.procedures.resolveDeviceShareRequestByCode({
-    authCodeHash,
+    verificationCodeHash,
   });
   const request = requestRows[0];
   if (!request) {

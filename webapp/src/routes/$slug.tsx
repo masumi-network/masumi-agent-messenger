@@ -3436,7 +3436,7 @@ function AuthenticatedInboxPage() {
       await Promise.resolve(
         createDeviceShareRequestReducer({
           deviceId: prepared.device.deviceId,
-          authCodeHash: prepared.authCodeHash,
+          verificationCodeHash: prepared.verificationCodeHash,
           clientCreatedAt: Timestamp.fromDate(prepared.clientCreatedAt),
         })
       );

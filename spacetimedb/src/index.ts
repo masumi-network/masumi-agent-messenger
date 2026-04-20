@@ -46,7 +46,7 @@ const MAX_PUBLIC_KEY_CHARS = 4096;
 const MAX_DEVICE_LABEL_CHARS = 120;
 const MAX_DEVICE_PLATFORM_CHARS = 120;
 const MAX_DEVICE_STATUS_CHARS = 32;
-const MAX_DEVICE_AUTH_CODE_HASH_CHARS = 128;
+const MAX_DEVICE_VERIFICATION_CODE_HASH_CHARS = 128;
 const MAX_DEVICE_BUNDLE_ALGORITHM_CHARS = 120;
 const MAX_DEVICE_BUNDLE_CIPHERTEXT_HEX_CHARS = 262_144;
 const MAX_MASUMI_NETWORK_CHARS = 32;
@@ -630,9 +630,9 @@ const spacetimedb = schema({
           columns: ['inboxId'],
         },
         {
-          accessor: 'device_share_request_auth_code_hash',
+          accessor: 'device_share_request_verification_code_hash',
           algorithm: 'btree',
-          columns: ['authCodeHash'],
+          columns: ['verificationCodeHash'],
         },
       ],
     },
@@ -640,7 +640,7 @@ const spacetimedb = schema({
       id: t.u64().primaryKey().autoInc(),
       deviceId: t.string(),
       inboxId: t.u64(),
-      authCodeHash: t.string(),
+      verificationCodeHash: t.string(),
       clientCreatedAt: t.timestamp(),
       expiresAt: t.timestamp(),
       createdAt: t.timestamp(),
@@ -1532,9 +1532,13 @@ function requireMaxArrayLength<T>(values: readonly T[], maxLength: number, field
   }
 }
 
-function normalizeAuthCodeHash(value: string): string {
-  const normalized = requireNonEmpty(value, 'authCodeHash');
-  requireMaxLength(normalized, MAX_DEVICE_AUTH_CODE_HASH_CHARS, 'authCodeHash');
+function normalizeVerificationCodeHash(value: string): string {
+  const normalized = requireNonEmpty(value, 'verificationCodeHash');
+  requireMaxLength(
+    normalized,
+    MAX_DEVICE_VERIFICATION_CODE_HASH_CHARS,
+    'verificationCodeHash'
+  );
   return normalized;
 }
 
@@ -3983,10 +3987,10 @@ export const lookupPublishedPublicRouteBySlug = spacetimedb.procedure(
 
 export const resolveDeviceShareRequestByCode = spacetimedb.procedure(
   {
-    authCodeHash: t.string(),
+    verificationCodeHash: t.string(),
   },
   t.array(ResolvedDeviceShareRequestRow),
-  (ctx, { authCodeHash }) => {
+  (ctx, { verificationCodeHash }) => {
     return ctx.withTx(tx => {
       const inbox = getOwnedInbox(tx);
       const allowed = enforceRateLimit(tx, {
@@ -4000,15 +4004,16 @@ export const resolveDeviceShareRequestByCode = spacetimedb.procedure(
       if (!allowed) {
         return [];
       }
-      const normalizedAuthCodeHash = normalizeAuthCodeHash(authCodeHash);
+      const normalizedVerificationCodeHash =
+        normalizeVerificationCodeHash(verificationCodeHash);
       let resolved:
         | {
             request: DeviceShareRequestRow;
             device: DeviceRow;
           }
         | undefined;
-      for (const candidate of tx.db.deviceShareRequest.device_share_request_auth_code_hash.filter(
-        normalizedAuthCodeHash
+      for (const candidate of tx.db.deviceShareRequest.device_share_request_verification_code_hash.filter(
+        normalizedVerificationCodeHash
       )) {
         if (
           candidate.inboxId !== inbox.id ||
@@ -4156,12 +4161,13 @@ export const registerDevice = spacetimedb.reducer(
 export const createDeviceShareRequest = spacetimedb.reducer(
   {
     deviceId: t.string(),
-    authCodeHash: t.string(),
+    verificationCodeHash: t.string(),
     clientCreatedAt: t.timestamp(),
   },
-  (ctx, { deviceId, authCodeHash, clientCreatedAt }) => {
+  (ctx, { deviceId, verificationCodeHash, clientCreatedAt }) => {
     const device = getOwnedDevice(ctx, normalizeDeviceId(deviceId));
-    const normalizedAuthCodeHash = normalizeAuthCodeHash(authCodeHash);
+    const normalizedVerificationCodeHash =
+      normalizeVerificationCodeHash(verificationCodeHash);
     const maxAgeMicros = durationMillisecondsToMicros(DEVICE_SHARE_REQUEST_MAX_AGE_MS);
     const maxFutureSkewMicros = durationMillisecondsToMicros(
       DEVICE_SHARE_REQUEST_MAX_FUTURE_SKEW_MS
@@ -4189,7 +4195,7 @@ export const createDeviceShareRequest = spacetimedb.reducer(
       id: 0n,
       deviceId: device.deviceId,
       inboxId: device.inboxId,
-      authCodeHash: normalizedAuthCodeHash,
+      verificationCodeHash: normalizedVerificationCodeHash,
       clientCreatedAt,
       expiresAt: timestampPlusMilliseconds(clientCreatedAt, DEVICE_SHARE_REQUEST_EXPIRY_MS),
       createdAt: ctx.timestamp,

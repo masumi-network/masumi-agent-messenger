@@ -174,7 +174,7 @@ export async function requestDeviceShare(params: {
     serializedPublicKey: deviceMaterial.keyPair.publicKey,
     clientCreatedAt,
   });
-  const authCodeHash = await hashDeviceVerificationCode(verificationCode);
+  const verificationCodeHash = await hashDeviceVerificationCode(verificationCode);
   const expiresAt = deviceShareRequestExpiresAt(clientCreatedAt);
 
   params.reporter.verbose?.('Registering CLI device');
@@ -197,7 +197,7 @@ export async function requestDeviceShare(params: {
       });
       await conn.reducers.createDeviceShareRequest({
         deviceId: deviceMaterial.deviceId,
-        authCodeHash,
+        verificationCodeHash,
         clientCreatedAt: Timestamp.fromDate(clientCreatedAt),
       });
     } finally {
@@ -374,9 +374,9 @@ export async function approveDeviceShare(params: {
         | undefined;
 
       if (params.code?.trim()) {
-        const authCodeHash = await hashDeviceVerificationCode(params.code);
+        const verificationCodeHash = await hashDeviceVerificationCode(params.code);
         const resolved = await conn.procedures.resolveDeviceShareRequestByCode({
-          authCodeHash,
+          verificationCodeHash,
         });
         const request = resolved[0];
         if (request) {
