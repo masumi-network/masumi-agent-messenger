@@ -27,7 +27,7 @@ import {
 import { resolvePreferredAgentSlug } from '../../services/agent-state';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
 import { sendMessageToThread, sendMessageToSlug } from '../../services/send-message';
-import { promptMultiline } from '../../services/prompts';
+import { promptMultiline, withPromptOutputSuspended } from '../../services/prompts';
 import {
   badge,
   bold,
@@ -405,15 +405,17 @@ export function registerThreadCommands(program: Command): void {
             const wasRaw = stdin.isTTY ? stdin.isRaw : false;
             if (stdin.isTTY) stdin.setRawMode(false);
 
-            const rl = createInterface({ input: stdin, output: stdout });
-            try {
-              const answer = await rl.question('Filter substring (empty clears): ');
-              const normalized = answer.trim().length ? answer.trim().toLowerCase() : null;
-              return normalized;
-            } finally {
-              rl.close();
-              if (stdin.isTTY && wasRaw) stdin.setRawMode(true);
-            }
+            return withPromptOutputSuspended(async () => {
+              const rl = createInterface({ input: stdin, output: stdout });
+              try {
+                const answer = await rl.question('Filter substring (empty clears): ');
+                const normalized = answer.trim().length ? answer.trim().toLowerCase() : null;
+                return normalized;
+              } finally {
+                rl.close();
+                if (stdin.isTTY && wasRaw) stdin.setRawMode(true);
+              }
+            });
           };
 
           reporter.info(
@@ -956,17 +958,20 @@ export function registerThreadCommands(program: Command): void {
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
 
       if (!options.yes && !options.json) {
-        const rl = createInterface({ input: process.stdin, output: process.stdout });
-        try {
-          const answer = await rl.question(
-            `Permanently delete thread #${threadId}? This removes all messages and cannot be undone. [y/N] `
-          );
-          if (!/^y(es)?$/i.test(answer.trim())) {
-            process.stdout.write('Cancelled.\n');
-            return;
+        const confirmed = await withPromptOutputSuspended(async () => {
+          const rl = createInterface({ input: process.stdin, output: process.stdout });
+          try {
+            const answer = await rl.question(
+              `Permanently delete thread #${threadId}? This removes all messages and cannot be undone. [y/N] `
+            );
+            return /^y(es)?$/i.test(answer.trim());
+          } finally {
+            rl.close();
           }
-        } finally {
-          rl.close();
+        });
+        if (!confirmed) {
+          process.stdout.write('Cancelled.\n');
+          return;
         }
       }
 

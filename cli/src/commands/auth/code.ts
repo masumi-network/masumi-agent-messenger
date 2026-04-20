@@ -14,7 +14,7 @@ import {
 } from './shared';
 
 type CompleteOptions = AuthFlowOptions & {
-  code?: string;
+  pollingCode?: string;
 };
 
 function registerAuthCodeStartCommand(command: Command): void {
@@ -45,8 +45,8 @@ function registerAuthCodeStartCommand(command: Command): void {
         toHuman: result => ({
           summary: 'Device authorization challenge ready.',
           details: renderKeyValue([
-            { key: 'User code', value: result.userCode, color: bold },
-            { key: 'Device code', value: result.deviceCode },
+            { key: 'Device code', value: result.deviceCode, color: bold },
+            { key: 'Polling code', value: result.pollingCode },
             { key: 'Verification URL', value: result.verificationUri },
             { key: 'Expires', value: result.expiresAt },
           ]),
@@ -58,8 +58,8 @@ function registerAuthCodeStartCommand(command: Command): void {
 function registerAuthCodeCompleteCommand(command: Command): void {
   command
     .command('complete')
-    .description('Finish a started device authorization with a device code')
-    .option('--code <code>', 'Device authorization code to poll')
+    .description('Finish a started device authorization with a polling code')
+    .option('--polling-code <code>', 'Polling code returned by `auth code start`')
     .option('--issuer <url>', 'OIDC issuer URL')
     .option('--client-id <id>', 'OIDC client id')
     .option('--skip-agent-registration', 'Skip managed inbox-agent registration after bootstrap')
@@ -78,7 +78,7 @@ function registerAuthCodeCompleteCommand(command: Command): void {
     .option('--debug', 'Log full device authorization flow details')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as CompleteOptions;
-      const deviceCode = options.code?.trim();
+      const pollingCode = options.pollingCode?.trim();
 
       const runtimeOptions: GlobalOptions = options.debug
         ? { ...options, verbose: true }
@@ -90,16 +90,16 @@ function registerAuthCodeCompleteCommand(command: Command): void {
         options: runtimeOptions,
         preferPlainReporter: Boolean(options.debug),
         run: async ({ reporter }) => {
-          if (!deviceCode) {
-            throw userError('Device authorization code is required.', {
-              code: 'DEVICE_CODE_REQUIRED',
+          if (!pollingCode) {
+            throw userError('Polling code is required.', {
+              code: 'POLLING_CODE_REQUIRED',
             });
           }
 
           const registration = await resolveRegistrationSettings(options);
           let result = await waitForLogin({
             profileName: options.profile,
-            deviceCode,
+            pollingCode,
             issuer: options.issuer,
             clientId: options.clientId,
             reporter,

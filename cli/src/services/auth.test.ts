@@ -142,8 +142,8 @@ describe('auth service', () => {
       profile: 'default',
       issuer: MASUMI_DEFAULT_OIDC_ISSUER,
       clientId: 'masumi-spacetime-cli',
-      deviceCode: 'device-123',
-      userCode: 'ABCD-EFGH',
+      deviceCode: 'ABCD-EFGH',
+      pollingCode: 'device-123',
       verificationUri: `${MASUMI_DEFAULT_OIDC_ISSUER}/device?user_code=ABCD-EFGH`,
       intervalSeconds: 7,
     });
@@ -370,7 +370,7 @@ describe('auth service', () => {
     const secretStore = createSecretStoreStub();
     const result = await waitForLogin({
       profileName: 'default',
-      deviceCode: 'device-123',
+      pollingCode: 'device-123',
       reporter,
       secretStore,
       sleep: async () => {},

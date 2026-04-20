@@ -4118,7 +4118,7 @@ export function RootShell({
       ) : null}
       {task.banner ? (
         <Box borderStyle="single" borderColor="yellow" paddingLeft={1} paddingRight={1} flexDirection="column">
-          <Text>Code: <Text color="yellowBright">{task.banner.userCode}</Text></Text>
+          <Text>{task.banner.label ?? 'Code'}: <Text color="yellowBright">{task.banner.code}</Text></Text>
           <Text color="gray">{task.banner.hint}</Text>
         </Box>
       ) : null}

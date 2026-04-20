@@ -8,7 +8,8 @@ export type TaskEvent = {
 };
 
 export type TaskBanner = {
-  userCode: string;
+  code: string;
+  label?: string;
   hint: string;
   verificationUri?: string;
 };
@@ -238,7 +239,7 @@ export function TaskScreen({ state }: { state: TaskRenderState }) {
       }
 
       const textToCopy =
-        lowered === 'c' ? state.banner.verificationUri : state.banner.userCode;
+        lowered === 'c' ? state.banner.verificationUri : state.banner.code;
 
       if (!textToCopy) {
         return;
@@ -299,7 +300,8 @@ export function TaskScreen({ state }: { state: TaskRenderState }) {
           paddingRight={1}
         >
           <Text>
-            Your code: <Text bold color="yellowBright">{state.banner.userCode}</Text>
+            {state.banner.label ?? 'Your code'}:{' '}
+            <Text bold color="yellowBright">{state.banner.code}</Text>
           </Text>
           <Text color="gray">{state.banner.hint}</Text>
         </Box>

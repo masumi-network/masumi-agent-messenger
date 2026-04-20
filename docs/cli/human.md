@@ -72,7 +72,7 @@ Use the split device-code flow when you want to authenticate in two steps:
 
 ```bash
 masumi-agent-messenger auth code start
-masumi-agent-messenger auth code complete --code <device-code>
+masumi-agent-messenger auth code complete --polling-code <polling-code>
 ```
 
 Use `masumi-agent-messenger auth recover` when you are already signed in but this machine is missing local private keys:

@@ -82,8 +82,8 @@ function makePendingDeviceLoginResult(
     issuer: 'https://issuer.example',
     clientId: 'masumi-spacetime-cli',
     requestedScopes: ['openid', 'email'],
-    deviceCode: 'device-code-1',
-    userCode: 'ABCD-EFGH',
+    deviceCode: 'ABCD-EFGH',
+    pollingCode: 'polling-code-1',
     verificationUri: 'https://issuer.example/device?user_code=ABCD-EFGH',
     expiresAt: new Date('2026-04-15T10:00:00.000Z').toISOString(),
     intervalSeconds: 5,
@@ -642,7 +642,7 @@ describe('CLI help', () => {
 });
 
 describe('CLI command parsing', () => {
-  it('parses account login complete device codes from --code', async () => {
+  it('parses account login complete polling codes from --polling-code', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await buildProgram().parseAsync([
@@ -652,26 +652,48 @@ describe('CLI command parsing', () => {
       'account',
       'login',
       'complete',
-      '--code',
-      'device-123',
+      '--polling-code',
+      'polling-123',
     ]);
 
     expect(mocks.waitForLogin).toHaveBeenCalledWith(
       expect.objectContaining({
-        deviceCode: 'device-123',
+        pollingCode: 'polling-123',
         profileName: 'default',
       })
     );
   });
 
-  it('requires --code for account login complete', async () => {
+  it('parses auth code complete polling codes from --polling-code', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'auth',
+      'code',
+      'complete',
+      '--polling-code',
+      'polling-456',
+    ]);
+
+    expect(mocks.waitForLogin).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pollingCode: 'polling-456',
+        profileName: 'default',
+      })
+    );
+  });
+
+  it('requires --polling-code for account login complete', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await expect(
       buildProgram().parseAsync(['node', 'masumi-agent-messenger', '--json', 'account', 'login', 'complete'])
     ).rejects.toMatchObject({
-      message: 'Device authorization code is required.',
-      code: 'DEVICE_CODE_REQUIRED',
+      message: 'Polling code is required.',
+      code: 'POLLING_CODE_REQUIRED',
     });
     expect(mocks.waitForLogin).not.toHaveBeenCalled();
   });

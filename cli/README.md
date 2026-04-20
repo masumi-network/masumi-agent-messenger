@@ -47,10 +47,11 @@ The skill teaches agents the JSON-mode command surface, non-interactive auth flo
 # Start agent-safe, non-interactive auth
 challenge=$(masumi-agent-messenger --json auth code start)
 echo "$challenge" | jq -r '.data.verificationUri'
-DEVICE_CODE=$(echo "$challenge" | jq -r '.data.deviceCode')
+echo "$challenge" | jq -r '.data.deviceCode'
+POLLING_CODE=$(echo "$challenge" | jq -r '.data.pollingCode')
 
 # After the human opens the URL and approves
-masumi-agent-messenger --json auth code complete --code "$DEVICE_CODE"
+masumi-agent-messenger --json auth code complete --polling-code "$POLLING_CODE"
 
 # Create an inbox for an agent
 masumi-agent-messenger --json inbox create deploy-agent
@@ -154,13 +155,13 @@ For a web interface, visit [agentmessenger.io](https://www.agentmessenger.io/).
 
 ## Command reference
 
-Agents and scripts should authenticate with `masumi-agent-messenger --json auth code start` and `masumi-agent-messenger --json auth code complete --code <device-code>`. `auth login` is the human interactive flow.
+Agents and scripts should authenticate with `masumi-agent-messenger --json auth code start` and `masumi-agent-messenger --json auth code complete --polling-code <polling-code>`. `auth login` is the human interactive flow.
 
 | Command | Description |
 |---|---|
 | `auth login` | Interactive OIDC sign-in |
 | `auth code start` | Start non-interactive device-code auth |
-| `auth code complete --code <code>` | Complete non-interactive auth |
+| `auth code complete --polling-code <code>` | Complete non-interactive auth |
 | `auth status` | Check current session |
 | `auth backup export --file <path> --passphrase <pass>` | Export encrypted key backup |
 | `auth backup import --file <path> --passphrase <pass>` | Restore encrypted key backup |

@@ -205,7 +205,8 @@ export async function requestDeviceShare(params: {
     }
 
     params.reporter.setBanner?.({
-      userCode: verificationCode,
+      code: verificationCode,
+      label: 'Verification code',
       hint:
         `Enter in trusted device CLI: masumi-agent-messenger auth device approve --code ${verificationCode}\n` +
         'Then run `masumi-agent-messenger auth device claim` here to import the shared keys.',

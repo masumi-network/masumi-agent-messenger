@@ -57,7 +57,7 @@ import {
 type LoginResult = Awaited<ReturnType<typeof login>>;
 
 type CompleteOptions = AccountFlowOptions & {
-  code?: string;
+  pollingCode?: string;
 };
 
 type VerificationOptions = GlobalOptions & {
@@ -106,7 +106,7 @@ function registerAccountLoginCommand(command: Command): void {
       const options = commandInstance.optsWithGlobals() as AccountFlowOptions;
       if (!isInteractiveAccountFlow(options)) {
         throw userError(
-          'Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --code <device-code>`.',
+          'Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>`.',
           {
             code: 'AUTH_LOGIN_INTERACTIVE_REQUIRED',
           }
@@ -168,7 +168,7 @@ function registerAccountLoginCommand(command: Command): void {
                 ),
           details: isPendingDeviceLoginResult(result)
             ? renderKeyValue([
-                { key: 'User code', value: result.userCode, color: bold },
+                { key: 'Device code', value: result.deviceCode, color: bold },
                 { key: 'Verification URL', value: result.verificationUri },
                 { key: 'Expires', value: result.expiresAt },
               ])
@@ -219,8 +219,8 @@ function registerAccountLoginCommand(command: Command): void {
         toHuman: result => ({
           summary: 'Device authorization challenge ready.',
           details: renderKeyValue([
-            { key: 'User code', value: result.userCode, color: bold },
-            { key: 'Device code', value: result.deviceCode },
+            { key: 'Device code', value: result.deviceCode, color: bold },
+            { key: 'Polling code', value: result.pollingCode },
             { key: 'Verification URL', value: result.verificationUri },
             { key: 'Expires', value: result.expiresAt },
           ]),
@@ -230,8 +230,8 @@ function registerAccountLoginCommand(command: Command): void {
 
   loginCommand
     .command('complete')
-    .description('Finish a started device authorization with a device code')
-    .option('--code <code>', 'Device authorization code to poll')
+    .description('Finish a started device authorization with a polling code')
+    .option('--polling-code <code>', 'Polling code returned by `account login start`')
     .option('--issuer <url>', 'OIDC issuer URL')
     .option('--client-id <id>', 'OIDC client id')
     .option('--skip-agent-registration', 'Skip managed agent registration after bootstrap')
@@ -260,17 +260,17 @@ function registerAccountLoginCommand(command: Command): void {
         options: runtimeOptions,
         preferPlainReporter: Boolean(options.debug),
         run: async ({ reporter }) => {
-          const deviceCode = options.code?.trim();
-          if (!deviceCode) {
-            throw userError('Device authorization code is required.', {
-              code: 'DEVICE_CODE_REQUIRED',
+          const pollingCode = options.pollingCode?.trim();
+          if (!pollingCode) {
+            throw userError('Polling code is required.', {
+              code: 'POLLING_CODE_REQUIRED',
             });
           }
 
           const registration = await resolveAccountRegistrationSettings(options);
           let result = await waitForLogin({
             profileName: options.profile,
-            deviceCode,
+            pollingCode,
             issuer: options.issuer,
             clientId: options.clientId,
             reporter,

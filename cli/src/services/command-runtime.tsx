@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline/promises';
 import type { BirthdayCelebration } from './easter-eggs';
 import { CliError, toCliError } from './errors';
 import { blue, dim, green, red, yellow } from './render';
+import { installPromptOutputLifecycle } from './prompts';
 import { TaskScreen, type TaskBanner, type TaskRenderState } from '../ui/task-screen';
 
 export type GlobalOptions = {
@@ -84,7 +85,9 @@ class ConsoleReporter implements TaskReporter {
   }
 
   setBanner(banner: TaskBanner): void {
-    process.stdout.write(`\n${yellow('Your code:')} ${banner.userCode}\n${dim(banner.hint)}\n\n`);
+    process.stdout.write(
+      `\n${yellow(`${banner.label ?? 'Your code'}:`)} ${banner.code}\n${dim(banner.hint)}\n\n`
+    );
   }
 
   clearBanner(): void {}
@@ -111,6 +114,8 @@ class InkReporter implements TaskReporter {
   private state: TaskRenderState;
   private readonly rerender: (tree: ReactNode) => void;
   private readonly isVerbose: boolean;
+  private promptSuspendDepth = 0;
+  private deferredActive: string | undefined;
 
   constructor(title: string, rerender: (tree: ReactNode) => void, verbose?: boolean) {
     this.state = {
@@ -124,12 +129,20 @@ class InkReporter implements TaskReporter {
 
   info(text: string): void {
     this.state.events.push({ kind: 'info', text });
+    if (this.promptSuspendDepth > 0) {
+      this.deferredActive = text;
+      return;
+    }
     this.state.active = text;
     this.flush();
   }
 
   success(text: string): void {
     this.state.events.push({ kind: 'success', text });
+    if (this.promptSuspendDepth > 0) {
+      this.deferredActive = undefined;
+      return;
+    }
     this.state.active = undefined;
     this.flush();
   }
@@ -137,6 +150,10 @@ class InkReporter implements TaskReporter {
   verbose(text: string): void {
     if (!this.isVerbose) return;
     this.state.events.push({ kind: 'info', text });
+    if (this.promptSuspendDepth > 0) {
+      this.deferredActive = text;
+      return;
+    }
     this.state.active = text;
     this.flush();
   }
@@ -148,6 +165,33 @@ class InkReporter implements TaskReporter {
 
   clearBanner(): void {
     this.state.banner = undefined;
+    this.flush();
+  }
+
+  suspendForPrompt(): void {
+    if (this.promptSuspendDepth === 0) {
+      this.deferredActive = this.state.active;
+      this.state.active = undefined;
+      this.state.prompt = undefined;
+      this.flush();
+    }
+    this.promptSuspendDepth += 1;
+  }
+
+  resumeAfterPrompt(): void {
+    if (this.promptSuspendDepth === 0) {
+      return;
+    }
+
+    this.promptSuspendDepth -= 1;
+    if (this.promptSuspendDepth > 0) {
+      return;
+    }
+
+    if (!this.state.final) {
+      this.state.active = this.deferredActive;
+    }
+    this.deferredActive = undefined;
     this.flush();
   }
 
@@ -373,6 +417,14 @@ export async function runCommandAction<T>(params: CommandActionParams<T>): Promi
     exitOnCtrlC: true,
   });
   const reporter = new InkReporter(params.title, instance.rerender, params.options.verbose);
+  const restorePromptOutputLifecycle = installPromptOutputLifecycle({
+    beforePrompt: () => {
+      reporter.suspendForPrompt();
+    },
+    afterPrompt: () => {
+      reporter.resumeAfterPrompt();
+    },
+  });
   let shouldManualUnmount = true;
 
   try {
@@ -400,6 +452,7 @@ export async function runCommandAction<T>(params: CommandActionParams<T>): Promi
     reporter.finishError(errorMessage);
     process.exitCode = cliError.exitCode;
   } finally {
+    restorePromptOutputLifecycle();
     if (shouldManualUnmount) {
       instance.unmount();
     }

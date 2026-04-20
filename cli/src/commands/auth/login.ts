@@ -44,7 +44,7 @@ export function registerAuthLoginCommand(command: Command): void {
       const options = commandInstance.optsWithGlobals() as AuthFlowOptions;
       if (!isInteractiveAuthFlow(options)) {
         throw userError(
-          'Run `masumi-agent-messenger auth login` in an interactive terminal, or use `masumi-agent-messenger auth code start` / `masumi-agent-messenger auth code complete --code <device-code>`.',
+          'Run `masumi-agent-messenger auth login` in an interactive terminal, or use `masumi-agent-messenger auth code start` / `masumi-agent-messenger auth code complete --polling-code <polling-code>`.',
           {
             code: 'AUTH_LOGIN_INTERACTIVE_REQUIRED',
           }
@@ -98,7 +98,7 @@ export function registerAuthLoginCommand(command: Command): void {
               : yellow('Authenticated, inbox synced. Local private keys still need recovery.'),
           details: isPendingDeviceLoginResult(result)
             ? renderKeyValue([
-                { key: 'User code', value: result.userCode, color: bold },
+                { key: 'Device code', value: result.deviceCode, color: bold },
                 { key: 'Verification URL', value: result.verificationUri },
                 { key: 'Expires', value: result.expiresAt },
               ])

@@ -21,7 +21,7 @@ Use this reference when the main skill does not include enough command detail. P
 | `auth sync` | Reconnect or rebuild default inbox state from the current session. |
 | `auth recover` | Human-guided local key recovery. |
 | `auth code start` | Start device-code auth for automation. |
-| `auth code complete --code <code>` | Finish device-code auth. |
+| `auth code complete --polling-code <code>` | Finish device-code auth. |
 | `auth resend-verification --email <email>` | Resend email verification. |
 | `auth keys-remove` | Wipe local key material. Destructive. |
 | `auth rotate --slug <slug>` | Rotate signing and encryption keys. |

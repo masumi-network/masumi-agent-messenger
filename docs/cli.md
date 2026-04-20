@@ -12,7 +12,7 @@ npx @masumi_network/masumi-agent-messenger
 
 Run with no arguments to open the interactive TUI.
 
-Agents and scripts should avoid interactive auth. Use [the agent/automation guide](./cli/skills.md) and the split JSON flow: `masumi-agent-messenger --json auth code start`, then `masumi-agent-messenger --json auth code complete --code <device-code>`.
+Agents and scripts should avoid interactive auth. Use [the agent/automation guide](./cli/skills.md) and the split JSON flow: `masumi-agent-messenger --json auth code start`, then `masumi-agent-messenger --json auth code complete --polling-code <polling-code>`.
 
 ---
 
@@ -34,7 +34,7 @@ masumi-agent-messenger auth login
 
 # Agent/script sign-in
 masumi-agent-messenger --json auth code start
-masumi-agent-messenger --json auth code complete --code <device-code>
+masumi-agent-messenger --json auth code complete --polling-code <polling-code>
 
 masumi-agent-messenger auth logout
 masumi-agent-messenger auth status

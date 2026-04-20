@@ -27,6 +27,7 @@ import {
   createSecretStore,
   type SecretStore,
 } from './secret-store';
+import { withPromptOutputSuspended } from './prompts';
 import type { TaskReporter } from './command-runtime';
 import {
   bootstrapAuthenticatedInbox,
@@ -61,8 +62,8 @@ export type PendingDeviceLoginResult = {
   issuer: string;
   clientId: string;
   requestedScopes: string[];
+  pollingCode: string;
   deviceCode: string;
-  userCode: string;
   verificationUri: string;
   expiresAt: string;
   intervalSeconds: number;
@@ -103,11 +104,13 @@ async function defaultWaitForEnter(url: string): Promise<void> {
     output: process.stdout,
   });
 
-  try {
-    await readline.question(`Press Enter to open browser:\n${url}\n`);
-  } finally {
-    readline.close();
-  }
+  await withPromptOutputSuspended(async () => {
+    try {
+      await readline.question(`Press Enter to open browser:\n${url}\n`);
+    } finally {
+      readline.close();
+    }
+  });
 }
 
 async function defaultOpenBrowser(url: string): Promise<boolean> {
@@ -186,8 +189,8 @@ function toPendingDeviceLoginResult(params: {
     issuer: params.metadata.issuer,
     clientId: params.profile.clientId,
     requestedScopes: params.requestedScope.split(/\s+/).filter(Boolean),
-    deviceCode: params.challenge.deviceCode,
-    userCode: params.challenge.userCode,
+    pollingCode: params.challenge.deviceCode,
+    deviceCode: params.challenge.userCode,
     verificationUri: chooseVerificationUrl(params.challenge),
     expiresAt: new Date(params.challenge.expiresAt).toISOString(),
     intervalSeconds: params.challenge.intervalSeconds,
@@ -201,11 +204,12 @@ function reportDeviceChallenge(
 ): void {
   const verificationUri = result.verificationUri;
   reporter.setBanner?.({
-    userCode: result.userCode,
+    code: result.deviceCode,
+    label: 'Device code',
     verificationUri,
     hint:
-      `Enter this code in browser: ${verificationUri}\n` +
-      'Press [C] to copy URL · [U] to copy code.',
+      `Enter this device code in browser: ${verificationUri}\n` +
+      'Press [C] to copy URL · [U] to copy device code.',
   });
   reporter.verbose?.(`Verification URL: ${verificationUri}`);
   reporter.verbose?.(`Code expires at ${result.expiresAt}`);
@@ -280,7 +284,7 @@ async function prepareDeviceLogin(params: {
     requestedScope,
   });
   debug?.(
-    `Device authorization created: user_code=${challenge.userCode}, device_code=${challenge.deviceCode}, interval=${challenge.intervalSeconds}s, expires_at=${new Date(challenge.expiresAt).toISOString()}`
+    `Device authorization created: device_code=${challenge.userCode}, polling_code=${challenge.deviceCode}, interval=${challenge.intervalSeconds}s, expires_at=${new Date(challenge.expiresAt).toISOString()}`
   );
   reportDeviceChallenge(params.reporter, pendingResult);
 
@@ -328,7 +332,7 @@ export async function startLogin(params: {
 
 export async function waitForLogin(params: {
   profileName: string;
-  deviceCode: string;
+  pollingCode: string;
   issuer?: string;
   clientId?: string;
   reporter: TaskReporter;
@@ -362,7 +366,7 @@ export async function waitForLogin(params: {
   const session = await waitForDeviceAuthorization({
     metadata,
     clientId: profile.clientId,
-    deviceCode: params.deviceCode,
+    deviceCode: params.pollingCode,
     sleep: params.sleep,
     debug,
   });
@@ -456,12 +460,13 @@ export async function login(params: {
       const minutes = Math.floor(remainingSeconds / 60);
       const seconds = remainingSeconds % 60;
       params.reporter.setBanner?.({
-        userCode: prepared.pendingResult.userCode,
+        code: prepared.pendingResult.deviceCode,
+        label: 'Device code',
         verificationUri: verificationUrl,
         hint:
-          `Enter this code in browser: ${verificationUrl}\n` +
+          `Enter this device code in browser: ${verificationUrl}\n` +
           `Expires in ${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}. ` +
-          'Press [C] to copy URL · [U] to copy code.',
+          'Press [C] to copy URL · [U] to copy device code.',
       });
     }, 1000);
   }

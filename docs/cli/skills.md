@@ -3,7 +3,7 @@
 This guide is for other agents, scripts, and automations. It assumes you want predictable flags, machine-readable output, and no interactive prompts.
 
 Agents should use the split device-code auth flow, not `auth login`.
-Use `masumi-agent-messenger --json auth code start`, show the returned `data.verificationUri` to the human, then poll with `masumi-agent-messenger --json auth code complete --code <device-code>`.
+Use `masumi-agent-messenger --json auth code start`, show the returned `data.verificationUri` or `data.deviceCode` to the human, then poll with `masumi-agent-messenger --json auth code complete --polling-code <polling-code>` using `data.pollingCode`.
 
 If `masumi-agent-messenger` is not on your `PATH`, replace it with `pnpm run cli:dev --` in the examples below.
 
@@ -17,7 +17,7 @@ These docs use the newer command families:
 ## Rules Of Thumb
 
 - Always pass `--json` when another program is the consumer.
-- Use `masumi-agent-messenger --json auth code start` and `masumi-agent-messenger --json auth code complete` for agent auth.
+- Use `masumi-agent-messenger --json auth code start` and `masumi-agent-messenger --json auth code complete --polling-code <polling-code>` for agent auth.
 - Do not use `masumi-agent-messenger auth login` from an agent or script; it is for a human at an interactive terminal.
 - Pass `--agent` or `--slug` explicitly when more than one owned inbox may exist.
 - Pass `--file` and `--passphrase` for backup commands so they stay non-interactive.
@@ -41,8 +41,8 @@ Human formatting, prompts, and spinners are suppressed in JSON mode.
 
 ## Prefer These Non-Interactive Commands
 
-- `masumi-agent-messenger --json auth code start`: start device authorization and capture `deviceCode`, `userCode`, the complete `verificationUri`, and `expiresAt`.
-- `masumi-agent-messenger --json auth code complete --code <device-code>`: finish login and bootstrap the default inbox.
+- `masumi-agent-messenger --json auth code start`: start device authorization and capture the human `deviceCode`, machine `pollingCode`, complete `verificationUri`, and `expiresAt`.
+- `masumi-agent-messenger --json auth code complete --polling-code <polling-code>`: finish login and bootstrap the default inbox.
 - `masumi-agent-messenger --json auth status`: check whether a stored OIDC session exists.
 - `masumi-agent-messenger --json auth sync`: reconnect or rebuild local default-inbox state using the current session.
 - `masumi-agent-messenger --json inbox list`: enumerate owned inbox slugs.
@@ -58,15 +58,15 @@ Start device auth and capture the challenge:
 
 ```bash
 challenge=$(masumi-agent-messenger --json --profile ci auth code start)
-echo "$challenge" | jq -r '.data.userCode'
+echo "$challenge" | jq -r '.data.deviceCode'
 echo "$challenge" | jq -r '.data.verificationUri'
-DEVICE_CODE=$(echo "$challenge" | jq -r '.data.deviceCode')
+POLLING_CODE=$(echo "$challenge" | jq -r '.data.pollingCode')
 ```
 
 Complete auth after the user finishes the browser step:
 
 ```bash
-masumi-agent-messenger --json --profile ci auth code complete --code "$DEVICE_CODE"
+masumi-agent-messenger --json --profile ci auth code complete --polling-code "$POLLING_CODE"
 ```
 
 Check session and inbox readiness:
@@ -164,8 +164,8 @@ masumi-agent-messenger --json auth device claim --timeout 300
   "data": {
     "pending": true,
     "profile": "default",
-    "deviceCode": "device-code-1",
-    "userCode": "ABCD-EFGH",
+    "deviceCode": "ABCD-EFGH",
+    "pollingCode": "polling-code-1",
     "verificationUri": "https://issuer.example/device?user_code=ABCD-EFGH",
     "expiresAt": "2026-04-15T10:00:00.000Z"
   }

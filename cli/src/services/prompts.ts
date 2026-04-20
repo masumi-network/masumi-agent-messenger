@@ -2,6 +2,31 @@ import process from 'node:process';
 import { createInterface } from 'node:readline/promises';
 import { emitKeypressEvents } from 'node:readline';
 
+type PromptOutputLifecycle = {
+  beforePrompt(): void;
+  afterPrompt(): void;
+};
+
+let promptOutputLifecycle: PromptOutputLifecycle | undefined;
+
+export function installPromptOutputLifecycle(hooks: PromptOutputLifecycle): () => void {
+  const previous = promptOutputLifecycle;
+  promptOutputLifecycle = hooks;
+  return () => {
+    promptOutputLifecycle = previous;
+  };
+}
+
+export async function withPromptOutputSuspended<T>(run: () => Promise<T>): Promise<T> {
+  const lifecycle = promptOutputLifecycle;
+  lifecycle?.beforePrompt();
+  try {
+    return await run();
+  } finally {
+    lifecycle?.afterPrompt();
+  }
+}
+
 function interactiveStdioAvailable(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
@@ -23,15 +48,17 @@ export async function confirmYesNo(params: {
     output: process.stdout,
   });
 
-  try {
-    const answer = (await readline.question(`${green(symbols.bullet)} ${params.question}${suffix}`)).trim().toLowerCase();
-    if (!answer) {
-      return params.defaultValue ?? false;
+  return withPromptOutputSuspended(async () => {
+    try {
+      const answer = (await readline.question(`${green(symbols.bullet)} ${params.question}${suffix}`)).trim().toLowerCase();
+      if (!answer) {
+        return params.defaultValue ?? false;
+      }
+      return answer === 'y' || answer === 'yes';
+    } finally {
+      readline.close();
     }
-    return answer === 'y' || answer === 'yes';
-  } finally {
-    readline.close();
-  }
+  });
 }
 
 export async function waitForEnterMessage(message: string): Promise<void> {
@@ -44,11 +71,13 @@ export async function waitForEnterMessage(message: string): Promise<void> {
     output: process.stdout,
   });
 
-  try {
-    await readline.question(`${message}\n`);
-  } finally {
-    readline.close();
-  }
+  return withPromptOutputSuspended(async () => {
+    try {
+      await readline.question(`${message}\n`);
+    } finally {
+      readline.close();
+    }
+  });
 }
 
 export async function promptText(params: {
@@ -64,20 +93,22 @@ export async function promptText(params: {
     output: process.stdout,
   });
 
-  try {
-    const suffix =
-      params.defaultValue && params.defaultValue.length > 0
-        ? ` [default: ${params.defaultValue}] `
-        : ' ';
-    const answer = await readline.question(`${params.question}${suffix}`);
-    const trimmed = answer.trim();
-    if (!trimmed) {
-      return params.defaultValue ?? '';
+  return withPromptOutputSuspended(async () => {
+    try {
+      const suffix =
+        params.defaultValue && params.defaultValue.length > 0
+          ? ` [default: ${params.defaultValue}] `
+          : ' ';
+      const answer = await readline.question(`${params.question}${suffix}`);
+      const trimmed = answer.trim();
+      if (!trimmed) {
+        return params.defaultValue ?? '';
+      }
+      return trimmed;
+    } finally {
+      readline.close();
     }
-    return trimmed;
-  } finally {
-    readline.close();
-  }
+  });
 }
 
 export async function promptSecret(params: {
@@ -93,9 +124,9 @@ export async function promptSecret(params: {
       ? ' [press Enter to keep the current value] '
       : ' ';
 
-  process.stdout.write(`${params.question}${suffix}`);
+  return withPromptOutputSuspended(async () => new Promise<string>((resolve, reject) => {
+    process.stdout.write(`${params.question}${suffix}`);
 
-  return new Promise<string>((resolve, reject) => {
     const input = process.stdin;
     const wasRaw = input.isTTY ? input.isRaw : false;
     let answer = '';
@@ -171,7 +202,7 @@ export async function promptSecret(params: {
     }
     input.resume();
     input.on('keypress', onKeypress);
-  });
+  }));
 }
 
 export async function promptChoice<T extends string>(params: {
@@ -210,10 +241,10 @@ export async function promptChoice<T extends string>(params: {
     return lines;
   };
 
-  let renderedLines = renderOptions();
-  process.stdout.write(renderedLines.join('\n') + '\n');
+  return withPromptOutputSuspended(async () => new Promise<T>((resolve, reject) => {
+    let renderedLines = renderOptions();
+    process.stdout.write(renderedLines.join('\n') + '\n');
 
-  return new Promise<T>((resolve, reject) => {
     const input = process.stdin;
     const wasRaw = input.isTTY ? input.isRaw : false;
     let finished = false;
@@ -267,7 +298,7 @@ export async function promptChoice<T extends string>(params: {
     }
     input.resume();
     input.on('keypress', onKeypress);
-  });
+  }));
 }
 
 export async function promptMultiline(params: {
@@ -283,20 +314,22 @@ export async function promptMultiline(params: {
     output: process.stdout,
   });
 
-  try {
-    const lines: string[] = [];
-    process.stdout.write(
-      `${params.question}\n${params.doneMessage ?? 'Press Enter on an empty line to finish.'}\n`
-    );
-    while (true) {
-      const line = await readline.question(lines.length === 0 ? '> ' : '. ');
-      if (line.length === 0) {
-        break;
+  return withPromptOutputSuspended(async () => {
+    try {
+      const lines: string[] = [];
+      process.stdout.write(
+        `${params.question}\n${params.doneMessage ?? 'Press Enter on an empty line to finish.'}\n`
+      );
+      while (true) {
+        const line = await readline.question(lines.length === 0 ? '> ' : '. ');
+        if (line.length === 0) {
+          break;
+        }
+        lines.push(line);
       }
-      lines.push(line);
+      return lines.join('\n').trim();
+    } finally {
+      readline.close();
     }
-    return lines.join('\n').trim();
-  } finally {
-    readline.close();
-  }
+  });
 }
