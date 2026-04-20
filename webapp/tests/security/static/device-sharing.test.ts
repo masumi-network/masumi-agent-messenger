@@ -143,7 +143,7 @@ describe('device sharing verification codes', () => {
       serializedPublicKey: requester.publicKey,
       clientCreatedAt,
     });
-    const authCodeHash = await hashDeviceVerificationCode(verificationCode);
+    const verificationCodeHash = await hashDeviceVerificationCode(verificationCode);
 
     await expect(
       verifyDeviceVerificationCodeMatchesPublicKey({
@@ -159,7 +159,7 @@ describe('device sharing verification codes', () => {
         liveConnection: {
           procedures: {
             async resolveDeviceShareRequestByCode(params) {
-              return params.authCodeHash === authCodeHash
+              return params.verificationCodeHash === verificationCodeHash
                 ? [
                     {
                       requestId: 7n,
@@ -183,7 +183,7 @@ describe('device sharing verification codes', () => {
       serializedPublicKey: requester.publicKey,
       clientCreatedAt,
     });
-    const authCodeHash = await hashDeviceVerificationCode(verificationCode);
+    const verificationCodeHash = await hashDeviceVerificationCode(verificationCode);
 
     await expect(
       resolveVerifiedDeviceShareRequest({
@@ -191,7 +191,7 @@ describe('device sharing verification codes', () => {
         liveConnection: {
           procedures: {
             async resolveDeviceShareRequestByCode(params) {
-              return params.authCodeHash === authCodeHash
+              return params.verificationCodeHash === verificationCodeHash
                 ? [
                     {
                       requestId: 11n,
@@ -220,7 +220,7 @@ describe('device sharing verification codes', () => {
       serializedPublicKey: requester.publicKey,
       clientCreatedAt,
     });
-    const authCodeHash = await hashDeviceVerificationCode(verificationCode);
+    const verificationCodeHash = await hashDeviceVerificationCode(verificationCode);
 
     await expect(
       resolveVerifiedDeviceShareRequest({
@@ -228,7 +228,7 @@ describe('device sharing verification codes', () => {
         liveConnection: {
           procedures: {
             async resolveDeviceShareRequestByCode(params) {
-              return params.authCodeHash === authCodeHash
+              return params.verificationCodeHash === verificationCodeHash
                 ? [
                     {
                       requestId: 13n,

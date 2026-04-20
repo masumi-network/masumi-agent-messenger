@@ -1137,6 +1137,9 @@ function AuthenticatedInboxPage() {
   const threadTimelineScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollTimelineRef = useRef(true);
   const lastTimelineSignatureRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  const pendingDeviceShareRequestRef = useRef<PendingDeviceShareRequestState | null>(null);
+  const deviceShareClaimDeviceIdRef = useRef<string | null>(null);
   const authenticatedSession =
     auth.status === 'authenticated' ? auth.session : null;
   const keyVaultOwner = useMemo<KeyVaultOwner | null>(
@@ -1155,6 +1158,17 @@ function AuthenticatedInboxPage() {
       setHydrated(true);
     });
   }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    pendingDeviceShareRequestRef.current = pendingDeviceShareRequest;
+  }, [pendingDeviceShareRequest]);
 
   useEffect(() => {
     if (!hydrated || !keyVaultOwner) {
@@ -2180,15 +2194,19 @@ function AuthenticatedInboxPage() {
       !pendingDeviceShareRequest ||
       !connected ||
       !liveConnection ||
-      deviceActionBusy ||
       !displayInbox
     ) {
       return;
     }
 
+    const targetDeviceId = pendingDeviceShareRequest.device.deviceId;
+    if (deviceShareClaimDeviceIdRef.current !== null) {
+      return;
+    }
+
     const matchingBundle = deviceShareBundles.find(bundle => {
       return (
-        bundle.targetDeviceId === pendingDeviceShareRequest.device.deviceId &&
+        bundle.targetDeviceId === targetDeviceId &&
         !bundle.consumedAt &&
         isTimestampInFuture(bundle.expiresAt)
       );
@@ -2197,15 +2215,20 @@ function AuthenticatedInboxPage() {
       return;
     }
 
-    let cancelled = false;
+    deviceShareClaimDeviceIdRef.current = targetDeviceId;
+    const claimIsCurrent = () =>
+      mountedRef.current && deviceShareClaimDeviceIdRef.current === targetDeviceId;
+    const pendingRequestStillMatches = () =>
+      pendingDeviceShareRequestRef.current?.device.deviceId === targetDeviceId;
+
     deferEffectStateUpdate(() => {
-      if (!cancelled) {
+      if (claimIsCurrent()) {
         setDeviceActionBusy(true);
       }
     });
     void liveConnection.procedures
       .claimDeviceKeyBundle({
-        deviceId: pendingDeviceShareRequest.device.deviceId,
+        deviceId: targetDeviceId,
       })
       .then(async result => {
         const bundle = result[0];
@@ -2222,24 +2245,26 @@ function AuthenticatedInboxPage() {
           bundleAlgorithm: bundle.bundleAlgorithm,
         });
         await clearPendingDeviceShareKeyMaterial(displayInbox.normalizedEmail);
-        if (cancelled) return;
+        if (!claimIsCurrent() || !pendingRequestStillMatches()) return;
 
-        setPendingDeviceShareRequest(null);
+        const importedKeyPair = activeActorIdentity
+          ? await loadStoredAgentKeyPair(activeActorIdentity)
+          : null;
+        if (!claimIsCurrent() || !pendingRequestStillMatches()) return;
+
         if (activeActorIdentity) {
-          const importedKeyPair = await loadStoredAgentKeyPair(activeActorIdentity);
-          if (!cancelled) {
-            const nextIssue = getActiveActorKeyIssue(activeActor, importedKeyPair);
-            const nextError = getActiveActorKeyError(nextIssue);
-            setActorKeyPair(importedKeyPair);
-            setLocalKeyIssue(nextIssue);
-            setSessionError(nextError);
-            setShowKeysRecoveryDialog(Boolean(nextIssue));
-            setActorFeedback(nextError ? null : 'Private keys imported from another device.');
-          }
+          const nextIssue = getActiveActorKeyIssue(activeActor, importedKeyPair);
+          const nextError = getActiveActorKeyError(nextIssue);
+          setActorKeyPair(importedKeyPair);
+          setLocalKeyIssue(nextIssue);
+          setSessionError(nextError);
+          setShowKeysRecoveryDialog(Boolean(nextIssue));
+          setActorFeedback(nextError ? null : 'Private keys imported from another device.');
         }
+        setPendingDeviceShareRequest(null);
       })
       .catch(claimError => {
-        if (cancelled) return;
+        if (!claimIsCurrent()) return;
         setActorActionError(
           claimError instanceof Error
             ? claimError.message
@@ -2247,19 +2272,17 @@ function AuthenticatedInboxPage() {
         );
       })
       .finally(() => {
-        if (!cancelled) {
-          setDeviceActionBusy(false);
+        if (deviceShareClaimDeviceIdRef.current === targetDeviceId) {
+          deviceShareClaimDeviceIdRef.current = null;
+          if (mountedRef.current) {
+            setDeviceActionBusy(false);
+          }
         }
       });
-
-    return () => {
-      cancelled = true;
-    };
   }, [
     activeActor,
     activeActorIdentity,
     connected,
-    deviceActionBusy,
     deviceShareBundles,
     displayInbox,
     liveConnection,

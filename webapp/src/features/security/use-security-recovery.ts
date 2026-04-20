@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Timestamp } from 'spacetimedb';
 import { useReducer } from 'spacetimedb/tanstack';
 import {
@@ -64,11 +64,25 @@ export function useSecurityRecovery(params: {
   const [deviceVerificationCode, setDeviceVerificationCode] = useState('');
   const [pendingDeviceRequest, setPendingDeviceRequest] =
     useState<PendingDeviceRequest | null>(null);
+  const mountedRef = useRef(true);
+  const pendingDeviceRequestRef = useRef<PendingDeviceRequest | null>(null);
+  const deviceShareClaimDeviceIdRef = useRef<string | null>(null);
 
   const registerDeviceReducer = useReducer(reducers.registerDevice);
   const createDeviceShareRequestReducer = useReducer(reducers.createDeviceShareRequest);
   const approveDeviceShareReducer = useReducer(reducers.approveDeviceShare);
   const revokeDeviceReducer = useReducer(reducers.revokeDevice);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    pendingDeviceRequestRef.current = pendingDeviceRequest;
+  }, [pendingDeviceRequest]);
 
   const inspectDefaultKeyIssue = useCallback(async (): Promise<DefaultKeyIssue> => {
     if (!params.existingDefaultActor) {
@@ -122,29 +136,38 @@ export function useSecurityRecovery(params: {
     if (
       !pendingDeviceRequest ||
       !params.liveConnection ||
-      deviceShareBusy ||
       !params.existingDefaultActor
     ) {
       return;
     }
 
+    const targetDeviceId = pendingDeviceRequest.device.deviceId;
+    if (deviceShareClaimDeviceIdRef.current !== null) {
+      return;
+    }
+
     const matchingBundle = params.deviceShareBundles.find(bundle => {
-      return bundle.targetDeviceId === pendingDeviceRequest.device.deviceId && !bundle.consumedAt;
+      return bundle.targetDeviceId === targetDeviceId && !bundle.consumedAt;
     });
     if (!matchingBundle) {
       return;
     }
 
-    let cancelled = false;
+    deviceShareClaimDeviceIdRef.current = targetDeviceId;
+    const claimIsCurrent = () =>
+      mountedRef.current && deviceShareClaimDeviceIdRef.current === targetDeviceId;
+    const pendingRequestStillMatches = () =>
+      pendingDeviceRequestRef.current?.device.deviceId === targetDeviceId;
+
     deferEffectStateUpdate(() => {
-      if (!cancelled) {
+      if (claimIsCurrent()) {
         setDeviceShareBusy(true);
       }
     });
 
     void params.liveConnection.procedures
       .claimDeviceKeyBundle({
-        deviceId: pendingDeviceRequest.device.deviceId,
+        deviceId: targetDeviceId,
       })
       .then(async result => {
         const bundle = result[0];
@@ -162,12 +185,12 @@ export function useSecurityRecovery(params: {
         });
         await clearPendingDeviceShareKeyMaterial(params.normalizedEmail);
 
-        if (cancelled) {
+        if (!claimIsCurrent() || !pendingRequestStillMatches()) {
           return;
         }
 
         const nextIssue = await inspectDefaultKeyIssue();
-        if (cancelled) {
+        if (!claimIsCurrent() || !pendingRequestStillMatches()) {
           return;
         }
 
@@ -180,7 +203,7 @@ export function useSecurityRecovery(params: {
         );
       })
       .catch(claimError => {
-        if (!cancelled) {
+        if (claimIsCurrent()) {
           setError(
             claimError instanceof Error
               ? claimError.message
@@ -189,16 +212,14 @@ export function useSecurityRecovery(params: {
         }
       })
       .finally(() => {
-        if (!cancelled) {
-          setDeviceShareBusy(false);
+        if (deviceShareClaimDeviceIdRef.current === targetDeviceId) {
+          deviceShareClaimDeviceIdRef.current = null;
+          if (mountedRef.current) {
+            setDeviceShareBusy(false);
+          }
         }
       });
-
-    return () => {
-      cancelled = true;
-    };
   }, [
-    deviceShareBusy,
     inspectDefaultKeyIssue,
     params.deviceShareBundles,
     params.existingDefaultActor,
