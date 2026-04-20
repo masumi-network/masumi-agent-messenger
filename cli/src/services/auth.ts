@@ -64,7 +64,6 @@ export type PendingDeviceLoginResult = {
   deviceCode: string;
   userCode: string;
   verificationUri: string;
-  verificationUriComplete: string | null;
   expiresAt: string;
   intervalSeconds: number;
   agentRegistration: ReturnType<typeof createPendingRegistrationResult>;
@@ -139,8 +138,23 @@ function toProfileOverrides(params: {
   return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
+function ensureUserCodeParam(verificationUri: string, userCode: string): string {
+  const trimmedUri = verificationUri.trim();
+
+  try {
+    const url = new URL(trimmedUri);
+    url.searchParams.set('user_code', userCode);
+    return url.toString();
+  } catch {
+    const separator = trimmedUri.includes('?') ? '&' : '?';
+    return `${trimmedUri}${separator}user_code=${encodeURIComponent(userCode)}`;
+  }
+}
+
 function chooseVerificationUrl(challenge: DeviceAuthorizationChallenge): string {
-  return challenge.verificationUriComplete ?? challenge.verificationUri;
+  const verificationUri =
+    challenge.verificationUriComplete?.trim() || challenge.verificationUri;
+  return ensureUserCodeParam(verificationUri, challenge.userCode);
 }
 
 function toAuthStatus(
@@ -174,8 +188,7 @@ function toPendingDeviceLoginResult(params: {
     requestedScopes: params.requestedScope.split(/\s+/).filter(Boolean),
     deviceCode: params.challenge.deviceCode,
     userCode: params.challenge.userCode,
-    verificationUri: params.challenge.verificationUri,
-    verificationUriComplete: params.challenge.verificationUriComplete,
+    verificationUri: chooseVerificationUrl(params.challenge),
     expiresAt: new Date(params.challenge.expiresAt).toISOString(),
     intervalSeconds: params.challenge.intervalSeconds,
     agentRegistration: createPendingRegistrationResult(),
@@ -186,7 +199,7 @@ function reportDeviceChallenge(
   reporter: TaskReporter,
   result: PendingDeviceLoginResult
 ): void {
-  const verificationUri = result.verificationUriComplete ?? result.verificationUri;
+  const verificationUri = result.verificationUri;
   reporter.setBanner?.({
     userCode: result.userCode,
     verificationUri,

@@ -44,11 +44,16 @@ The skill teaches agents the JSON-mode command surface, non-interactive auth flo
 ## Agent-to-agent in 20 seconds
 
 ```bash
-# Sign in once
-masumi-agent-messenger auth login
+# Start agent-safe, non-interactive auth
+challenge=$(masumi-agent-messenger --json auth code start)
+echo "$challenge" | jq -r '.data.verificationUri'
+DEVICE_CODE=$(echo "$challenge" | jq -r '.data.deviceCode')
+
+# After the human opens the URL and approves
+masumi-agent-messenger --json auth code complete --code "$DEVICE_CODE"
 
 # Create an inbox for an agent
-masumi-agent-messenger inbox create deploy-agent
+masumi-agent-messenger --json inbox create deploy-agent
 
 # Send a typed task to another agent
 masumi-agent-messenger --json thread start research-agent '{"task":"summarize failed builds"}' \
@@ -148,6 +153,8 @@ For a web interface, visit [agentmessenger.io](https://www.agentmessenger.io/).
 ---
 
 ## Command reference
+
+Agents and scripts should authenticate with `masumi-agent-messenger --json auth code start` and `masumi-agent-messenger --json auth code complete --code <device-code>`. `auth login` is the human interactive flow.
 
 | Command | Description |
 |---|---|

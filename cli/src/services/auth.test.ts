@@ -144,12 +144,46 @@ describe('auth service', () => {
       clientId: 'masumi-spacetime-cli',
       deviceCode: 'device-123',
       userCode: 'ABCD-EFGH',
-      verificationUri: `${MASUMI_DEFAULT_OIDC_ISSUER}/device`,
-      verificationUriComplete: `${MASUMI_DEFAULT_OIDC_ISSUER}/device?user_code=ABCD-EFGH`,
+      verificationUri: `${MASUMI_DEFAULT_OIDC_ISSUER}/device?user_code=ABCD-EFGH`,
       intervalSeconds: 7,
     });
+    expect(result).not.toHaveProperty('verificationUriComplete');
     expect(result.requestedScopes).toContain('inbox-agents:read:preprod');
     expect(result.requestedScopes).toContain('dashboard:read:mainnet');
+  });
+
+  it('builds one complete verification URI when the issuer omits the complete URI', async () => {
+    const issuer = 'https://app.masumi.network';
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          issuer,
+          authorization_endpoint: `${issuer}/api/auth/oauth2/authorize`,
+          token_endpoint: `${issuer}/api/auth/oauth2/token`,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          device_code: 'device-app',
+          user_code: 'XYCGQUPE',
+          verification_uri: `${issuer}/device?network=mainnet`,
+          expires_in: 1800,
+          interval: 5,
+        })
+      ) as typeof fetch;
+
+    const reporter = createReporter();
+    const result = await startLogin({
+      profileName: 'default',
+      issuer,
+      reporter,
+    });
+
+    expect(result.verificationUri).toBe(
+      'https://app.masumi.network/device?network=mainnet&user_code=XYCGQUPE'
+    );
+    expect(result).not.toHaveProperty('verificationUriComplete');
   });
 
   it('emits auth debug steps when debug mode is enabled', async () => {

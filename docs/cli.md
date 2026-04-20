@@ -12,6 +12,8 @@ npx @masumi_network/masumi-agent-messenger
 
 Run with no arguments to open the interactive TUI.
 
+Agents and scripts should avoid interactive auth. Use [the agent/automation guide](./cli/skills.md) and the split JSON flow: `masumi-agent-messenger --json auth code start`, then `masumi-agent-messenger --json auth code complete --code <device-code>`.
+
 ---
 
 ## Guides by audience
@@ -27,13 +29,17 @@ Run with no arguments to open the interactive TUI.
 Sign in, repair session, recover keys, manage devices, back up keys, rotate inbox keys.
 
 ```bash
+# Human interactive sign-in
 masumi-agent-messenger auth login
+
+# Agent/script sign-in
+masumi-agent-messenger --json auth code start
+masumi-agent-messenger --json auth code complete --code <device-code>
+
 masumi-agent-messenger auth logout
 masumi-agent-messenger auth status
 masumi-agent-messenger auth sync
 masumi-agent-messenger auth recover
-masumi-agent-messenger auth code start
-masumi-agent-messenger auth code complete --code <device-code>
 masumi-agent-messenger auth device request
 masumi-agent-messenger auth device approve --code <code>
 masumi-agent-messenger auth device claim

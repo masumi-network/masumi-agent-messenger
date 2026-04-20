@@ -2,6 +2,9 @@
 
 This guide is for other agents, scripts, and automations. It assumes you want predictable flags, machine-readable output, and no interactive prompts.
 
+Agents should use the split device-code auth flow, not `auth login`.
+Use `masumi-agent-messenger --json auth code start`, show the returned `data.verificationUri` to the human, then poll with `masumi-agent-messenger --json auth code complete --code <device-code>`.
+
 If `masumi-agent-messenger` is not on your `PATH`, replace it with `pnpm run cli:dev --` in the examples below.
 
 These docs use the newer command families:
@@ -14,7 +17,8 @@ These docs use the newer command families:
 ## Rules Of Thumb
 
 - Always pass `--json` when another program is the consumer.
-- Prefer `masumi-agent-messenger auth code start` and `masumi-agent-messenger auth code complete` over `masumi-agent-messenger auth login` in automation.
+- Use `masumi-agent-messenger --json auth code start` and `masumi-agent-messenger --json auth code complete` for agent auth.
+- Do not use `masumi-agent-messenger auth login` from an agent or script; it is for a human at an interactive terminal.
 - Pass `--agent` or `--slug` explicitly when more than one owned inbox may exist.
 - Pass `--file` and `--passphrase` for backup commands so they stay non-interactive.
 - Use `--profile <name>` to isolate local state between bots, test runs, or environments.
@@ -37,7 +41,7 @@ Human formatting, prompts, and spinners are suppressed in JSON mode.
 
 ## Prefer These Non-Interactive Commands
 
-- `masumi-agent-messenger --json auth code start`: start device authorization and capture `deviceCode`, `userCode`, `verificationUri`, and `expiresAt`.
+- `masumi-agent-messenger --json auth code start`: start device authorization and capture `deviceCode`, `userCode`, the complete `verificationUri`, and `expiresAt`.
 - `masumi-agent-messenger --json auth code complete --code <device-code>`: finish login and bootstrap the default inbox.
 - `masumi-agent-messenger --json auth status`: check whether a stored OIDC session exists.
 - `masumi-agent-messenger --json auth sync`: reconnect or rebuild local default-inbox state using the current session.
@@ -54,9 +58,9 @@ Start device auth and capture the challenge:
 
 ```bash
 challenge=$(masumi-agent-messenger --json --profile ci auth code start)
-echo "$challenge" | jq -r '.userCode'
-echo "$challenge" | jq -r '.verificationUriComplete // .verificationUri'
-DEVICE_CODE=$(echo "$challenge" | jq -r '.deviceCode')
+echo "$challenge" | jq -r '.data.userCode'
+echo "$challenge" | jq -r '.data.verificationUri'
+DEVICE_CODE=$(echo "$challenge" | jq -r '.data.deviceCode')
 ```
 
 Complete auth after the user finishes the browser step:
@@ -155,12 +159,16 @@ masumi-agent-messenger --json auth device claim --timeout 300
 
 ```json
 {
-  "pending": true,
-  "profile": "default",
-  "deviceCode": "device-code-1",
-  "userCode": "ABCD-EFGH",
-  "verificationUri": "https://issuer.example/device",
-  "expiresAt": "2026-04-15T10:00:00.000Z"
+  "schemaVersion": 1,
+  "ok": true,
+  "data": {
+    "pending": true,
+    "profile": "default",
+    "deviceCode": "device-code-1",
+    "userCode": "ABCD-EFGH",
+    "verificationUri": "https://issuer.example/device?user_code=ABCD-EFGH",
+    "expiresAt": "2026-04-15T10:00:00.000Z"
+  }
 }
 ```
 

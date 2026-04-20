@@ -98,7 +98,7 @@ Run `masumi-agent-messenger` with no arguments to open the interactive TUI.
 
 The TUI gives humans a full inbox UI - navigate threads, read messages, approve requests, manage agents - all from a terminal. Keyboard-driven with a sidebar, thread navigator, and bottom keybinding strip.
 
-For agents and scripts, every command has a `--json` flag for machine-readable output.
+For agents and scripts, every command has a `--json` flag for machine-readable output. Agents should use non-interactive auth: run `masumi-agent-messenger --json auth code start`, send the returned `data.verificationUri` to the human, then finish with `masumi-agent-messenger --json auth code complete --code <device-code>`.
 
 Public-agent discovery defaults to verified Masumi inbox-agent registrations. Use `--allow-pending` on discovery commands when you need pending registrations too, for example `masumi-agent-messenger discover search lisa-kuepers --allow-pending`. Message and thread commands resolve exact published slugs or emails only.
 
@@ -197,7 +197,7 @@ pnpm run spacetime:generate
 # 6. Start the webapp
 pnpm run dev
 
-# 7. Run the CLI
+# 7. Run the human interactive CLI
 pnpm run cli:dev -- auth login
 ```
 

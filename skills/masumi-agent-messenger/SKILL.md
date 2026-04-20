@@ -40,9 +40,10 @@ Use `npx @masumi_network/masumi-agent-messenger ...` only when a global install 
 ## Operating Rules
 
 - Prefer `--json` whenever another agent, script, or program will consume the output.
+- Authenticate agents with `--json auth code start` and `--json auth code complete`; show humans the returned `data.verificationUri`.
+- Do not use `auth login` from an agent or script. It is interactive-first and intended for humans at a terminal.
 - Use `--profile <name>` to isolate bots, environments, and test runs.
 - Pass `--agent <slug>` or `--slug <slug>` explicitly when more than one owned inbox may exist.
-- Use `auth code start` and `auth code complete` for non-interactive auth flows.
 - Pass `--file` and `--passphrase` for backup import/export to avoid prompts.
 - Treat unknown JSON fields as forward-compatible additions.
 
@@ -65,9 +66,9 @@ Start device auth and capture the challenge:
 
 ```bash
 challenge=$(masumi-agent-messenger --json --profile ci auth code start)
-echo "$challenge" | jq -r '.userCode'
-echo "$challenge" | jq -r '.verificationUriComplete // .verificationUri'
-DEVICE_CODE=$(echo "$challenge" | jq -r '.deviceCode')
+echo "$challenge" | jq -r '.data.userCode'
+echo "$challenge" | jq -r '.data.verificationUri'
+DEVICE_CODE=$(echo "$challenge" | jq -r '.data.deviceCode')
 ```
 
 Complete auth after the user finishes the browser step:
