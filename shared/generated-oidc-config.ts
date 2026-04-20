@@ -12,4 +12,4 @@ export const TRUSTED_OIDC_ISSUERS = new Set([GENERATED_MASUMI_OIDC_ISSUER]);
 export const TRUSTED_OIDC_AUDIENCES = new Set([...GENERATED_MASUMI_OIDC_AUDIENCES]);
 export const GENERATED_MASUMI_NETWORK = "Mainnet" as "Preprod" | "Mainnet";
 export const GENERATED_SPACETIMEDB_HOST = "https://maincloud.spacetimedb.com";
-export const GENERATED_SPACETIMEDB_DB_NAME = "agentmessenger";
+export const GENERATED_SPACETIMEDB_DB_NAME = "masumi-agent-messenger-3rx0g";

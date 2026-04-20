@@ -1080,7 +1080,7 @@ describe('CLI doctor', () => {
       );
       expect(mocks.connectAnonymous).toHaveBeenCalledWith(
         expect.objectContaining({
-          databaseName: 'agentmessenger',
+          databaseName: 'masumi-agent-messenger-3rx0g',
         })
       );
       expect(mocks.ensureAuthenticatedSession).not.toHaveBeenCalled();

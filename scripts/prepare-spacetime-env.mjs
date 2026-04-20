@@ -6,8 +6,9 @@ const DEFAULT_OIDC_ISSUER = 'https://masumi-saas-dev-exyyd.ondigitalocean.app';
 const DEFAULT_OIDC_CLIENT_ID = 'masumi-spacetime-web';
 const DEFAULT_OIDC_AUDIENCES = ['masumi-spacetime-web', 'masumi-spacetime-cli'];
 const DEFAULT_SPACETIMEDB_HOST = 'wss://maincloud.spacetimedb.com';
-const DEFAULT_SPACETIMEDB_DB_NAME = 'agentmessenger';
+const DEFAULT_SPACETIMEDB_DB_NAME = 'masumi-agent-messenger-3rx0g';
 const LEGACY_SPACETIMEDB_DB_NAME_ALIASES = new Set([
+  'agentmessenger',
   'agentmessenger-dev',
   'agent-messenger',
   'agent-messenger-dev',

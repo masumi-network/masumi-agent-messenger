@@ -17,13 +17,13 @@ Verify the CLI exists before running commands:
 command -v masumi-agent-messenger
 ```
 
-If it is missing, run the bundled installer:
+If it is missing or may be an older global install, run the bundled installer:
 
 ```bash
 bash scripts/setup.sh
 ```
 
-The installer uses:
+The installer refreshes the global package and verifies the resolved binary path using:
 
 ```bash
 npm install --global @masumi_network/masumi-agent-messenger

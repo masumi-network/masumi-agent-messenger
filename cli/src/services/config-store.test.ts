@@ -186,6 +186,36 @@ describe('config-store', () => {
     expect(stored.profiles.default.spacetimeDbName).toBeUndefined();
   });
 
+  it('moves the old main database name to the current production database', async () => {
+    const configPath = resolveConfigFilePath();
+    await mkdir(path.dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        version: 1,
+        activeProfile: 'default',
+        profiles: {
+          default: {
+            issuer: 'http://legacy-issuer.test',
+            clientId: 'legacy-client',
+            oidcScope: DEFAULT_MASUMI_OIDC_SCOPE_STRING,
+            spacetimeHost: 'wss://maincloud.spacetimedb.com',
+            spacetimeDbName: 'agentmessenger',
+          },
+        },
+      }),
+      'utf8'
+    );
+
+    const profile = await loadProfile('default');
+    const stored = JSON.parse(await readFile(configPath, 'utf8')) as {
+      profiles: Record<string, { spacetimeDbName?: string }>;
+    };
+
+    expect(profile.spacetimeDbName).toBe(DEFAULT_SPACETIMEDB_DB_NAME);
+    expect(stored.profiles.default.spacetimeDbName).toBeUndefined();
+  });
+
   it('moves legacy database aliases for non-default profiles and custom hosts', async () => {
     const configPath = resolveConfigFilePath();
     await mkdir(path.dirname(configPath), { recursive: true });

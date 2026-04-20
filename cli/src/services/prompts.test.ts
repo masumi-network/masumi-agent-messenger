@@ -1,5 +1,24 @@
+import process from 'node:process';
 import { describe, expect, it } from 'vitest';
 import { installPromptOutputLifecycle, withPromptOutputSuspended } from './prompts';
+
+const SHOW_CURSOR = '\u001B[?25h';
+
+function stubIsTTY(stream: NodeJS.ReadStream | NodeJS.WriteStream, value: boolean): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(stream, 'isTTY');
+  Object.defineProperty(stream, 'isTTY', {
+    configurable: true,
+    value,
+  });
+
+  return () => {
+    if (descriptor) {
+      Object.defineProperty(stream, 'isTTY', descriptor);
+    } else {
+      delete (stream as { isTTY?: boolean }).isTTY;
+    }
+  };
+}
 
 describe('prompt output lifecycle', () => {
   it('fires lifecycle hooks around prompt output work', async () => {
@@ -23,6 +42,32 @@ describe('prompt output lifecycle', () => {
       expect(calls).toEqual(['before', 'run', 'after']);
     } finally {
       restore();
+    }
+  });
+
+  it('shows the terminal cursor while prompt output is suspended', async () => {
+    const writes: string[] = [];
+    const restoreStdinTTY = stubIsTTY(process.stdin, true);
+    const restoreStdoutTTY = stubIsTTY(process.stdout, true);
+    const originalWrite = process.stdout.write;
+
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      writes.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      return true;
+    }) as typeof process.stdout.write;
+
+    try {
+      const result = await withPromptOutputSuspended(async () => {
+        expect(writes).toEqual([SHOW_CURSOR]);
+        return 'ok';
+      });
+
+      expect(result).toBe('ok');
+      expect(writes).toEqual([SHOW_CURSOR, SHOW_CURSOR]);
+    } finally {
+      process.stdout.write = originalWrite;
+      restoreStdoutTTY();
+      restoreStdinTTY();
     }
   });
 

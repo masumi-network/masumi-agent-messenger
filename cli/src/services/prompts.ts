@@ -7,6 +7,8 @@ type PromptOutputLifecycle = {
   afterPrompt(): void;
 };
 
+const SHOW_CURSOR = '\u001B[?25h';
+
 let promptOutputLifecycle: PromptOutputLifecycle | undefined;
 
 export function installPromptOutputLifecycle(hooks: PromptOutputLifecycle): () => void {
@@ -20,15 +22,23 @@ export function installPromptOutputLifecycle(hooks: PromptOutputLifecycle): () =
 export async function withPromptOutputSuspended<T>(run: () => Promise<T>): Promise<T> {
   const lifecycle = promptOutputLifecycle;
   lifecycle?.beforePrompt();
+  showPromptCursor();
   try {
     return await run();
   } finally {
+    showPromptCursor();
     lifecycle?.afterPrompt();
   }
 }
 
 function interactiveStdioAvailable(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+function showPromptCursor(): void {
+  if (interactiveStdioAvailable()) {
+    process.stdout.write(SHOW_CURSOR);
+  }
 }
 
 export async function confirmYesNo(params: {

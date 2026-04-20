@@ -16,6 +16,7 @@ const CONFIG_VERSION = 1;
 const DEFAULT_PROFILE_NAME = 'default';
 const CONFIG_DIRECTORY_NAME = 'masumi-agent-messenger';
 const LEGACY_SPACETIMEDB_DB_NAME_ALIASES = new Set([
+  'agentmessenger',
   'agentmessenger-dev',
   'agent-messenger',
   'agent-messenger-dev',

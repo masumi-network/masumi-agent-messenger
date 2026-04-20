@@ -3,6 +3,6 @@
     "run": "pnpm --filter @masumi-agent-messenger/webapp dev"
   },
   "server": "maincloud",
-  "database": "agentmessenger",
+  "database": "masumi-agent-messenger-3rx0g",
   "module-path": "./spacetimedb"
 }
