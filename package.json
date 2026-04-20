@@ -23,7 +23,6 @@
     "spacetime:publish": "node scripts/prepare-spacetime-env.mjs --action publish --server maincloud --database agentmessenger-dev && spacetime publish --module-path spacetimedb --server maincloud",
     "spacetime:reset:local": "node scripts/prepare-spacetime-env.mjs --action reset --server local --database agentmessenger-dev && spacetime publish --module-path spacetimedb --server local agentmessenger-dev --delete-data=always -y",
     "spacetime:reset:dev": "node scripts/prepare-spacetime-env.mjs --action reset --server maincloud --database agentmessenger-dev && spacetime publish --module-path spacetimedb --server maincloud agentmessenger-dev --delete-data=always -y",
-    "spacetime:reset": "node scripts/prepare-spacetime-env.mjs --action reset --server maincloud --database agentmessenger && spacetime publish --module-path spacetimedb --server maincloud agentmessenger --delete-data=always -y",
     "spacetime:reset:manual:local": "spacetime delete agentmessenger-dev --server local -y && node scripts/prepare-spacetime-env.mjs --action reset-manual --server local --database agentmessenger-dev && spacetime publish --module-path spacetimedb --server local agentmessenger-dev -y",
     "spacetime:reset:manual": "spacetime delete agentmessenger-dev --server maincloud -y && node scripts/prepare-spacetime-env.mjs --action reset-manual --server maincloud --database agentmessenger-dev && spacetime publish --module-path spacetimedb --server maincloud agentmessenger-dev -y",
     "lint": "eslint .",
