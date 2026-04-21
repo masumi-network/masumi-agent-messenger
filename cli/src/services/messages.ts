@@ -65,6 +65,7 @@ export type InboxMessageItem = {
   legacyPlaintext: boolean;
   replyToMessageId: string | null;
   trustStatus: 'self' | 'trusted' | 'unpinned-first-seen' | 'untrusted-rotation';
+  trustNotice: string | null;
   trustWarning: string | null;
 };
 
@@ -305,6 +306,7 @@ export async function decryptVisibleMessage(params: {
   unsupportedReasons: string[];
   legacyPlaintext: boolean;
   trustStatus: MessageTrustStatus;
+  trustNotice: string | null;
   trustWarning: string | null;
 }> {
   const senderActor = params.actorsById.get(params.message.senderAgentDbId);
@@ -319,12 +321,14 @@ export async function decryptVisibleMessage(params: {
       unsupportedReasons: [],
       legacyPlaintext: false,
       trustStatus: 'trusted',
+      trustNotice: null,
       trustWarning: null,
     };
   }
 
   const isSelfSender = params.ownActorIds?.has(senderActor.id) ?? false;
   let trustStatus: MessageTrustStatus = 'trusted';
+  let trustNotice: string | null = null;
   let trustWarning: string | null = null;
   if (!isSelfSender) {
     const observedTuple = {
@@ -344,6 +348,7 @@ export async function decryptVisibleMessage(params: {
         trustWarning = `${senderActor.slug} keys are not trusted for this existing contact. Verify out-of-band, then run \`masumi-agent-messenger inbox trust pin ${senderActor.slug}\`.`;
       }
     } else if (comparison.status === 'rotated') {
+      trustNotice = `Key rotation: ${senderActor.slug} refreshed keys.`;
       const messageSigningKey = findVersionedKey(
         senderActor,
         params.bundlesByActorId.get(senderActor.id) ?? [],
@@ -352,7 +357,7 @@ export async function decryptVisibleMessage(params: {
       );
       if (!messageSigningKey) {
         trustStatus = 'untrusted-rotation';
-        trustWarning = `${senderActor.slug} has rotated keys but the signing key for version ${params.message.signingKeyVersion} could not be found. Treat this message as unverifiable.`;
+        trustWarning = `${senderActor.slug} has rotated keys, but the signing key for version ${params.message.signingKeyVersion} could not be found.`;
       } else {
         const messageSigningTrusted = await isInboundSignatureTrusted(
           senderActor.publicIdentity,
@@ -361,7 +366,7 @@ export async function decryptVisibleMessage(params: {
         );
         if (!messageSigningTrusted) {
           trustStatus = 'untrusted-rotation';
-          trustWarning = `${senderActor.slug} has rotated keys (${comparison.pinned.current.signingKeyVersion} → ${senderActor.currentSigningKeyVersion}). Verify out-of-band, then run \`masumi-agent-messenger inbox trust pin --force ${senderActor.slug}\`.`;
+          trustWarning = `${senderActor.slug} has rotated keys. Message signature is not trusted.`;
         }
       }
     }
@@ -390,6 +395,7 @@ export async function decryptVisibleMessage(params: {
       unsupportedReasons: [],
       legacyPlaintext: false,
       trustStatus,
+      trustNotice,
       trustWarning,
     };
   }
@@ -425,6 +431,7 @@ export async function decryptVisibleMessage(params: {
       unsupportedReasons: [],
       legacyPlaintext: false,
       trustStatus,
+      trustNotice,
       trustWarning,
     };
   }
@@ -443,6 +450,7 @@ export async function decryptVisibleMessage(params: {
       unsupportedReasons: [],
       legacyPlaintext: false,
       trustStatus,
+      trustNotice,
       trustWarning,
     };
   }
@@ -527,6 +535,7 @@ export async function decryptVisibleMessage(params: {
         unsupportedReasons,
         legacyPlaintext: parsed.legacyPlaintext,
         trustStatus,
+        trustNotice,
         trustWarning,
       };
     }
@@ -541,6 +550,7 @@ export async function decryptVisibleMessage(params: {
       unsupportedReasons,
       legacyPlaintext: parsed.legacyPlaintext,
       trustStatus,
+      trustNotice,
       trustWarning,
     };
   } catch (error) {
@@ -554,6 +564,7 @@ export async function decryptVisibleMessage(params: {
       unsupportedReasons: [],
       legacyPlaintext: false,
       trustStatus,
+      trustNotice,
       trustWarning,
     };
   }
@@ -683,6 +694,7 @@ export async function readNewMessages(params: {
             legacyPlaintext: decrypted.legacyPlaintext,
             replyToMessageId: message.replyToMessageId?.toString() ?? null,
             trustStatus: decrypted.trustStatus,
+            trustNotice: decrypted.trustNotice,
             trustWarning: decrypted.trustWarning,
           } satisfies InboxMessageItem;
         })

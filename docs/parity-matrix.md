@@ -28,6 +28,7 @@
 | Device list / revoke | Yes | Yes | `masumi-agent-messenger auth device list|revoke`, `/$slug` |
 | Encrypted backup export / restore | Yes | Yes | `masumi-agent-messenger auth backup export|import`, `/` and `/$slug` |
 | Rotate inbox keys | Yes | Yes | `masumi-agent-messenger auth rotate`, `/$slug` |
+| Confirm imported rotated keys | Yes | Yes | `masumi-agent-messenger auth keys confirm --slug <slug>`, composer guard in `/$slug` |
 
 ## Notes
 

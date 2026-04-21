@@ -235,6 +235,7 @@ type LiveThreadMessage = {
   body: string;
   decryptStatus: 'ok' | 'unsupported' | 'failed';
   trustStatus: 'self' | 'trusted' | 'unpinned-first-seen' | 'untrusted-rotation';
+  trustNotice: string | null;
   trustWarning: string | null;
   optimistic?: boolean;
 };
@@ -352,6 +353,7 @@ function createOptimisticThreadMessage(params: {
     body: params.body,
     decryptStatus: 'ok',
     trustStatus: 'self',
+    trustNotice: null,
     trustWarning: null,
     optimistic: true,
   };
@@ -953,6 +955,7 @@ async function buildLiveThreadMessages(params: {
           `[${decrypted.decryptStatus === 'failed' ? decrypted.decryptError ?? 'Unable to decrypt' : 'Unsupported content blocked'}]`,
         decryptStatus: decrypted.decryptStatus,
         trustStatus: decrypted.trustStatus,
+        trustNotice: decrypted.trustNotice,
         trustWarning: decrypted.trustWarning,
       } satisfies LiveThreadMessage;
     })
@@ -4496,6 +4499,12 @@ export function RootShell({
                             {message.optimistic ? ' · syncing…' : ''}
                           </Text>
                         </Text>
+                        {message.trustNotice ? (
+                          <Text color="yellow">{message.trustNotice}</Text>
+                        ) : null}
+                        {message.trustWarning ? (
+                          <Text color="red">{message.trustWarning}</Text>
+                        ) : null}
                           <Text>
                             {capTextLines(message.body, MAX_MESSAGE_BODY_LINES)}
                           </Text>

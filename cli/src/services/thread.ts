@@ -86,6 +86,7 @@ export type ThreadHistoryMessage = {
   legacyPlaintext: boolean;
   replyToMessageId: string | null;
   trustStatus: 'self' | 'trusted' | 'unpinned-first-seen' | 'untrusted-rotation';
+  trustNotice: string | null;
   trustWarning: string | null;
 };
 
@@ -659,6 +660,7 @@ export async function readThreadHistory(params: {
               legacyPlaintext: decrypted.legacyPlaintext,
               replyToMessageId: message.replyToMessageId?.toString() ?? null,
               trustStatus: decrypted.trustStatus,
+              trustNotice: decrypted.trustNotice,
               trustWarning: decrypted.trustWarning,
             } satisfies ThreadHistoryMessage;
           })

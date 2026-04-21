@@ -8,7 +8,7 @@ const reporter: TaskReporter = {
 };
 
 describe('resolveRotationDeviceSelection', () => {
-  it('keeps default sharing enabled for human revoke-only rotations', async () => {
+  it('does not share when only revoke devices are provided', async () => {
     await expect(
       resolveRotationDeviceSelection({
         profileName: 'default',
@@ -19,12 +19,11 @@ describe('resolveRotationDeviceSelection', () => {
       })
     ).resolves.toEqual({
       shareDeviceIds: [],
-      shareAllApprovedDevices: true,
       revokeDeviceIds: ['device-b'],
     });
   });
 
-  it('keeps json revoke-only rotations aligned with human mode', async () => {
+  it('keeps json rotations explicit-share only', async () => {
     await expect(
       resolveRotationDeviceSelection({
         profileName: 'default',
@@ -35,7 +34,6 @@ describe('resolveRotationDeviceSelection', () => {
       })
     ).resolves.toEqual({
       shareDeviceIds: [],
-      shareAllApprovedDevices: true,
       revokeDeviceIds: ['device-b'],
     });
   });
@@ -51,7 +49,6 @@ describe('resolveRotationDeviceSelection', () => {
       })
     ).resolves.toEqual({
       shareDeviceIds: ['device-a'],
-      shareAllApprovedDevices: false,
       revokeDeviceIds: ['device-b'],
     });
   });

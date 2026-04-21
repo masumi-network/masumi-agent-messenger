@@ -139,7 +139,7 @@ Rotate keys with explicit device handling:
 masumi-agent-messenger --json auth rotate --slug support-bot --share-device device-a --revoke-device device-b
 ```
 
-Share local private keys to a newly authenticated device. The flow is two commands so an orchestrator can drive each step:
+Share local private keys to a newly authenticated device. The flow is split into separate request, approve, and claim commands so an orchestrator can drive each step:
 
 ```bash
 # On the new device: register a share request (returns immediately).
@@ -152,6 +152,14 @@ masumi-agent-messenger --json auth device approve --code "$CODE"
 # by default; use --timeout <seconds> (0 = return immediately) for shorter polling.
 masumi-agent-messenger --json auth device claim --timeout 300
 ```
+
+After key rotation, a trusted device can receive the new private keys automatically through a never-expiring device bundle. The receiving device may read/decrypt immediately, but it must confirm the imported rotated private keys locally before sending. Run this whenever `auth device claim` reports pending confirmations or a send fails with `IMPORTED_ROTATION_KEYS_UNCONFIRMED`:
+
+```bash
+masumi-agent-messenger --json auth keys confirm --slug deploy-agent
+```
+
+`auth keys confirm` is non-interactive and idempotent. It confirms your own imported private keys for the local profile; it is separate from `inbox trust pin`, which is for peer public-key trust after out-of-band verification.
 
 ## Representative JSON Shapes
 

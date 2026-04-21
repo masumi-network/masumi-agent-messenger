@@ -8,7 +8,6 @@ type RotationDeviceDecision = 'share' | 'revoke' | 'skip';
 
 export type RotationDeviceSelection = {
   shareDeviceIds: string[];
-  shareAllApprovedDevices: boolean;
   revokeDeviceIds: string[];
 };
 
@@ -39,7 +38,6 @@ export async function resolveRotationDeviceSelection(params: {
   if (params.json) {
     return {
       shareDeviceIds: explicitShareDeviceIds,
-      shareAllApprovedDevices: explicitShareDeviceIds.length === 0,
       revokeDeviceIds: explicitRevokeDeviceIds,
     };
   }
@@ -47,7 +45,6 @@ export async function resolveRotationDeviceSelection(params: {
   if (explicitShareDeviceIds.length > 0 || explicitRevokeDeviceIds.length > 0) {
     return {
       shareDeviceIds: explicitShareDeviceIds,
-      shareAllApprovedDevices: explicitShareDeviceIds.length === 0,
       revokeDeviceIds: explicitRevokeDeviceIds,
     };
   }
@@ -55,7 +52,6 @@ export async function resolveRotationDeviceSelection(params: {
   if (!interactiveStdioAvailable()) {
     return {
       shareDeviceIds: [],
-      shareAllApprovedDevices: true,
       revokeDeviceIds: [],
     };
   }
@@ -68,7 +64,6 @@ export async function resolveRotationDeviceSelection(params: {
   if (otherApprovedDevices.length === 0) {
     return {
       shareDeviceIds: [],
-      shareAllApprovedDevices: false,
       revokeDeviceIds: [],
     };
   }
@@ -102,7 +97,6 @@ export async function resolveRotationDeviceSelection(params: {
 
   return {
     shareDeviceIds,
-    shareAllApprovedDevices: false,
     revokeDeviceIds,
   };
 }

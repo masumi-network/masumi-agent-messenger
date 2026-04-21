@@ -46,7 +46,6 @@ export function registerAuthRotateCommand(command: Command): void {
             profileName: options.profile,
             actorSlug: options.slug,
             shareDeviceIds: deviceSelection.shareDeviceIds,
-            shareAllApprovedDevices: deviceSelection.shareAllApprovedDevices,
             revokeDeviceIds: deviceSelection.revokeDeviceIds,
             reporter,
           }).then(async result => {

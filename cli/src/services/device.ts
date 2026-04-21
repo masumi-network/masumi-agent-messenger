@@ -20,6 +20,7 @@ import {
   getOrCreateCliDeviceKeyMaterial,
   importNamespaceKeyShareSnapshot,
 } from './device-keys';
+import { markImportedRotationKeysPendingFromSnapshot } from './imported-rotation-key-confirmation';
 import { userError } from './errors';
 import type { TaskReporter } from './command-runtime';
 import { createSecretStore, type SecretStore } from './secret-store';
@@ -57,6 +58,7 @@ export type ClaimDeviceShareResult = {
   trustPhrase: string;
   sharedActorCount: number;
   sharedKeyVersionCount: number;
+  pendingImportedRotationKeyCount: number;
 };
 
 export type ApproveDeviceShareResult = {
@@ -127,6 +129,10 @@ function isFutureTimestamp(value: { microsSinceUnixEpoch: bigint }): boolean {
     value.microsSinceUnixEpoch >
     (BigInt(Date.now()) - BigInt(DEVICE_SHARE_REQUEST_MAX_FUTURE_SKEW_MS)) * 1000n
   );
+}
+
+function deviceKeyBundleNeverExpires(bundle: { expiryMode?: { tag: string } }): boolean {
+  return bundle.expiryMode?.tag === 'NeverExpires' || bundle.expiryMode?.tag === 'neverExpires';
 }
 
 function assertFreshClientCreatedAt(value: TimestampLike): Date {
@@ -267,6 +273,7 @@ export async function claimDeviceShare(params: {
       });
       const bundle = claimed[0];
       if (bundle) {
+        const bundleNeverExpires = deviceKeyBundleNeverExpires(bundle);
         const snapshot = await decryptDeviceShareBundle({
           recipientKeyPair: deviceMaterial.keyPair,
           sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
@@ -275,11 +282,31 @@ export async function claimDeviceShare(params: {
           bundleAlgorithm: bundle.bundleAlgorithm,
           context: buildDeviceShareContext(normalizedEmail, deviceMaterial.deviceId),
         });
+        const previousVault = bundleNeverExpires
+          ? await secretStore.getNamespaceKeyVault(auth.profile.name)
+          : null;
+        const previousDefaultKeyPair = bundleNeverExpires
+          ? await secretStore.getAgentKeyPair(auth.profile.name)
+          : null;
         await importNamespaceKeyShareSnapshot({
           profile: auth.profile,
           secretStore,
           snapshot,
         });
+        const pendingImportedRotationKeyCount = bundleNeverExpires
+          ? await markImportedRotationKeysPendingFromSnapshot({
+              profile: auth.profile,
+              secretStore,
+              snapshot,
+              previousVault,
+              previousDefaultKeyPair,
+            })
+          : 0;
+        if (pendingImportedRotationKeyCount > 0) {
+          params.reporter.info(
+            `Rotated private keys require local confirmation before sending. Run \`masumi-agent-messenger auth keys confirm --slug ${snapshot.actors[0]?.identity.slug ?? '<slug>'}\`.`
+          );
+        }
         params.reporter.clearBanner?.();
         params.reporter.success('Imported shared private keys');
         return {
@@ -293,6 +320,7 @@ export async function claimDeviceShare(params: {
           sharedKeyVersionCount: snapshot.actors.reduce((count, actor) => {
             return count + (actor.current ? 1 : 0) + actor.archived.length;
           }, 0),
+          pendingImportedRotationKeyCount,
         };
       }
 
@@ -311,6 +339,7 @@ export async function claimDeviceShare(params: {
       trustPhrase,
       sharedActorCount: 0,
       sharedKeyVersionCount: 0,
+      pendingImportedRotationKeyCount: 0,
     };
   } finally {
     disconnectConnection(conn);

@@ -98,7 +98,7 @@ export function pinFirstObservation(
   const store = readStore();
   if (store.peers[publicIdentity]) {
     throw new Error(
-      `Peer ${publicIdentity} is already pinned. Use confirmPeerKeyRotation to update.`
+      `Peer ${publicIdentity} is already pinned. Use the rotation update path.`
     );
   }
   writeStore(pinPeerKeys(store, publicIdentity, observed, new Date().toISOString()));

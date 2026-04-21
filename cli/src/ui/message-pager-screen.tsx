@@ -10,9 +10,19 @@ type MessagePagerScreenProps = {
   initialPage?: number;
 };
 
+function renderTrustLines(message: InboxMessageItem): string[] {
+  return [
+    message.trustNotice ? `[notice] ${message.trustNotice}` : null,
+    message.trustWarning ? `[warning] ${message.trustWarning}` : null,
+  ].filter((line): line is string => Boolean(line));
+}
+
 function renderMessageText(message: InboxMessageItem): string {
+  const lines = renderTrustLines(message);
+
   if (message.decryptStatus === 'failed') {
-    return `[${message.decryptError ?? 'Unable to decrypt'}]`;
+    lines.push(`[${message.decryptError ?? 'Unable to decrypt'}]`);
+    return lines.join('\n');
   }
 
   if (message.decryptStatus === 'unsupported' && !message.text) {
@@ -23,10 +33,12 @@ function renderMessageText(message: InboxMessageItem): string {
       .filter(Boolean)
       .join(' | ');
     const reason = message.unsupportedReasons.join(' ');
-    return `[Unsupported content blocked${metadata ? `: ${metadata}` : ''}]${reason ? ` ${reason}` : ''}`;
+    lines.push(
+      `[Unsupported content blocked${metadata ? `: ${metadata}` : ''}]${reason ? ` ${reason}` : ''}`
+    );
+    return lines.join('\n');
   }
 
-  const lines: string[] = [];
   if (message.contentType && (message.contentType !== 'text/plain' || message.headerNames.length > 0)) {
     lines.push(`[content-type ${message.contentType}]`);
   }

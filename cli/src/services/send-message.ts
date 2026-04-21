@@ -38,10 +38,12 @@ import { connectivityError, userError } from './errors';
 import {
   autoPinPeerIfUnknown,
   comparePinnedPeer,
+  confirmPeerKeyRotation,
   type PeerKeyTuple,
 } from './peer-key-trust';
 import { resolvePublishedActorLookup } from './published-actor-lookup';
 import { resolveStoredActorKeyPairForPublishedActor } from './actor-keys';
+import { requireImportedRotationKeyConfirmed } from './imported-rotation-key-confirmation';
 import { createSecretStore } from './secret-store';
 import {
   connectAuthenticated,
@@ -257,24 +259,7 @@ async function requirePeerKeyTrust(params: {
     );
   }
 
-  const diffParts: string[] = [];
-  if (comparison.diff.signingKeyVersionChanged || comparison.diff.signingPublicKeyChanged) {
-    diffParts.push(
-      `signing ${comparison.pinned.current.signingKeyVersion} → ${params.observed.signingKeyVersion}`
-    );
-  }
-  if (
-    comparison.diff.encryptionKeyVersionChanged ||
-    comparison.diff.encryptionPublicKeyChanged
-  ) {
-    diffParts.push(
-      `encryption ${comparison.pinned.current.encryptionKeyVersion} → ${params.observed.encryptionKeyVersion}`
-    );
-  }
-  throw userError(
-    `Keys for ${params.displayLabel} have rotated (${diffParts.join(', ')}). Verify the new keys out-of-band, then run \`masumi-agent-messenger inbox trust pin --force ${params.displayLabel}\` before sending.`,
-    { code: 'PEER_KEY_ROTATION_UNCONFIRMED' }
-  );
+  await confirmPeerKeyRotation(params.publicIdentity, params.observed);
 }
 
 function toActorPublicKeys(actor: VisibleAgentRow): ActorPublicKeys {
@@ -312,14 +297,15 @@ async function requireLocalActorKeyPairForSending(params: {
   ownActor: VisibleAgentRow;
 }): Promise<AgentKeyPair> {
   const secretStore = createSecretStore();
+  const identity = {
+    normalizedEmail: params.ownActor.normalizedEmail,
+    slug: params.ownActor.slug,
+    inboxIdentifier: params.ownActor.inboxIdentifier ?? undefined,
+  };
   const keyResolution = await resolveStoredActorKeyPairForPublishedActor({
     profile: params.profile,
     secretStore,
-    identity: {
-      normalizedEmail: params.ownActor.normalizedEmail,
-      slug: params.ownActor.slug,
-      inboxIdentifier: params.ownActor.inboxIdentifier ?? undefined,
-    },
+    identity,
     published: {
       encryption: {
         publicKey: params.ownActor.currentEncryptionPublicKey,
@@ -333,6 +319,10 @@ async function requireLocalActorKeyPairForSending(params: {
   });
 
   if (keyResolution.status === 'matched') {
+    await requireImportedRotationKeyConfirmed({
+      identity,
+      keyPair: keyResolution.keyPair,
+    });
     return keyResolution.keyPair;
   }
 

@@ -90,6 +90,8 @@ import { RotationShareDialog } from '@/components/app/rotation-share-dialog';
 import { formatTimestamp } from '@/lib/thread-format';
 import {
   buildApprovedDeviceShare,
+  decryptClaimedDeviceShare,
+  importDeviceShareSnapshot,
   importClaimedDeviceShare,
   prepareLocalDeviceShareRequest,
   resolveVerifiedDeviceShareRequest,
@@ -102,11 +104,16 @@ import {
   autoPinPeerIfUnknown,
   comparePinnedPeer,
   confirmPeerKeyRotation,
-  describeTupleDiff,
   isInboundSignatureTrusted,
   tupleFromVisibleActor,
   type PeerKeyTuple,
 } from '@/lib/peer-key-trust';
+import {
+  confirmImportedRotationKey,
+  getImportedRotationKeyConfirmationStatus,
+  markImportedRotationSnapshotKeysPending,
+  type ImportedRotationKeyConfirmationStatus,
+} from '@/lib/imported-rotation-key-confirmation';
 import { resolvePublishedActorsForIdentifier } from '@/lib/published-actor-search';
 import { useLiveTable } from '@/lib/spacetime-live-table';
 import {
@@ -151,6 +158,8 @@ import {
 import { MAX_MESSAGE_BODY_CHARS } from '../../../shared/message-limits';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { isTimestampInFuture } from '../../../shared/spacetime-time';
+import type { DeviceKeyShareSnapshot } from '../../../shared/device-sharing';
+import { importedRotationActorKey } from '../../../shared/imported-rotation-key-confirmation';
 import type {
   PublishedActorLookupLike,
   ResolvedPublishedActor,
@@ -233,6 +242,21 @@ type PendingDeviceShareRequestState = {
 
 function deviceKeyBundleNeverExpires(bundle: { expiryMode: { tag: string } }): boolean {
   return bundle.expiryMode.tag === 'NeverExpires' || bundle.expiryMode.tag === 'neverExpires';
+}
+
+async function loadKnownCurrentKeysForSnapshot(
+  snapshot: DeviceKeyShareSnapshot
+): Promise<Map<string, AgentKeyPair | null>> {
+  const knownCurrentKeys = new Map<string, AgentKeyPair | null>();
+  await Promise.all(
+    snapshot.actors.map(async actor => {
+      knownCurrentKeys.set(
+        importedRotationActorKey(actor.identity),
+        await loadStoredAgentKeyPair(actor.identity)
+      );
+    })
+  );
+  return knownCurrentKeys;
 }
 
 type PublicLookupActor = {
@@ -733,28 +757,11 @@ function isApprovalRequiredForFirstContactError(error: unknown): boolean {
   return message.includes('requires approval for first contact');
 }
 
-export class PeerKeyRotationUnconfirmedError extends Error {
-  readonly slug: string;
-  readonly publicIdentity: string;
-  readonly diff: string[];
-
-  constructor(params: { slug: string; publicIdentity: string; diff: string[] }) {
-    super(
-      `Keys for ${params.slug} have rotated: ${params.diff.join('; ')}. Verify out-of-band, then confirm the new keys before sending.`
-    );
-    this.name = 'PeerKeyRotationUnconfirmedError';
-    this.slug = params.slug;
-    this.publicIdentity = params.publicIdentity;
-    this.diff = params.diff;
-  }
-}
-
 async function ensurePeerTrust(params: {
   slug: string;
   publicIdentity: string;
   observed: PeerKeyTuple;
   allowFirstContactTrust: boolean;
-  confirm?: (message: string) => boolean | Promise<boolean>;
 }): Promise<void> {
   const comparison = params.allowFirstContactTrust
     ? autoPinPeerIfUnknown(params.publicIdentity, params.observed)
@@ -772,22 +779,6 @@ async function ensurePeerTrust(params: {
     );
   }
 
-  const diff = describeTupleDiff(comparison.pinned.current, params.observed);
-  const confirmFn =
-    params.confirm ??
-    (typeof globalThis !== 'undefined' && typeof globalThis.confirm === 'function'
-      ? (message: string) => globalThis.confirm(message)
-      : () => false);
-
-  const message = `Keys for "${params.slug}" have rotated:\n\n${diff.join('\n')}\n\nOnly trust these keys after verifying out-of-band (e.g. a message in a separate channel). Trust the new keys?`;
-  const accepted = await Promise.resolve(confirmFn(message));
-  if (!accepted) {
-    throw new PeerKeyRotationUnconfirmedError({
-      slug: params.slug,
-      publicIdentity: params.publicIdentity,
-      diff,
-    });
-  }
   confirmPeerKeyRotation(params.publicIdentity, params.observed);
 }
 
@@ -1085,6 +1076,11 @@ function AuthenticatedInboxPage() {
   );
   const [slugProbeError, setSlugProbeError] = useState<string | null>(null);
   const [actorKeyPair, setActorKeyPair] = useState<AgentKeyPair | null>(null);
+  const [importedRotationKeyConfirmation, setImportedRotationKeyConfirmation] =
+    useState<ImportedRotationKeyConfirmationStatus>({
+      status: 'none',
+      record: null,
+    });
   const [localKeyIssue, setLocalKeyIssue] = useState<DefaultKeyIssue>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [showKeysRecoveryDialog, setShowKeysRecoveryDialog] = useState(false);
@@ -1536,6 +1532,22 @@ function AuthenticatedInboxPage() {
     () => Boolean(activeActor && actorKeyPair && matchesPublishedActorKeys(activeActor, actorKeyPair)),
     [activeActor, actorKeyPair]
   );
+  const refreshImportedRotationKeyConfirmation = useCallback(() => {
+    if (!activeActorIdentity || !actorKeyPair) {
+      setImportedRotationKeyConfirmation({
+        status: 'none',
+        record: null,
+      });
+      return;
+    }
+    setImportedRotationKeyConfirmation(
+      getImportedRotationKeyConfirmationStatus(activeActorIdentity, actorKeyPair)
+    );
+  }, [activeActorIdentity, actorKeyPair]);
+
+  useEffect(() => {
+    refreshImportedRotationKeyConfirmation();
+  }, [refreshImportedRotationKeyConfirmation]);
 
   function handleRevealUnsupportedMessage(messageId: bigint) {
     setDecryptedMessageById(current => {
@@ -2353,7 +2365,7 @@ function AuthenticatedInboxPage() {
         return;
       }
 
-      await importClaimedDeviceShare({
+      const snapshot = await decryptClaimedDeviceShare({
         normalizedEmail: displayInbox.normalizedEmail,
         device,
         sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
@@ -2361,6 +2373,16 @@ function AuthenticatedInboxPage() {
         bundleIv: bundle.bundleIv,
         bundleAlgorithm: bundle.bundleAlgorithm,
       });
+      const knownCurrentKeys = deviceKeyBundleNeverExpires(matchingBundle)
+        ? await loadKnownCurrentKeysForSnapshot(snapshot)
+        : null;
+      await importDeviceShareSnapshot(snapshot);
+      if (knownCurrentKeys) {
+        markImportedRotationSnapshotKeysPending({
+          snapshot,
+          knownCurrentKeys,
+        });
+      }
       if (!claimIsCurrent()) return;
 
       if (!activeActorIdentity) {
@@ -3112,7 +3134,7 @@ function AuthenticatedInboxPage() {
             );
             if (!messageTrusted) {
               messageTrustStatus = 'untrusted-rotation';
-              messageTrustWarning = `${senderActor.slug} has rotated keys. Verify out-of-band before trusting.`;
+              messageTrustWarning = `${senderActor.slug} has rotated keys. Message signature is not trusted.`;
             }
           }
         }
@@ -3804,6 +3826,24 @@ function AuthenticatedInboxPage() {
     }
   }
 
+  function ensureImportedRotationKeyConfirmedForSending(): boolean {
+    if (!activeActor || !actorKeyPair) {
+      return true;
+    }
+    const importedRotationStatus = getImportedRotationKeyConfirmationStatus(
+      toActorIdentity(activeActor),
+      actorKeyPair
+    );
+    if (importedRotationStatus.status !== 'pending') {
+      return true;
+    }
+    setImportedRotationKeyConfirmation(importedRotationStatus);
+    setActorActionError(
+      'Rotated private keys were imported automatically on this browser. Confirm them locally before sending.'
+    );
+    return false;
+  }
+
   async function handleSubmitCompose() {
     if (!activeActor || !connected || !ensureAuthorizedWriteAccess()) {
       return;
@@ -3858,6 +3898,9 @@ function AuthenticatedInboxPage() {
       }
       if (!matchesPublishedActorKeys(activeActor, actorKeyPair)) {
         setActorActionError('Current inbox keys are still loading. Try again in a moment.');
+        return;
+      }
+      if (!ensureImportedRotationKeyConfirmedForSending()) {
         return;
       }
 
@@ -4262,6 +4305,16 @@ function AuthenticatedInboxPage() {
     }
   }
 
+  function handleConfirmImportedRotationKey() {
+    if (!activeActorIdentity || !actorKeyPair) {
+      return;
+    }
+    confirmImportedRotationKey(activeActorIdentity, actorKeyPair);
+    refreshImportedRotationKeyConfirmation();
+    setActorActionError(null);
+    setActorFeedback('Rotated private keys confirmed on this browser.');
+  }
+
   async function handleSendMessage(event: React.FormEvent) {
     event.preventDefault();
     if (!activeActor || !actorKeyPair || !selectedThread || !activeParticipant || !connected) return;
@@ -4286,6 +4339,9 @@ function AuthenticatedInboxPage() {
     }
     if (!matchesPublishedActorKeys(activeActor, actorKeyPair)) {
       setActorActionError('Current inbox keys are still loading. Try again in a moment.');
+      return;
+    }
+    if (!ensureImportedRotationKeyConfirmedForSending()) {
       return;
     }
 
@@ -4505,9 +4561,12 @@ function AuthenticatedInboxPage() {
             })
         : !actorKeysMatchPublished
           ? 'Current inbox keys are still loading or out of sync with published keys.'
+        : importedRotationKeyConfirmation.status === 'pending'
+          ? 'Rotated private keys were imported automatically on this browser. Confirm them locally before sending.'
     : !activeParticipant
             ? 'Current inbox is not an active participant in this thread.'
             : null;
+  const importedRotationKeyPending = importedRotationKeyConfirmation.status === 'pending';
   const showVaultLockedThreadGuard =
     sessionOwnsActiveInbox && !vaultLoading && !vaultUnlocked && !showVaultDialog;
 
@@ -5171,7 +5230,25 @@ function AuthenticatedInboxPage() {
                       />
                     ) : (
                       <>
-                        {composerDisabledReason && !showVaultLockedThreadGuard ? (
+                        {importedRotationKeyPending && !showVaultLockedThreadGuard ? (
+                          <Alert>
+                            <AlertTitle>Confirm imported keys</AlertTitle>
+                            <AlertDescription className="space-y-3">
+                              <p>
+                                Rotated private keys were imported automatically on this browser.
+                                Confirm them locally before sending new messages.
+                              </p>
+                              <Button
+                                type="button"
+                                size="sm"
+                                onClick={handleConfirmImportedRotationKey}
+                              >
+                                Confirm keys
+                              </Button>
+                            </AlertDescription>
+                          </Alert>
+                        ) : null}
+                        {composerDisabledReason && !importedRotationKeyPending && !showVaultLockedThreadGuard ? (
                           <Alert>
                             <AlertDescription>{composerDisabledReason}</AlertDescription>
                           </Alert>

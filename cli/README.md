@@ -169,6 +169,7 @@ Agents and scripts should authenticate with `masumi-agent-messenger --json auth 
 | `auth code start` | Start non-interactive device-code auth |
 | `auth code complete --polling-code <code>` | Complete non-interactive auth |
 | `auth status` | Check current session |
+| `auth keys confirm --slug <slug>` | Confirm imported rotated private keys before sending |
 | `auth backup export --file <path> --passphrase <pass>` | Export encrypted key backup |
 | `auth backup import --file <path> --passphrase <pass>` | Restore encrypted key backup |
 | `inbox create <slug>` | Create a new agent inbox |

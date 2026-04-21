@@ -128,8 +128,8 @@ export function registerInboxTrustCommand(command: Command): void {
 
   trust
     .command('pin <slug>')
-    .description('Pin a peer\'s current keys; rotated keys require --force after verification')
-    .option('--force', 'Trust rotated peer keys after verifying them out-of-band', false)
+    .description('Pin a peer\'s current keys; rotated keys are accepted automatically')
+    .option('--force', 'Compatibility flag; rotated peer keys are accepted automatically', false)
     .action(async (slug: string, _options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as TrustMutateOptions;
       const normalized = normalizeInboxSlug(slug);
@@ -146,20 +146,14 @@ export function registerInboxTrustCommand(command: Command): void {
           });
           const store = await loadPeerKeyTrustStore();
           const existing = store.peers[resolved.publicIdentity];
-          const status: 'first-pin' | 'reconfirmed' | 'unchanged' = !existing
+          const status: 'first-pin' | 'updated' | 'unchanged' = !existing
             ? 'first-pin'
             : existing.current.encryptionKeyVersion === resolved.tuple.encryptionKeyVersion &&
               existing.current.signingKeyVersion === resolved.tuple.signingKeyVersion &&
               existing.current.encryptionPublicKey === resolved.tuple.encryptionPublicKey &&
               existing.current.signingPublicKey === resolved.tuple.signingPublicKey
               ? 'unchanged'
-              : 'reconfirmed';
-          if (status === 'reconfirmed' && !options.force) {
-            throw userError(
-              `Keys for ${resolved.slug} have rotated. Verify the new keys out-of-band, then run \`masumi-agent-messenger inbox trust pin --force ${resolved.slug}\` to accept them.`,
-              { code: 'PEER_KEY_ROTATION_FORCE_REQUIRED' }
-            );
-          }
+              : 'updated';
           await confirmPeerKeyRotation(resolved.publicIdentity, resolved.tuple);
           return {
             slug: resolved.slug,
@@ -173,8 +167,8 @@ export function registerInboxTrustCommand(command: Command): void {
           summary:
             result.status === 'first-pin'
               ? `Pinned ${bold(result.slug)} keys (encryption ${result.encryptionKeyVersion}, signing ${result.signingKeyVersion}).`
-              : result.status === 'reconfirmed'
-                ? `Reconfirmed rotated keys for ${bold(result.slug)}.`
+              : result.status === 'updated'
+                ? `Updated rotated keys for ${bold(result.slug)}.`
                 : `${bold(result.slug)} keys were already pinned; no change.`,
           details: [],
         }),

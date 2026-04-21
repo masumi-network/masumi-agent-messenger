@@ -156,9 +156,7 @@ export function isSigningKeyVersionTrusted(
 }
 
 // Record the first trusted observation of a peer's keys. Throws if the peer is
-// already pinned — callers must go through `confirmPeerRotation` to promote
-// new keys, so an attacker-controlled observation cannot silently overwrite a
-// legitimate pin.
+// already pinned; callers use the rotation promotion path for changed keys.
 export function pinPeerKeys(
   store: PeerKeyTrustStore,
   publicIdentity: string,
@@ -167,7 +165,7 @@ export function pinPeerKeys(
 ): PeerKeyTrustStore {
   if (store.peers[publicIdentity]) {
     throw new Error(
-      `Peer ${publicIdentity} is already pinned. Use confirmPeerRotation to update.`
+      `Peer ${publicIdentity} is already pinned. Use the rotation update path.`
     );
   }
   const next: PinnedPeer = {

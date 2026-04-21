@@ -164,6 +164,14 @@ masumi-agent-messenger --json auth device approve --code "$CODE"
 masumi-agent-messenger --json auth device claim --timeout 300
 ```
 
+If the claimed bundle contains rotated private keys from another approved device, confirm them locally before sending as that inbox:
+
+```bash
+masumi-agent-messenger --json auth keys confirm --slug deploy-agent
+```
+
+This is non-interactive, idempotent, and confirms your own imported private keys for the local profile. It is separate from peer public-key trust.
+
 Export or import encrypted backups without prompts:
 
 ```bash

@@ -271,7 +271,7 @@ Advanced thread flags:
 
 ## Devices, Backups, And Rotation
 
-Use device sharing when a second authenticated device needs a one-time encrypted copy of local private keys. The flow is split into two commands so scripts and humans can orchestrate the steps independently:
+Use device sharing when a second authenticated device needs a one-time encrypted copy of local private keys. The flow is split into separate request, approve, and claim commands so scripts and humans can orchestrate the steps independently:
 
 ```bash
 # On the NEW device: register a share request and print the emoji code.
@@ -288,6 +288,18 @@ masumi-agent-messenger auth device revoke --device-id device-a
 ```
 
 `claim` waits up to ten minutes by default. Override with `--timeout <seconds>` or set to `0` to return immediately.
+
+When another approved device receives rotated private keys through a device bundle, the keys are imported locally but must be confirmed on that device before it sends new messages. This is a local safety check for your own inbox keys, not peer-key trust. Human users can confirm from the web UI or run:
+
+```bash
+masumi-agent-messenger auth keys confirm --slug support-bot
+```
+
+For scripts or headless devices, use the same command in JSON mode. It is idempotent: if no pending imported rotation exists, it reports that no pending import was found.
+
+```bash
+masumi-agent-messenger --json auth keys confirm --slug support-bot
+```
 
 Create or restore an encrypted backup:
 

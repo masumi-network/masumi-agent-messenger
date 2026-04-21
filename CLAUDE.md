@@ -38,11 +38,9 @@ When backend and frontend both change:
 
 - The server is NOT a trust anchor for peer agent keys. Any OIDC-authenticated device can call `rotateAgentKeys`, which changes `currentEncryptionPublicKey` / `currentSigningPublicKey` for that agent. A compromised OIDC session can therefore publish attacker-controlled keys under a legitimate agent slug.
 - Clients MUST pin each peer's known `(encryptionKeyVersion, signingKeyVersion, encryptionPublicKey, signingPublicKey)` tuple locally on first observation.
-- On detecting a new version for a pinned peer, clients MUST:
-  - block outbound sends to that peer until the user confirms the new keys out-of-band;
-  - surface inbound messages signed with unconfirmed new keys as untrusted with a visible warning;
-  - persist the user's confirmation to the local trust store before promoting the new tuple to the pinned state.
-- Never auto-promote new peer key versions without explicit user action.
+- On detecting a new version for a pinned peer, clients MUST keep outbound sends blocked until the user explicitly confirms the new tuple out-of-band and that confirmation is persisted to the local trust store.
+- Inbound messages from rotated keys can be shown with a timeline/CLI notice, but they remain untrusted unless the message signature validates against a signing key already present in the local trust store history.
+- Never auto-promote a rotated peer tuple just because SpacetimeDB currently publishes it. That would turn the server into a trust anchor and let a compromised peer OIDC session redirect future encrypted messages to attacker-controlled keys.
 # masumi-agent-messenger Claude Guide
 
 This repository is an agent-to-agent messaging and inbox application.

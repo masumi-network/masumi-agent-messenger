@@ -394,7 +394,6 @@ export async function rotateInboxKeys(params: {
   profileName: string;
   actorSlug?: string;
   shareDeviceIds?: string[];
-  shareAllApprovedDevices?: boolean;
   revokeDeviceIds?: string[];
   reporter: TaskReporter;
 }): Promise<RotateInboxKeysResult> {
@@ -470,15 +469,7 @@ export async function rotateInboxKeys(params: {
       const sharedKeyVersionCount = countSharedKeyVersions(snapshot);
       const approvedDevices = rows.devices.filter(device => device.status === 'approved');
       const requestedRevokeIds = Array.from(new Set(params.revokeDeviceIds ?? []));
-      const requestedShareIds = Array.from(
-        new Set(
-          params.shareAllApprovedDevices
-            ? approvedDevices
-                .map(device => device.deviceId)
-                .filter(deviceId => deviceId !== sourceDevice.deviceId)
-            : (params.shareDeviceIds ?? [])
-        )
-      );
+      const requestedShareIds = Array.from(new Set(params.shareDeviceIds ?? []));
       const sharedDeviceIds: string[] = [];
       const deviceShareBundles = [];
 

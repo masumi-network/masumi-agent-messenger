@@ -919,7 +919,7 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('requires --force before accepting rotated inbox trust keys', async () => {
+  it('accepts rotated inbox trust keys without --force', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
     mocks.loadPeerKeyTrustStore.mockResolvedValueOnce({
       version: 1,
@@ -938,21 +938,26 @@ describe('CLI command parsing', () => {
       },
     });
 
-    await expect(
-      buildProgram().parseAsync([
-        'node',
-        'masumi-agent-messenger',
-        '--json',
-        'inbox',
-        'trust',
-        'pin',
-        'Support-Bot',
-      ])
-    ).rejects.toMatchObject({ code: 'PEER_KEY_ROTATION_FORCE_REQUIRED' });
-    expect(mocks.confirmPeerKeyRotation).not.toHaveBeenCalled();
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'inbox',
+      'trust',
+      'pin',
+      'Support-Bot',
+    ]);
+
+    expect(mocks.confirmPeerKeyRotation).toHaveBeenCalledWith(
+      'support-bot:public-identity',
+      expect.objectContaining({
+        encryptionKeyVersion: 'enc-v1',
+        signingKeyVersion: 'sig-v1',
+      })
+    );
   });
 
-  it('accepts rotated inbox trust keys with --force', async () => {
+  it('accepts --force for rotated inbox trust keys as compatibility', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
     mocks.loadPeerKeyTrustStore.mockResolvedValueOnce({
       version: 1,

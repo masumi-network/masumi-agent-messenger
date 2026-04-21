@@ -170,6 +170,28 @@ export async function buildApprovedDeviceShare(params: {
   };
 }
 
+export async function decryptClaimedDeviceShare(params: {
+  normalizedEmail: string;
+  device: DeviceKeyMaterial;
+  sourceEncryptionPublicKey: string;
+  bundleCiphertext: string;
+  bundleIv: string;
+  bundleAlgorithm: string;
+}): Promise<DeviceKeyShareSnapshot> {
+  return decryptDeviceShareBundle({
+    recipientKeyPair: params.device.keyPair,
+    sourceEncryptionPublicKey: params.sourceEncryptionPublicKey,
+    bundleCiphertext: params.bundleCiphertext,
+    bundleIv: params.bundleIv,
+    bundleAlgorithm: params.bundleAlgorithm,
+    context: buildDeviceShareContext(params.normalizedEmail, params.device.deviceId),
+  });
+}
+
+export async function importDeviceShareSnapshot(snapshot: DeviceKeyShareSnapshot): Promise<void> {
+  await importInboxKeyShareSnapshot(snapshot);
+}
+
 export async function importClaimedDeviceShare(params: {
   normalizedEmail: string;
   device: DeviceKeyMaterial;
@@ -178,15 +200,7 @@ export async function importClaimedDeviceShare(params: {
   bundleIv: string;
   bundleAlgorithm: string;
 }) {
-  const snapshot = await decryptDeviceShareBundle({
-    recipientKeyPair: params.device.keyPair,
-    sourceEncryptionPublicKey: params.sourceEncryptionPublicKey,
-    bundleCiphertext: params.bundleCiphertext,
-    bundleIv: params.bundleIv,
-    bundleAlgorithm: params.bundleAlgorithm,
-    context: buildDeviceShareContext(params.normalizedEmail, params.device.deviceId),
-  });
-
-  await importInboxKeyShareSnapshot(snapshot);
+  const snapshot = await decryptClaimedDeviceShare(params);
+  await importDeviceShareSnapshot(snapshot);
   return snapshot;
 }

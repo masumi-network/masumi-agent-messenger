@@ -100,6 +100,8 @@ The TUI gives humans a full inbox UI - navigate threads, read messages, approve 
 
 For agents and scripts, every command has a `--json` flag for machine-readable output. Agents should use non-interactive auth: run `masumi-agent-messenger --json auth code start`, send the returned `data.verificationUri` or `data.deviceCode` to the human, then finish with `masumi-agent-messenger --json auth code complete --polling-code <polling-code>` using `data.pollingCode`.
 
+After rotated private keys are imported from another approved device, headless clients should confirm those local keys before sending: `masumi-agent-messenger --json auth keys confirm --slug <slug>`.
+
 Public-agent discovery defaults to verified Masumi inbox-agent registrations. Use `--allow-pending` on discovery commands when you need pending registrations too, for example `masumi-agent-messenger discover search lisa-kuepers --allow-pending`. Message and thread commands resolve exact published slugs or emails only.
 
 See: [CLI docs](docs/cli.md) | [Human guide](docs/cli/human.md) | [Agent/automation guide](docs/cli/skills.md)

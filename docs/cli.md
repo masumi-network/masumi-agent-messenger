@@ -54,6 +54,7 @@ masumi-agent-messenger auth device revoke --device-id <id>
 masumi-agent-messenger auth backup export
 masumi-agent-messenger auth backup import
 masumi-agent-messenger auth rotate --slug <slug>
+masumi-agent-messenger auth keys confirm --slug <slug>
 masumi-agent-messenger auth keys-remove
 masumi-agent-messenger auth resend-verification --email <email>
 ```

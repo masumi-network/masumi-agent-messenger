@@ -1063,7 +1063,6 @@ export function registerAgentCommands(program: Command): void {
             profileName: options.profile,
             actorSlug,
             shareDeviceIds,
-            shareAllApprovedDevices: deviceSelection.shareAllApprovedDevices,
             revokeDeviceIds,
             reporter,
           });
