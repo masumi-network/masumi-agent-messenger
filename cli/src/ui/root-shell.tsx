@@ -2854,6 +2854,11 @@ export function RootShell({
   };
 
   const openRotateKeysTask = () => {
+    const defaultShareDeviceIds =
+      model?.account.devices
+        .filter(device => device.status === 'approved')
+        .map(device => device.deviceId)
+        .join(', ') ?? '';
     const approvedDeviceIds =
       model?.account.devices
         .filter(device => device.status === 'approved')
@@ -2862,14 +2867,14 @@ export function RootShell({
 
     openTaskPanel({
       title: 'Rotate agent keys',
-      help: `Use comma-separated device ids. Approved: ${approvedDeviceIds}`,
+      help: `Rotated keys sync to approved devices listed below by default. Remove ids to leave devices unsynced, or move ids to revoke them. Approved: ${approvedDeviceIds}`,
       submitLabel: 'Rotate',
       fields: [
         {
           key: 'shareDeviceIds',
           label: 'Share to devices',
-          value: '',
-          placeholder: 'optional comma-separated device ids',
+          value: defaultShareDeviceIds,
+          placeholder: 'comma-separated device ids',
           allowEmpty: true,
         },
         {

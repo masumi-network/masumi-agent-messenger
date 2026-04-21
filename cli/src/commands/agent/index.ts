@@ -18,6 +18,7 @@ import {
 } from '../../services/contact-management';
 import { userError } from '../../services/errors';
 import { createInboxIdentity, registerInboxAgent, rotateInboxKeys } from '../../services/inbox-management';
+import { resolveRotationDeviceSelection } from '../../services/key-rotation-device-selection';
 import { maybeOfferBackupAfterKeyCreation } from '../../services/key-backup-prompt';
 import { resolvePublicDescriptionOption } from '../../services/public-description';
 import {
@@ -1039,8 +1040,14 @@ export function registerAgentCommands(program: Command): void {
         options,
         preferPlainReporter: true,
         run: async ({ reporter }) => {
-          const shareDeviceIds = options.shareDevice ?? [];
-          const revokeDeviceIds = options.revokeDevice ?? [];
+          const deviceSelection = await resolveRotationDeviceSelection({
+            profileName: options.profile,
+            json: options.json,
+            reporter,
+            explicitShareDeviceIds: options.shareDevice ?? [],
+            explicitRevokeDeviceIds: options.revokeDevice ?? [],
+          });
+          const { shareDeviceIds, revokeDeviceIds } = deviceSelection;
 
           if (revokeDeviceIds.length > 0) {
             reporter.info(
@@ -1056,6 +1063,7 @@ export function registerAgentCommands(program: Command): void {
             profileName: options.profile,
             actorSlug,
             shareDeviceIds,
+            shareAllApprovedDevices: deviceSelection.shareAllApprovedDevices,
             revokeDeviceIds,
             reporter,
           });

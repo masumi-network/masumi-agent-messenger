@@ -9,6 +9,10 @@ import {
   type AlgebraicTypeType as __AlgebraicTypeType,
   type Infer as __Infer,
 } from "spacetimedb";
+import {
+  DeviceKeyBundleExpiryMode,
+} from "./types";
+
 
 export default __t.row({
   id: __t.u64(),
@@ -23,4 +27,7 @@ export default __t.row({
   createdAt: __t.timestamp().name("created_at"),
   expiresAt: __t.timestamp().name("expires_at"),
   consumedAt: __t.option(__t.timestamp()).name("consumed_at"),
+  get expiryMode() {
+    return DeviceKeyBundleExpiryMode.name("expiry_mode");
+  },
 });

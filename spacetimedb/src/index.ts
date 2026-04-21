@@ -66,7 +66,21 @@ const DEVICE_SHARE_RESOLVE_RATE_WINDOW_MS = 60_000;
 const DEVICE_SHARE_RESOLVE_RATE_MAX_PER_WINDOW = 5n;
 const DEVICE_KEY_BUNDLE_MAX_LIFETIME_MS = 15 * 60_000;
 const RATE_LIMIT_REPORT_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const DEVICE_KEY_BUNDLE_EXPIRY_MODES = ['expires', 'neverExpires'] as const;
 const THREAD_INVITE_STATUSES = ['pending', 'accepted', 'rejected'] as const;
+const DeviceKeyBundleExpiryMode = t.enum(
+  'DeviceKeyBundleExpiryMode',
+  DEVICE_KEY_BUNDLE_EXPIRY_MODES
+);
+type DeviceKeyBundleExpiryModeValue = {
+  tag: (typeof DEVICE_KEY_BUNDLE_EXPIRY_MODES)[number];
+};
+const DEVICE_KEY_BUNDLE_EXPIRY_MODE_EXPIRES: DeviceKeyBundleExpiryModeValue = {
+  tag: 'expires',
+};
+const DEVICE_KEY_BUNDLE_EXPIRY_MODE_NEVER_EXPIRES: DeviceKeyBundleExpiryModeValue = {
+  tag: 'neverExpires',
+};
 
 const SecretEnvelopeAttachment = t.object('SecretEnvelopeAttachment', {
   recipientPublicIdentity: t.string(),
@@ -91,6 +105,7 @@ const DeviceKeyBundleAttachment = t.object('DeviceKeyBundleAttachment', {
   sharedAgentCount: t.u64(),
   sharedKeyVersionCount: t.u64(),
   expiresAt: t.timestamp(),
+  expiryMode: DeviceKeyBundleExpiryMode,
 });
 
 const VisibleInboxRow = t.object('VisibleInboxRow', {
@@ -192,6 +207,7 @@ const VisibleDeviceKeyBundleRow = t.object('VisibleDeviceKeyBundleRow', {
   createdAt: t.timestamp(),
   expiresAt: t.timestamp(),
   consumedAt: t.timestamp().optional(),
+  expiryMode: DeviceKeyBundleExpiryMode,
 });
 
 const VisibleThreadRow = t.object('VisibleThreadRow', {
@@ -392,6 +408,7 @@ const ClaimedDeviceKeyBundleRow = t.object('ClaimedDeviceKeyBundleRow', {
   sharedKeyVersionCount: t.u64(),
   createdAt: t.timestamp(),
   expiresAt: t.timestamp(),
+  expiryMode: DeviceKeyBundleExpiryMode,
 });
 
 const inboxAuthLeaseExpiryTable = table(
@@ -453,6 +470,27 @@ const rateLimitReportCleanupTable = table(
     id: t.u64().primaryKey().autoInc(),
     scheduledAt: t.scheduleAt(),
     reportId: t.u64(),
+    expiresAt: t.timestamp(),
+    createdAt: t.timestamp(),
+  }
+);
+
+const deviceKeyBundleExpiryTable = table(
+  {
+    name: 'device_key_bundle_expiry',
+    indexes: [
+      {
+        accessor: 'device_key_bundle_expiry_bundle_id',
+        algorithm: 'btree',
+        columns: ['bundleId'],
+      },
+    ],
+    scheduled: (): any => expireDeviceKeyBundle,
+  },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    scheduledAt: t.scheduleAt(),
+    bundleId: t.u64(),
     expiresAt: t.timestamp(),
     createdAt: t.timestamp(),
   }
@@ -680,8 +718,10 @@ const spacetimedb = schema({
       createdAt: t.timestamp(),
       expiresAt: t.timestamp(),
       consumedAt: t.timestamp().optional(),
+      expiryMode: DeviceKeyBundleExpiryMode.default(DEVICE_KEY_BUNDLE_EXPIRY_MODE_EXPIRES),
     }
   ),
+  deviceKeyBundleExpiry: deviceKeyBundleExpiryTable,
   thread: table(
     {
       name: 'thread',
@@ -1786,7 +1826,9 @@ function refreshInboxAuthLeaseForInbox(ctx: ModuleCtx, inbox: InboxRow) {
   const oidcClaims = requireOidcIdentityClaims(ctx);
   requireInboxMatchesOidcClaims(inbox, oidcClaims);
   requireVerifiedInbox(inbox);
-  return upsertInboxAuthLease(ctx, inbox, oidcClaims);
+  const lease = upsertInboxAuthLease(ctx, inbox, oidcClaims);
+  reconcileDeviceKeyBundleExpiryState(ctx, inbox.id, ctx.timestamp);
+  return lease;
 }
 
 function getActiveInboxAuthLease(ctx: ReadDbCtx, inbox: InboxRow) {
@@ -2593,11 +2635,17 @@ function isPendingDeviceShareRequest(
   return !request.approvedAt && !request.consumedAt && !isTimestampExpired(request.expiresAt, now);
 }
 
+function isNeverExpiringDeviceKeyBundle(
+  bundle: ReturnType<typeof getRequiredDeviceKeyBundleByRowId>
+) {
+  return bundle.expiryMode.tag === 'neverExpires';
+}
+
 function isClaimableDeviceKeyBundle(
   bundle: ReturnType<typeof getRequiredDeviceKeyBundleByRowId>,
   now: Timestamp
 ) {
-  return !bundle.consumedAt && !isTimestampExpired(bundle.expiresAt, now);
+  return !bundle.consumedAt && (isNeverExpiringDeviceKeyBundle(bundle) || !isTimestampExpired(bundle.expiresAt, now));
 }
 
 function invalidatePendingDeviceShareRequests(
@@ -2629,6 +2677,45 @@ function invalidatePendingDeviceKeyBundles(ctx: ModuleCtx, inboxId: bigint, devi
   }
 }
 
+function scheduleDeviceKeyBundleExpiry(ctx: ModuleCtx, bundle: DeviceKeyBundleRow) {
+  if (isNeverExpiringDeviceKeyBundle(bundle)) {
+    return;
+  }
+  for (const expiry of ctx.db.deviceKeyBundleExpiry.device_key_bundle_expiry_bundle_id.filter(
+    bundle.id
+  )) {
+    if (expiry.expiresAt.microsSinceUnixEpoch === bundle.expiresAt.microsSinceUnixEpoch) {
+      return;
+    }
+  }
+
+  ctx.db.deviceKeyBundleExpiry.insert({
+    id: 0n,
+    scheduledAt: ScheduleAt.time(bundle.expiresAt.microsSinceUnixEpoch),
+    bundleId: bundle.id,
+    expiresAt: bundle.expiresAt,
+    createdAt: ctx.timestamp,
+  });
+}
+
+function reconcileDeviceKeyBundleExpiryState(ctx: ModuleCtx, inboxId: bigint, now: Timestamp) {
+  for (const bundle of ctx.db.deviceKeyBundle.device_key_bundle_inbox_id.filter(inboxId)) {
+    if (bundle.consumedAt || isNeverExpiringDeviceKeyBundle(bundle)) {
+      continue;
+    }
+
+    if (isTimestampExpired(bundle.expiresAt, now)) {
+      ctx.db.deviceKeyBundle.id.update({
+        ...bundle,
+        consumedAt: now,
+      });
+      continue;
+    }
+
+    scheduleDeviceKeyBundleExpiry(ctx, bundle);
+  }
+}
+
 function insertDeviceKeyBundle(
   ctx: ModuleCtx,
   attachment: {
@@ -2643,6 +2730,7 @@ function insertDeviceKeyBundle(
     sharedAgentCount: bigint;
     sharedKeyVersionCount: bigint;
     expiresAt: Timestamp;
+    expiryMode: DeviceKeyBundleExpiryModeValue;
   }
 ) {
   const normalizedDeviceId = normalizeDeviceId(attachment.deviceId);
@@ -2694,7 +2782,7 @@ function insertDeviceKeyBundle(
 
   invalidatePendingDeviceKeyBundles(ctx, targetDevice.inboxId, normalizedDeviceId);
 
-  ctx.db.deviceKeyBundle.insert({
+  const insertedBundle = ctx.db.deviceKeyBundle.insert({
     id: 0n,
     targetDeviceId: normalizedDeviceId,
     inboxId: targetDevice.inboxId,
@@ -2710,7 +2798,9 @@ function insertDeviceKeyBundle(
     createdAt: ctx.timestamp,
     expiresAt: attachment.expiresAt,
     consumedAt: undefined,
+    expiryMode: attachment.expiryMode,
   });
+  scheduleDeviceKeyBundleExpiry(ctx, insertedBundle);
 }
 
 function getThreadParticipants(ctx: ReadDbCtx, threadId: bigint) {
@@ -3604,6 +3694,7 @@ export const visibleDeviceKeyBundles = spacetimedb.view(
         createdAt: bundle.createdAt,
         expiresAt: bundle.expiresAt,
         consumedAt: bundle.consumedAt,
+        expiryMode: bundle.expiryMode,
       }));
   }
 );
@@ -3832,6 +3923,32 @@ export const expireInboxAuthLease = spacetimedb.reducer(
       ...lease,
       active: false,
       updatedAt: ctx.timestamp,
+    });
+  }
+);
+
+export const expireDeviceKeyBundle = spacetimedb.reducer(
+  { arg: deviceKeyBundleExpiryTable.rowType },
+  (ctx, { arg }) => {
+    if (!ctx.senderAuth.isInternal) {
+      throw new SenderError('This reducer can only be called by the scheduler');
+    }
+
+    const bundle = ctx.db.deviceKeyBundle.id.find(arg.bundleId);
+    ctx.db.deviceKeyBundleExpiry.delete(arg);
+    if (!bundle || bundle.consumedAt || isNeverExpiringDeviceKeyBundle(bundle)) {
+      return;
+    }
+    if (
+      bundle.expiresAt.microsSinceUnixEpoch !== arg.expiresAt.microsSinceUnixEpoch ||
+      !isTimestampExpired(bundle.expiresAt, ctx.timestamp)
+    ) {
+      return;
+    }
+
+    ctx.db.deviceKeyBundle.id.update({
+      ...bundle,
+      consumedAt: ctx.timestamp,
     });
   }
 );
@@ -4120,6 +4237,7 @@ export const claimDeviceKeyBundle = spacetimedb.procedure(
           sharedKeyVersionCount: bundle.sharedKeyVersionCount,
           createdAt: bundle.createdAt,
           expiresAt: bundle.expiresAt,
+          expiryMode: bundle.expiryMode,
         },
       ];
     });
@@ -4277,10 +4395,11 @@ export const approveDeviceShare = spacetimedb.reducer(
         bundleCiphertext,
       bundleIv,
       bundleAlgorithm,
-      sharedAgentCount,
-      sharedKeyVersionCount,
-      expiresAt,
-    });
+        sharedAgentCount,
+        sharedKeyVersionCount,
+        expiresAt,
+        expiryMode: DEVICE_KEY_BUNDLE_EXPIRY_MODE_EXPIRES,
+      });
 
     ctx.db.deviceShareRequest.id.update({
       ...request,
@@ -5186,6 +5305,7 @@ export const rotateAgentKeys = spacetimedb.reducer(
         sharedAgentCount: attachment.sharedAgentCount,
         sharedKeyVersionCount: attachment.sharedKeyVersionCount,
         expiresAt: attachment.expiresAt,
+        expiryMode: attachment.expiryMode,
       });
     }
   }

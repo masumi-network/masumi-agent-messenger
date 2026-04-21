@@ -141,6 +141,7 @@ export async function buildApprovedDeviceShare(params: {
   targetDeviceEncryptionPublicKey: string;
   sourceDevice: DeviceKeyMaterial;
   expiresInMinutes?: number;
+  expiryMode?: 'expires' | 'neverExpires';
   snapshot?: DeviceKeyShareSnapshot;
 }) {
   const snapshot =
@@ -157,12 +158,15 @@ export async function buildApprovedDeviceShare(params: {
     snapshot,
   });
 
+  const expiresAt = new Date(Date.now() + (params.expiresInMinutes ?? 15) * 60_000);
+
   return {
     ...bundle,
     sourceDeviceId: params.sourceDevice.deviceId,
     sharedActorCount: countSharedActors(snapshot),
     sharedKeyVersionCount: countSharedKeyVersions(snapshot),
-    expiresAt: new Date(Date.now() + (params.expiresInMinutes ?? 15) * 60_000),
+    expiresAt,
+    expiryMode: params.expiryMode === 'neverExpires' ? { tag: 'NeverExpires' as const } : { tag: 'Expires' as const },
   };
 }
 

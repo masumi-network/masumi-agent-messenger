@@ -69,6 +69,9 @@ export const ClaimedDeviceKeyBundleRow = __t.object("ClaimedDeviceKeyBundleRow",
   sharedKeyVersionCount: __t.u64(),
   createdAt: __t.timestamp(),
   expiresAt: __t.timestamp(),
+  get expiryMode() {
+    return DeviceKeyBundleExpiryMode;
+  },
 });
 export type ClaimedDeviceKeyBundleRow = __Infer<typeof ClaimedDeviceKeyBundleRow>;
 
@@ -163,6 +166,9 @@ export const DeviceKeyBundle = __t.object("DeviceKeyBundle", {
   createdAt: __t.timestamp(),
   expiresAt: __t.timestamp(),
   consumedAt: __t.option(__t.timestamp()),
+  get expiryMode() {
+    return DeviceKeyBundleExpiryMode;
+  },
 });
 export type DeviceKeyBundle = __Infer<typeof DeviceKeyBundle>;
 
@@ -178,8 +184,27 @@ export const DeviceKeyBundleAttachment = __t.object("DeviceKeyBundleAttachment",
   sharedAgentCount: __t.u64(),
   sharedKeyVersionCount: __t.u64(),
   expiresAt: __t.timestamp(),
+  get expiryMode() {
+    return DeviceKeyBundleExpiryMode;
+  },
 });
 export type DeviceKeyBundleAttachment = __Infer<typeof DeviceKeyBundleAttachment>;
+
+export const DeviceKeyBundleExpiry = __t.object("DeviceKeyBundleExpiry", {
+  id: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  bundleId: __t.u64(),
+  expiresAt: __t.timestamp(),
+  createdAt: __t.timestamp(),
+});
+export type DeviceKeyBundleExpiry = __Infer<typeof DeviceKeyBundleExpiry>;
+
+// The tagged union or sum type for the algebraic type `DeviceKeyBundleExpiryMode`.
+export const DeviceKeyBundleExpiryMode = __t.enum("DeviceKeyBundleExpiryMode", {
+  Expires: __t.unit(),
+  NeverExpires: __t.unit(),
+});
+export type DeviceKeyBundleExpiryMode = __Infer<typeof DeviceKeyBundleExpiryMode>;
 
 export const DeviceShareRequest = __t.object("DeviceShareRequest", {
   id: __t.u64(),
@@ -577,6 +602,9 @@ export const VisibleDeviceKeyBundleRow = __t.object("VisibleDeviceKeyBundleRow",
   createdAt: __t.timestamp(),
   expiresAt: __t.timestamp(),
   consumedAt: __t.option(__t.timestamp()),
+  get expiryMode() {
+    return DeviceKeyBundleExpiryMode;
+  },
 });
 export type VisibleDeviceKeyBundleRow = __Infer<typeof VisibleDeviceKeyBundleRow>;
 

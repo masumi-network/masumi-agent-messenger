@@ -231,6 +231,10 @@ type PendingDeviceShareRequestState = {
   expiresAt: string;
 };
 
+function deviceKeyBundleNeverExpires(bundle: { expiryMode: { tag: string } }): boolean {
+  return bundle.expiryMode.tag === 'NeverExpires' || bundle.expiryMode.tag === 'neverExpires';
+}
+
 type PublicLookupActor = {
   slug: string;
   publicIdentity: string;
@@ -2208,7 +2212,7 @@ function AuthenticatedInboxPage() {
       return (
         bundle.targetDeviceId === targetDeviceId &&
         !bundle.consumedAt &&
-        isTimestampInFuture(bundle.expiresAt)
+        (deviceKeyBundleNeverExpires(bundle) || isTimestampInFuture(bundle.expiresAt))
       );
     });
     if (!matchingBundle) {
@@ -2299,6 +2303,121 @@ function AuthenticatedInboxPage() {
     displayInbox,
     liveConnection,
     pendingDeviceShareRequest,
+  ]);
+
+  useEffect(() => {
+    if (
+      !currentDeviceId ||
+      !connected ||
+      !liveConnection ||
+      !displayInbox ||
+      !vaultUnlocked
+    ) {
+      return;
+    }
+    if (deviceShareClaimDeviceIdRef.current !== null) {
+      return;
+    }
+
+    const matchingBundle = deviceShareBundles.find(bundle => {
+      return (
+        bundle.targetDeviceId === currentDeviceId &&
+        !bundle.consumedAt &&
+        (deviceKeyBundleNeverExpires(bundle) || isTimestampInFuture(bundle.expiresAt))
+      );
+    });
+    if (!matchingBundle) {
+      return;
+    }
+
+    deviceShareClaimDeviceIdRef.current = currentDeviceId;
+    const claimIsCurrent = () =>
+      mountedRef.current && deviceShareClaimDeviceIdRef.current === currentDeviceId;
+
+    deferEffectStateUpdate(() => {
+      if (claimIsCurrent()) {
+        setDeviceActionBusy(true);
+      }
+    });
+    void (async () => {
+      const device = await loadStoredDeviceKeyMaterial(displayInbox.normalizedEmail);
+      if (!device || device.deviceId !== currentDeviceId) {
+        return;
+      }
+
+      const result = await liveConnection.procedures.claimDeviceKeyBundle({
+        deviceId: currentDeviceId,
+      });
+      const bundle = result[0];
+      if (!bundle) {
+        return;
+      }
+
+      await importClaimedDeviceShare({
+        normalizedEmail: displayInbox.normalizedEmail,
+        device,
+        sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
+        bundleCiphertext: bundle.bundleCiphertext,
+        bundleIv: bundle.bundleIv,
+        bundleAlgorithm: bundle.bundleAlgorithm,
+      });
+      if (!claimIsCurrent()) return;
+
+      if (!activeActorIdentity) {
+        setActorFeedback('Rotated private keys imported on this device.');
+        return;
+      }
+
+      let importedKeyPair: AgentKeyPair | null;
+      try {
+        importedKeyPair = await loadStoredAgentKeyPair(activeActorIdentity);
+      } catch (keyRefreshError) {
+        if (claimIsCurrent()) {
+          setActorActionError(
+            keyRefreshError instanceof Error
+              ? `Rotated private keys were imported, but the local key status could not be refreshed. ${keyRefreshError.message}`
+              : 'Rotated private keys were imported, but the local key status could not be refreshed.'
+          );
+        }
+        return;
+      }
+      if (!claimIsCurrent()) return;
+
+      const nextIssue = getActiveActorKeyIssue(activeActor, importedKeyPair);
+      const nextError = getActiveActorKeyError(nextIssue);
+      setActorKeyPair(importedKeyPair);
+      setLocalKeyIssue(nextIssue);
+      setSessionError(nextError);
+      setShowKeysRecoveryDialog(Boolean(nextIssue));
+      setActorFeedback(
+        nextError ? null : 'Rotated private keys imported on this device.'
+      );
+    })()
+      .catch(claimError => {
+        if (!claimIsCurrent()) return;
+        setActorActionError(
+          claimError instanceof Error
+            ? claimError.message
+            : 'Unable to import the shared device bundle'
+        );
+      })
+      .finally(() => {
+        if (deviceShareClaimDeviceIdRef.current === currentDeviceId) {
+          deviceShareClaimDeviceIdRef.current = null;
+          if (mountedRef.current) {
+            setDeviceActionBusy(false);
+          }
+        }
+      });
+  }, [
+    activeActor,
+    activeActorIdentity,
+    connected,
+    currentDeviceId,
+    deviceShareBundles,
+    displayInbox,
+    liveConnection,
+    vaultUnlocked,
   ]);
 
   const visibleThreads = useMemo(() => {
@@ -3376,6 +3495,7 @@ function AuthenticatedInboxPage() {
           targetDeviceEncryptionPublicKey: targetDevice.deviceEncryptionPublicKey,
           sourceDevice,
           snapshot: rotationSnapshot,
+          expiryMode: 'neverExpires',
         });
 
         rotationBundles.push({
@@ -3390,6 +3510,7 @@ function AuthenticatedInboxPage() {
           sharedAgentCount: BigInt(approvedShare.sharedActorCount),
           sharedKeyVersionCount: BigInt(approvedShare.sharedKeyVersionCount),
           expiresAt: Timestamp.fromDate(approvedShare.expiresAt),
+          expiryMode: approvedShare.expiryMode,
         });
       }
 
@@ -3529,6 +3650,7 @@ function AuthenticatedInboxPage() {
         targetDeviceId: request.deviceId,
         targetDeviceEncryptionPublicKey: request.deviceEncryptionPublicKey,
         sourceDevice,
+        expiresInMinutes: 15,
       });
 
       await Promise.resolve(
