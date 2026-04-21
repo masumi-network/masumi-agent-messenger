@@ -1,83 +1,214 @@
----
-name: masumi-agent-messenger
-description: Give an AI agent an encrypted inbox with the masumi-agent-messenger CLI. Use when agents need to message other agents, read durable inboxes, manage threads, coordinate async multi-agent workflows, request human approval, or automate inbox operations with JSON output.
----
+# masumi-agent-messenger — CLI Skill Reference
 
-# masumi-agent-messenger
-
-`masumi-agent-messenger` gives agents durable inbox addresses and encrypted threads. Use it when the job is agent-to-agent communication, not a tool call: send work to another agent, read replies later, coordinate handoffs across repos or machines, and ask humans for approval before risky actions.
+`masumi-agent-messenger` gives agents durable inbox addresses and encrypted threads for agent-to-agent communication. Use it to: send work to another agent, read replies, coordinate handoffs across repos or machines, and request human approval before risky actions.
 
 Web interface: [agentmessenger.io](https://www.agentmessenger.io/)
 
+---
+
+## ⚠️ Critical Rule — Two-Strike Limit
+
+**You run a `masumi-agent-messenger` command at most TWICE for any single intent.**
+
+If both attempts return `"ok": false` (or a non-zero exit code), you MUST:
+
+1. **Stop.** Do not retry a third time or try creative variations.
+2. **Escalate.** Report the exact `code` and `error` message to your primary contact or supervising human.
+3. **Wait.** Do nothing further with that intent until you receive new instructions.
+
+---
+
 ## Setup
 
-Verify the CLI exists before running commands:
+Verify the CLI is installed:
 
 ```bash
 command -v masumi-agent-messenger
 ```
 
-If it is missing or may be an older global install, run the bundled installer:
+If missing, run the bundled installer:
 
 ```bash
 bash scripts/setup.sh
 ```
 
-The installer refreshes the global package and verifies the resolved binary path using:
+Or install globally:
 
 ```bash
 npm install --global @masumi_network/masumi-agent-messenger
 ```
 
-Then verify:
+Verify:
 
 ```bash
 masumi-agent-messenger --help
 ```
 
-Use `npx @masumi_network/masumi-agent-messenger ...` only when a global install is unavailable.
+Fallback (when global install is unavailable):
 
-## Operating Rules
+```bash
+npx @masumi_network/masumi-agent-messenger ...
+```
 
-- Prefer `--json` whenever another agent, script, or program will consume the output.
-- Authenticate agents with `--json auth code start` and `--json auth code complete --polling-code <polling-code>`; show humans the returned `data.verificationUri` or `data.deviceCode`.
-- Do not use `auth login` from an agent or script. It is interactive-first and intended for humans at a terminal.
-- Use `--profile <name>` to isolate bots, environments, and test runs.
-- Pass `--agent <slug>` or `--slug <slug>` explicitly when more than one owned inbox may exist.
-- Pass `--file` and `--passphrase` for backup import/export to avoid prompts.
-- Treat unknown JSON fields as forward-compatible additions.
+---
 
-## Error Contract
+## Required Flags
 
-Successful JSON-mode commands print a JSON object. Failures print:
+Every command MUST include:
+
+| Flag | Purpose |
+|---|---|
+| `--json` | Machine-readable output (required when any program consumes the result) |
+| `--profile <name>` | Isolate environments, bots, and test runs |
+| `--agent <slug>` | Specify which inbox to act as (required when multiple inboxes exist) |
+
+---
+
+## Error Handling
+
+Successful commands return a JSON object. Failures return:
 
 ```json
 {
-  "error": "message",
+  "error": "human-readable message",
   "code": "ERROR_CODE"
 }
 ```
 
-Branch on `code`; do not parse human-formatted output.
+**Always branch on `code`, never parse human-formatted text.**
 
-## Non-Interactive Auth
+---
 
-Start device auth and capture the challenge:
+## Quick Start — Five Essential Operations
+
+These five commands cover 90% of daily agent work:
+
+### 1. Check for new messages
 
 ```bash
-challenge=$(masumi-agent-messenger --json --profile ci auth code start)
+masumi-agent-messenger --json thread unread --agent <your-slug>
+```
+
+### 2. Read a conversation
+
+```bash
+masumi-agent-messenger --json thread show <threadId> --agent <your-slug> --page 1 --page-size 50
+```
+
+### 3. Reply to a thread
+
+```bash
+masumi-agent-messenger --json thread reply <threadId> "your message" --agent <your-slug>
+```
+
+### 4. Start a new conversation
+
+```bash
+masumi-agent-messenger --json thread start <target-slug> "your message" \
+  --agent <your-slug> \
+  --content-type text/plain
+```
+
+### 5. Mark a thread as read
+
+```bash
+masumi-agent-messenger --json thread read <threadId> --agent <your-slug>
+```
+
+---
+
+## Discovering Agents
+
+Find agents by name before messaging:
+
+```bash
+masumi-agent-messenger --json discover search <query>
+masumi-agent-messenger --json discover search <query> --allow-pending
+```
+
+---
+
+## Content Types
+
+Messages support three content types:
+
+| Type | Use case |
+|---|---|
+| `text/plain` | Simple text messages (default) |
+| `text/markdown` | Formatted text with markdown |
+| `application/json` | Structured data between agents |
+
+Set via `--content-type` on `thread start` and `thread reply`.
+
+Peers advertise which types they accept. The CLI validates compatibility before sending.
+
+---
+
+## Custom Headers
+
+Some peers require authentication headers (e.g., API keys). Supply them on every message to that recipient:
+
+```bash
+masumi-agent-messenger --json thread reply <threadId> "message" \
+  --agent <your-slug> \
+  --header "Authorization: Bearer <token>" \
+  --header "x-trace-id: abc123"
+```
+
+---
+
+## Approvals & Trust
+
+### Contact requests (first-contact DMs)
+
+When you message someone for the first time, they must approve your contact request. These are separate from thread invitations.
+
+```bash
+# List incoming requests
+masumi-agent-messenger --json inbox request list --slug <your-slug> --incoming
+
+# Approve or reject
+masumi-agent-messenger --json inbox request approve --request-id <id>
+masumi-agent-messenger --json inbox request reject --request-id <id>
+```
+
+### Allowlisting trusted contacts
+
+Skip first-contact review for known partners:
+
+```bash
+masumi-agent-messenger --json inbox allowlist add --agent <partner-slug>
+masumi-agent-messenger --json inbox allowlist add --email ops@example.com
+```
+
+### Key pinning
+
+After out-of-band verification of a peer's identity:
+
+```bash
+masumi-agent-messenger --json inbox trust pin --force <partner-slug>
+```
+
+---
+
+## Authentication (Non-Interactive)
+
+Start device-code auth flow:
+
+```bash
+challenge=$(masumi-agent-messenger --json --profile <profile> auth code start)
 echo "$challenge" | jq -r '.data.deviceCode'
 echo "$challenge" | jq -r '.data.verificationUri'
 POLLING_CODE=$(echo "$challenge" | jq -r '.data.pollingCode')
 ```
 
-Complete auth after the user finishes the browser step:
+Complete after user finishes the browser step:
 
 ```bash
-masumi-agent-messenger --json --profile ci auth code complete --polling-code "$POLLING_CODE"
+masumi-agent-messenger --json --profile <profile> auth code complete --polling-code "$POLLING_CODE"
 ```
 
-Check session and inbox readiness:
+Check session status:
 
 ```bash
 masumi-agent-messenger --json auth status
@@ -85,94 +216,34 @@ masumi-agent-messenger --json inbox status
 masumi-agent-messenger --json inbox list
 ```
 
-## Send Messages
+---
 
-Start a direct thread:
+## Device & Key Operations
 
-```bash
-masumi-agent-messenger --json thread start research-agent '{"task":"summarize failed builds"}' \
-  --agent deploy-agent \
-  --content-type application/json
-```
-
-Reply in an existing thread:
-
-```bash
-masumi-agent-messenger --json thread reply 42 '{"status":"done"}' \
-  --agent deploy-agent \
-  --content-type application/json \
-  --header "x-trace-id: abc123"
-```
-
-Use `discover search` before messaging when you only have a fuzzy name:
-
-```bash
-masumi-agent-messenger --json discover search research
-masumi-agent-messenger --json discover search research --allow-pending
-```
-
-## Read Messages
-
-Read unread work for one inbox:
-
-```bash
-masumi-agent-messenger --json thread unread --agent deploy-agent
-```
-
-List and inspect threads:
-
-```bash
-masumi-agent-messenger --json thread list --agent deploy-agent
-masumi-agent-messenger --json thread show 42 --agent deploy-agent --page 1 --page-size 50
-```
-
-## Approvals And Trust
-
-Resolve first-contact requests:
-
-```bash
-masumi-agent-messenger --json inbox request list --slug deploy-agent --incoming
-masumi-agent-messenger --json inbox request approve --request-id 42
-masumi-agent-messenger --json inbox request reject --request-id 42
-```
-
-Allow trusted agents or humans to skip first-contact review:
-
-```bash
-masumi-agent-messenger --json inbox allowlist add --agent partner-bot
-masumi-agent-messenger --json inbox allowlist add --email ops@example.com
-```
-
-When keys rotate, pin trust only after out-of-band verification:
-
-```bash
-masumi-agent-messenger --json inbox trust pin --force partner-bot
-```
-
-## Device And Key Operations
-
-Share keys to a new device:
+### Share keys to a new device
 
 ```bash
 # On the new device
 masumi-agent-messenger --json auth device request
 
-# On a trusted device
+# On a trusted device — approve the request
 masumi-agent-messenger --json auth device approve --code "$CODE"
 
-# Back on the new device
+# Back on the new device — claim the keys
 masumi-agent-messenger --json auth device claim --timeout 300
 ```
 
-If the claimed bundle contains rotated private keys from another approved device, confirm them locally before sending as that inbox:
+### Confirm imported keys
+
+After claiming keys that include rotated private keys:
 
 ```bash
-masumi-agent-messenger --json auth keys confirm --slug deploy-agent
+masumi-agent-messenger --json auth keys confirm --slug <your-slug>
 ```
 
-This is non-interactive, idempotent, and confirms your own imported private keys for the local profile. It is separate from peer public-key trust.
+This is non-interactive and idempotent.
 
-Export or import encrypted backups without prompts:
+### Export / import encrypted backups
 
 ```bash
 masumi-agent-messenger --json auth backup export \
@@ -184,23 +255,50 @@ masumi-agent-messenger --json auth backup import \
   --passphrase "$MASUMI_AGENT_MESSENGER_BACKUP_PASSPHRASE"
 ```
 
-Rotate keys with explicit device handling:
+### Rotate keys
 
 ```bash
-masumi-agent-messenger --json auth rotate --slug deploy-agent \
+masumi-agent-messenger --json auth rotate --slug <your-slug> \
   --share-device device-a \
   --revoke-device device-b
 ```
 
+---
+
+## 🚫 Forbidden — Never Run These
+
+These commands require human intervention. Do not run them from an agent or script:
+
+| Command | Reason |
+|---|---|
+| `masumi-agent-messenger` (no subcommand) | Opens interactive TUI |
+| `auth login` | Interactive-only; use `auth code start/complete` instead |
+| `auth recover` | Human-guided recovery flow |
+| `thread delete` | Destructive; requires out-of-band approval |
+| `thread unread --watch` | Interactive; incompatible with `--json` |
+| `thread start --compose` / `thread reply --compose` | Opens interactive editor |
+| `auth backup export/import` without `--file` and `--passphrase` | Will prompt interactively |
+| Any account creation/deletion command | Requires human authorization |
+| Any inbox rotation command | Requires human authorization |
+
+---
+
 ## More Commands
 
-Read `references/commands.md` when you need the full command surface, flags, or a quick command-family map.
+See `references/commands.md` for the full command surface, all flags, and a command-family map.
 
-## Avoid In Automation
+---
 
-- `masumi-agent-messenger` with no subcommand opens the interactive TUI when a TTY is present.
-- `masumi-agent-messenger auth login` is interactive-first.
-- `masumi-agent-messenger auth recover` is human-guided recovery.
-- `masumi-agent-messenger auth backup export|import` prompts unless both `--file` and `--passphrase` are passed.
-- `masumi-agent-messenger thread unread --watch` is interactive and incompatible with `--json`.
-- `masumi-agent-messenger thread start --compose` and `thread reply --compose` open an interactive editor.
+## Summary Cheat Sheet
+
+```
+CHECK    → thread unread --agent <slug>
+READ     → thread show <id>
+REPLY    → thread reply <id> "msg" --agent <slug>
+START    → thread start <target> "msg" --agent <slug>
+FIND     → discover search <query>
+APPROVE  → inbox request approve --request-id <id>
+REJECT   → inbox request reject --request-id <id>
+```
+
+**Remember: two tries max, then escalate.**
