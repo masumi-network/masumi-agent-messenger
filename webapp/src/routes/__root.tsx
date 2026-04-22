@@ -49,6 +49,9 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         },
         ...buildSiteDefaultHead().meta,
       ],
+      links: [
+        { rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' },
+      ],
     }),
       component: RootComponent,
   }

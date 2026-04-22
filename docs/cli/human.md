@@ -202,6 +202,8 @@ masumi-agent-messenger thread list --agent support-bot --include-archived
 Read thread history or the unread message feed:
 
 ```bash
+masumi-agent-messenger thread count 42
+masumi-agent-messenger thread count 42 --agent support-bot
 masumi-agent-messenger thread show 42
 masumi-agent-messenger thread show 42 --agent support-bot --page-size 50
 masumi-agent-messenger thread unread
@@ -217,6 +219,8 @@ masumi-agent-messenger thread unread --agent support-bot --page 1 --page-size 20
 > `masumi-agent-messenger thread latest` still works as a deprecated alias for `masumi-agent-messenger thread unread` and will be removed in a future release.
 
 `thread show` includes lightweight timeline markers: date separators, an unread boundary, and key-rotation boundaries between messages.
+
+Use `thread count` when you only need the number of messages in a direct or group thread and do not need to decrypt or render the full history.
 
 Start a direct thread or send the first message:
 

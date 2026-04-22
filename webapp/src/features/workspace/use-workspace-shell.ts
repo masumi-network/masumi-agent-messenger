@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { useReducer, useSpacetimeDB } from 'spacetimedb/tanstack';
 import { useAuthSession, type AuthenticatedBrowserSession } from '@/lib/auth-session';
 import {
+  buildChannelNavEntries,
   resolveWorkspaceSnapshot,
+  type ChannelNavEntry,
   type OwnedInboxAgentEntry,
 } from '@/lib/app-shell';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
@@ -13,6 +15,9 @@ import type { MasumiRegistrationResult } from '../../../../shared/inbox-agent-re
 import type {
   Agent,
   Inbox as InboxRow,
+  VisibleChannelJoinRequestRow,
+  VisibleChannelMembershipRow,
+  VisibleChannelRow,
   VisibleContactRequestRow,
   VisibleThreadInviteRow,
 } from '@/module_bindings/types';
@@ -48,12 +53,15 @@ export type WorkspaceShellReadyState = {
   actorsReady: boolean;
   contactRequestsReady: boolean;
   threadInvitesReady: boolean;
+  channelTablesReady: boolean;
   tablesReady: boolean;
   tablesError: string | null;
+  channelTablesError: string | null;
   normalizedEmail: string;
   ownedInbox: InboxRow | null;
   existingDefaultActor: Agent | null;
   ownedInboxAgents: OwnedInboxAgentEntry<Agent>[];
+  channelNavEntries: ChannelNavEntry[];
   ownedInboxAgentRegistrationRefresh: OwnedInboxAgentRegistrationRefresh;
   selectedActor: Agent | null;
   shellInboxSlug: string | null;
@@ -112,6 +120,27 @@ export function useWorkspaceShell(params?: {
       tables.visibleThreadInvites,
       'visibleThreadInvites'
     );
+  const [visibleChannels, visibleChannelsReady, visibleChannelsError] =
+    useLiveTable<VisibleChannelRow>(
+      tables.visibleChannels,
+      'visibleChannels'
+    );
+  const [
+    visibleChannelMemberships,
+    visibleChannelMembershipsReady,
+    visibleChannelMembershipsError,
+  ] = useLiveTable<VisibleChannelMembershipRow>(
+    tables.visibleChannelMemberships,
+    'visibleChannelMemberships'
+  );
+  const [
+    visibleChannelJoinRequests,
+    visibleChannelJoinRequestsReady,
+    visibleChannelJoinRequestsError,
+  ] = useLiveTable<VisibleChannelJoinRequestRow>(
+    tables.visibleChannelJoinRequests,
+    'visibleChannelJoinRequests'
+  );
   const rawSnapshot = useMemo(
     () =>
       resolveWorkspaceSnapshot({
@@ -163,6 +192,29 @@ export function useWorkspaceShell(params?: {
       }),
     [contactRequests, inboxes, params?.selectedSlug, refreshedActors, session, threadInvites]
   );
+  const channelNavEntries = useMemo(
+    () =>
+      buildChannelNavEntries({
+        channels: visibleChannels,
+        memberships: visibleChannelMemberships,
+        joinRequests: visibleChannelJoinRequests,
+        ownedActorIds: new Set(snapshot.ownedInboxAgents.map(entry => entry.actor.id)),
+      }),
+    [
+      snapshot.ownedInboxAgents,
+      visibleChannelJoinRequests,
+      visibleChannelMemberships,
+      visibleChannels,
+    ]
+  );
+  const channelTablesReady =
+    visibleChannelsReady &&
+    visibleChannelMembershipsReady &&
+    visibleChannelJoinRequestsReady;
+  const channelTablesError =
+    visibleChannelsError ||
+    visibleChannelMembershipsError ||
+    visibleChannelJoinRequestsError;
 
   useEffect(() => {
     if (
@@ -307,12 +359,15 @@ export function useWorkspaceShell(params?: {
     actorsReady,
     contactRequestsReady,
     threadInvitesReady,
+    channelTablesReady,
     tablesReady: inboxesReady && actorsReady && contactRequestsReady && threadInvitesReady,
     tablesError: inboxesError || actorsError || contactRequestsError || threadInvitesError,
+    channelTablesError,
     normalizedEmail: snapshot.normalizedEmail,
     ownedInbox: snapshot.ownedInbox,
     existingDefaultActor: snapshot.existingDefaultActor,
     ownedInboxAgents: snapshot.ownedInboxAgents,
+    channelNavEntries,
     ownedInboxAgentRegistrationRefresh: {
       busy: ownedAgentRegistrationRefreshBusy,
       targetIds: ownedAgentRegistrationRefreshTargetIds,

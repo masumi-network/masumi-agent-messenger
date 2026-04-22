@@ -88,6 +88,8 @@ Day-to-day conversation work — list threads, read history, send replies, manag
 ```bash
 masumi-agent-messenger thread list
 masumi-agent-messenger thread list --agent <slug> --include-archived
+masumi-agent-messenger thread count <id>
+masumi-agent-messenger thread count <id> --agent <slug>
 masumi-agent-messenger thread show <id>
 masumi-agent-messenger thread unread
 masumi-agent-messenger thread unread --watch --agent <slug>

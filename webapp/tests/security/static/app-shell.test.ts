@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildApprovalView,
+  buildChannelNavEntries,
   buildOwnedInboxAgentEntries,
   buildWorkspaceSearch,
   deriveAppShellSection,
@@ -9,7 +10,6 @@ import {
   parseComposeMode,
   parseOptionalThreadId,
   parseSecurityPanel,
-  parseWorkspaceSettingsTab,
   parseWorkspaceTab,
   resolveDashboardModal,
   resolveShellInboxSlug,
@@ -127,6 +127,93 @@ describe('app shell helpers', () => {
     expect(deriveAppShellSection('/planner-bot/manage')).toBe('inbox');
     expect(deriveAppShellSection('/agents')).toBe('agents');
     expect(deriveAppShellSection('/security')).toBe('security');
+    expect(deriveAppShellSection('/channels')).toBe('channels');
+    expect(deriveAppShellSection('/channels/release-room')).toBe('channels');
+  });
+
+  it('builds channel sidebar entries with admin approval counts', () => {
+    const entries = buildChannelNavEntries({
+      channels: [
+        {
+          id: 10n,
+          slug: 'release-room',
+          title: 'Release room',
+        },
+        {
+          id: 11n,
+          slug: 'incident-feed',
+          title: null,
+        },
+        {
+          id: 12n,
+          slug: 'remote-only',
+          title: 'Remote only',
+        },
+      ],
+      memberships: [
+        {
+          channelId: 10n,
+          agentDbId: 1n,
+          permission: 'read_write',
+          active: true,
+        },
+        {
+          channelId: 10n,
+          agentDbId: 2n,
+          permission: 'admin',
+          active: true,
+        },
+        {
+          channelId: 11n,
+          agentDbId: 1n,
+          permission: 'read',
+          active: true,
+        },
+        {
+          channelId: 12n,
+          agentDbId: 99n,
+          permission: 'admin',
+          active: true,
+        },
+      ],
+      joinRequests: [
+        {
+          channelId: 10n,
+          direction: 'incoming',
+          status: 'pending',
+        },
+        {
+          channelId: 10n,
+          direction: 'incoming',
+          status: 'approved',
+        },
+        {
+          channelId: 11n,
+          direction: 'incoming',
+          status: 'pending',
+        },
+      ],
+      ownedActorIds: new Set([1n, 2n]),
+    });
+
+    expect(entries).toEqual([
+      {
+        channelId: 10n,
+        slug: 'release-room',
+        title: 'Release room',
+        permission: 'admin',
+        isAdmin: true,
+        pendingApprovals: 1,
+      },
+      {
+        channelId: 11n,
+        slug: 'incident-feed',
+        title: null,
+        permission: 'read',
+        isAdmin: false,
+        pendingApprovals: 0,
+      },
+    ]);
   });
 
   it('opens recovery automatically only after bootstrap detects a key issue', () => {
@@ -222,11 +309,8 @@ describe('app shell helpers', () => {
     expect(parseAgentsTab('agents')).toBe('agents');
     expect(parseAgentsTab('register')).toBe('agents');
     expect(parseWorkspaceTab('approvals')).toBe('approvals');
-    expect(parseWorkspaceTab('settings')).toBe('settings');
+    expect(parseWorkspaceTab('settings')).toBeUndefined();
     expect(parseWorkspaceTab('inbox')).toBeUndefined();
-    expect(parseWorkspaceSettingsTab('security')).toBe('advanced');
-    expect(parseWorkspaceSettingsTab('advanced')).toBe('advanced');
-    expect(parseWorkspaceSettingsTab('profile')).toBeUndefined();
   });
 
   it('builds canonical workspace search state for the new tabbed inbox layout', () => {
@@ -235,28 +319,24 @@ describe('app shell helpers', () => {
         thread: '42',
         compose: 'add',
         lookup: 'remote-bot',
-        tab: 'settings',
-        settings: 'advanced',
+        tab: 'approvals',
       })
     ).toEqual({
       thread: '42',
       compose: 'direct',
       lookup: 'remote-bot',
-      tab: 'settings',
-      settings: 'advanced',
+      tab: 'approvals',
     });
 
     expect(
       buildWorkspaceSearch({
         tab: 'inbox',
-        settings: 'profile',
       })
     ).toEqual({
       thread: undefined,
       compose: undefined,
       lookup: undefined,
       tab: undefined,
-      settings: undefined,
     });
   });
 

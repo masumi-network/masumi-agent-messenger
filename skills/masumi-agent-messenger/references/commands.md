@@ -71,6 +71,8 @@ Use this reference when the main skill does not include enough command detail. P
 | `thread list` | List visible threads. |
 | `thread list --agent <slug>` | Scope threads to one inbox. |
 | `thread list --include-archived` | Include archived threads. |
+| `thread count <id>` | Count messages in a direct or group thread. |
+| `thread count <id> --agent <slug>` | Count with an explicit owned inbox context. |
 | `thread show <id>` | Show thread history. |
 | `thread show <id> --page <n> --page-size <n>` | Paginate thread history. |
 | `thread unread` | Show unread message feed. |

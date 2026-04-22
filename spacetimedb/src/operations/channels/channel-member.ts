@@ -1,4 +1,4 @@
-import { t, SenderError, Range } from 'spacetimedb/server';
+import { t, SenderError } from 'spacetimedb/server';
 
 import spacetimedb from '../../schema';
 
@@ -69,10 +69,16 @@ export const listChannelMembers = spacetimedb.procedure(
       const lowerBound = afterMemberId ?? 0n;
 
       const rows: ChannelMemberListResultRow[] = [];
-      for (const member of tx.db.channelMember.channel_member_channel_id_id.filter([
-        channel.id,
-        new Range<bigint>({ tag: 'excluded', value: lowerBound }),
-      ])) {
+      const members = Array.from(tx.db.channelMember.iter())
+        .filter(member => member.channelId === channel.id)
+        .filter(member => member.id > lowerBound)
+        .sort((left, right) => {
+          if (left.id < right.id) return -1;
+          if (left.id > right.id) return 1;
+          return 0;
+        });
+
+      for (const member of members) {
         const memberActor = getRequiredActorByDbId(tx, member.agentDbId);
         rows.push({
           id: member.id,

@@ -124,6 +124,7 @@ List and inspect threads:
 
 ```bash
 masumi-agent-messenger --json thread list --agent deploy-agent
+masumi-agent-messenger --json thread count 42 --agent deploy-agent
 masumi-agent-messenger --json thread show 42 --agent deploy-agent --page 1 --page-size 50
 ```
 

@@ -1,5 +1,5 @@
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router';
-import { Hash, Radio } from '@phosphor-icons/react';
+import { Hash, Radio, SignIn } from '@phosphor-icons/react';
 import { useMemo, useState, type FormEvent } from 'react';
 import { useReducer } from 'spacetimedb/tanstack';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -26,6 +26,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { buildLoginHref, useAuthSession } from '@/lib/auth-session';
 import { buildRouteHead } from '@/lib/seo';
 import { useLiveTable, usePublicLiveTable } from '@/lib/spacetime-live-table';
+import { useWorkspaceShell } from '@/features/workspace/use-workspace-shell';
+import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell';
 import { reducers, tables } from '@/module_bindings';
 import type { Agent, PublicChannel } from '@/module_bindings/types';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
@@ -41,6 +43,95 @@ export const Route = createFileRoute('/channels')({
 });
 
 function ChannelsPage() {
+  const auth = useAuthSession();
+
+  if (auth.status === 'authenticated') {
+    return <AuthenticatedChannelsPage />;
+  }
+
+  return <PublicChannelsPageContent />;
+}
+
+function AuthenticatedChannelsPage() {
+  const workspace = useWorkspaceShell();
+
+  return (
+    <WorkspaceRouteShell
+      workspace={workspace}
+      section="channels"
+      title="Channels"
+      signInReturnTo="/channels"
+      signedOutDescription="Sign in to create channels and review channel approvals."
+    >
+      <AuthenticatedChannelsPageContent embedded />
+    </WorkspaceRouteShell>
+  );
+}
+
+function sortPublicChannels(channels: PublicChannel[]): PublicChannel[] {
+  return [...channels].sort((left, right) => {
+    if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch) {
+      return -1;
+    }
+    if (left.lastMessageAt.microsSinceUnixEpoch < right.lastMessageAt.microsSinceUnixEpoch) {
+      return 1;
+    }
+    return left.slug.localeCompare(right.slug);
+  });
+}
+
+function PublicChannelsPageContent() {
+  const [channels, ready, error] = usePublicLiveTable<PublicChannel>(
+    tables.publicChannel,
+    'publicChannel'
+  );
+  const sortedChannels = useMemo(() => sortPublicChannels(channels), [channels]);
+
+  return (
+    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 p-4 md:p-8">
+      <header className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+            <Radio size={16} weight="fill" />
+            Anonymous public read
+          </div>
+          <h1 className="text-3xl font-semibold tracking-tight">Public channels</h1>
+          <p className="max-w-2xl text-sm text-muted-foreground">
+            Read the latest public channel messages without OIDC. Sign in from the home page when
+            you need full history, posting, or administration.
+          </p>
+        </div>
+        <Button asChild>
+          <a href={buildLoginHref('/channels')}>
+            <SignIn size={16} aria-hidden />
+            Sign in
+          </a>
+        </Button>
+      </header>
+
+      {error ? (
+        <Alert variant="destructive">
+          <AlertTitle>Channel subscription failed</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      <Alert>
+        <AlertTitle>Sign in to create channels</AlertTitle>
+        <AlertDescription className="space-y-3">
+          <span className="block">Anonymous visitors can read public channels.</span>
+          <Button asChild variant="outline">
+            <a href={buildLoginHref('/channels')}>Sign in</a>
+          </Button>
+        </AlertDescription>
+      </Alert>
+
+      <PublicChannelList ready={ready} channels={sortedChannels} />
+    </main>
+  );
+}
+
+function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boolean }) {
   const auth = useAuthSession();
   const navigate = useNavigate();
   const createChannelReducer = useReducer(reducers.createChannel);
@@ -59,15 +150,7 @@ function ChannelsPage() {
   const [draftDiscoverable, setDraftDiscoverable] = useState(true);
   const [creating, setCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const sortedChannels = [...channels].sort((left, right) => {
-    if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch) {
-      return -1;
-    }
-    if (left.lastMessageAt.microsSinceUnixEpoch < right.lastMessageAt.microsSinceUnixEpoch) {
-      return 1;
-    }
-    return left.slug.localeCompare(right.slug);
-  });
+  const sortedChannels = useMemo(() => sortPublicChannels(channels), [channels]);
   const authenticatedSession = auth.status === 'authenticated' ? auth.session : null;
   const normalizedSessionEmail = useMemo(
     () => normalizeEmail(authenticatedSession?.user.email ?? ''),
@@ -119,23 +202,34 @@ function ChannelsPage() {
     }
   }
 
+  const Container = embedded ? 'div' : 'main';
+
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 p-4 md:p-8">
+    <Container
+      className={
+        embedded
+          ? 'mx-auto flex w-full max-w-6xl flex-col gap-6'
+          : 'mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 p-4 md:p-8'
+      }
+    >
       <header className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div className="space-y-2">
           <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
             <Radio size={16} weight="fill" />
-            Anonymous public read
+            {embedded ? 'Workspace channels' : 'Anonymous public read'}
           </div>
           <h1 className="text-3xl font-semibold tracking-tight">Public channels</h1>
           <p className="max-w-2xl text-sm text-muted-foreground">
-            Read the latest public channel messages without OIDC. Sign in from the home page when
-            you need full history, posting, or administration.
+            {embedded
+              ? 'Browse public feeds, create channels, and open joined channels from the sidebar.'
+              : 'Read the latest public channel messages without OIDC. Sign in from the home page when you need full history, posting, or administration.'}
           </p>
         </div>
-        <Button asChild variant="outline">
-          <Link to="/">Account</Link>
-        </Button>
+        {!embedded ? (
+          <Button asChild variant="outline">
+            <Link to="/">Account</Link>
+          </Button>
+        ) : null}
       </header>
 
       {error ? (
@@ -271,52 +365,70 @@ function ChannelsPage() {
         </Alert>
       )}
 
-      {!ready ? (
-        <div className="grid gap-3 md:grid-cols-2">
-          <Skeleton className="h-32 rounded-lg" />
-          <Skeleton className="h-32 rounded-lg" />
-        </div>
-      ) : sortedChannels.length === 0 ? (
-        <Alert>
-          <AlertTitle>No public channels yet</AlertTitle>
-          <AlertDescription>Public channels will appear here as soon as agents create them.</AlertDescription>
-        </Alert>
-      ) : (
-        <section className="grid gap-3 md:grid-cols-2">
-          {sortedChannels.map(channel => (
-            <Card key={channel.channelId.toString()}>
-              <CardHeader className="space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 space-y-1">
-                    <CardTitle className="flex min-w-0 items-center gap-2">
-                      <Hash className="shrink-0" size={18} />
-                      <span className="truncate">{channel.title ?? channel.slug}</span>
-                    </CardTitle>
-                    <CardDescription className="truncate">/{channel.slug}</CardDescription>
-                  </div>
-                  <Badge variant={channel.discoverable ? 'default' : 'secondary'}>
-                    {channel.discoverable ? 'Discoverable' : 'Public'}
-                  </Badge>
-                </div>
-                {channel.description ? (
-                  <p className="line-clamp-2 text-sm text-muted-foreground">{channel.description}</p>
-                ) : null}
-              </CardHeader>
-              <CardContent className="flex items-center justify-between gap-3">
-                <span className="text-sm text-muted-foreground">
-                  {channel.lastMessageSeq.toString()} message
-                  {channel.lastMessageSeq === 1n ? '' : 's'}
-                </span>
-                <Button asChild size="sm">
-                  <Link to="/channels/$slug" params={{ slug: channel.slug }}>
-                    Open
-                  </Link>
-                </Button>
-              </CardContent>
-            </Card>
-          ))}
-        </section>
-      )}
-    </main>
+      <PublicChannelList ready={ready} channels={sortedChannels} />
+    </Container>
+  );
+}
+
+function PublicChannelList({
+  ready,
+  channels,
+}: {
+  ready: boolean;
+  channels: PublicChannel[];
+}) {
+  if (!ready) {
+    return (
+      <div className="grid gap-3 md:grid-cols-2">
+        <Skeleton className="h-32 rounded-lg" />
+        <Skeleton className="h-32 rounded-lg" />
+      </div>
+    );
+  }
+
+  if (channels.length === 0) {
+    return (
+      <Alert>
+        <AlertTitle>No public channels yet</AlertTitle>
+        <AlertDescription>Public channels will appear here as soon as agents create them.</AlertDescription>
+      </Alert>
+    );
+  }
+
+  return (
+    <section className="grid gap-3 md:grid-cols-2">
+      {channels.map(channel => (
+        <Card key={channel.channelId.toString()}>
+          <CardHeader className="space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 space-y-1">
+                <CardTitle className="flex min-w-0 items-center gap-2">
+                  <Hash className="shrink-0" size={18} />
+                  <span className="truncate">{channel.title ?? channel.slug}</span>
+                </CardTitle>
+                <CardDescription className="truncate">/{channel.slug}</CardDescription>
+              </div>
+              <Badge variant={channel.discoverable ? 'default' : 'secondary'}>
+                {channel.discoverable ? 'Discoverable' : 'Public'}
+              </Badge>
+            </div>
+            {channel.description ? (
+              <p className="line-clamp-2 text-sm text-muted-foreground">{channel.description}</p>
+            ) : null}
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-3">
+            <span className="text-sm text-muted-foreground">
+              {channel.lastMessageSeq.toString()} message
+              {channel.lastMessageSeq === 1n ? '' : 's'}
+            </span>
+            <Button asChild size="sm">
+              <Link to="/channels/$slug" params={{ slug: channel.slug }}>
+                Open
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      ))}
+    </section>
   );
 }

@@ -50,6 +50,7 @@ export type ChannelMessageItem = {
   id: string;
   channelSeq: string;
   sender: string;
+  createdAt?: string | null;
   text: string | null;
   status: 'ok' | 'failed';
   error: string | null;
@@ -245,7 +246,7 @@ function toMessageSignatureInput(message: {
   };
 }
 
-async function verifyChannelMessages(
+export async function verifyChannelMessages(
   messages: Array<{
     id: bigint;
     channelId: bigint;
@@ -257,6 +258,7 @@ async function verifyChannelMessages(
     plaintext: string;
     signature: string;
     replyToMessageId?: bigint | null;
+    createdAt?: { toDate(): Date } | null;
   }>
 ): Promise<ChannelMessageItem[]> {
   return Promise.all(
@@ -271,6 +273,7 @@ async function verifyChannelMessages(
           id: message.id.toString(),
           channelSeq: message.channelSeq.toString(),
           sender: message.senderPublicIdentity,
+          createdAt: message.createdAt?.toDate().toISOString() ?? null,
           text: formatEncryptedMessageBody(verified.payload),
           status: 'ok',
           error: null,
@@ -280,6 +283,7 @@ async function verifyChannelMessages(
           id: message.id.toString(),
           channelSeq: message.channelSeq.toString(),
           sender: message.senderPublicIdentity,
+          createdAt: message.createdAt?.toDate().toISOString() ?? null,
           text: null,
           status: 'failed',
           error: error instanceof Error ? error.message : 'Unable to verify channel message',
@@ -375,6 +379,47 @@ function requireOwnedActor(params: {
     });
   }
   return actor;
+}
+
+function requireChannelAdminActor(params: {
+  actors: Agent[];
+  memberships: VisibleChannelMembershipRow[];
+  normalizedEmail: string;
+  channelId: bigint;
+  actorSlug?: string;
+}): Agent {
+  const defaultActor = requireDefaultActor(params.actors, params.normalizedEmail);
+  const candidates = params.actorSlug
+    ? [
+        requireOwnedActor({
+          actors: params.actors,
+          normalizedEmail: params.normalizedEmail,
+          actorSlug: params.actorSlug,
+        }),
+      ]
+    : [
+        defaultActor,
+        ...params.actors.filter(
+          actor => actor.inboxId === defaultActor.inboxId && actor.id !== defaultActor.id
+        ),
+      ];
+  const adminActor = candidates.find(actor =>
+    params.memberships.some(
+      membership =>
+        membership.channelId === params.channelId &&
+        membership.agentDbId === actor.id &&
+        membership.active &&
+        membership.permission === 'admin'
+    )
+  );
+
+  if (!adminActor) {
+    throw userError('No owned admin agent found for this channel.', {
+      code: 'CHANNEL_ADMIN_REQUIRED',
+    });
+  }
+
+  return adminActor;
 }
 
 async function requireLocalKeyPair(params: {
@@ -877,15 +922,54 @@ function formatTimestamp(timestamp: { microsSinceUnixEpoch: bigint }): string {
 
 export async function listChannelJoinRequests(params: {
   profileName: string;
+  actorSlug?: string;
+  slug?: string;
   direction?: 'incoming' | 'outgoing';
   includeResolved?: boolean;
+  requireAdmin?: boolean;
   reporter: TaskReporter;
 }): Promise<ChannelJoinRequestsResult> {
   const connected = await connectForAuthenticatedChannels(params);
-  const { profile, conn, subscription } = connected;
+  const { profile, normalizedEmail, conn, subscription } = connected;
   try {
     const snapshot = readChannelSnapshot(conn);
+    const channelSlug = params.slug ? normalizeChannelSlugInput(params.slug) : null;
+    const selectedChannel = channelSlug
+      ? snapshot.visibleChannels.find(row => row.slug === channelSlug) ??
+        snapshot.publicChannels.find(row => row.slug === channelSlug) ??
+        null
+      : null;
+    const selectedChannelId = selectedChannel
+      ? 'channelId' in selectedChannel
+        ? selectedChannel.channelId
+        : selectedChannel.id
+      : null;
+
+    if (channelSlug && !selectedChannel) {
+      throw userError(`Channel \`${channelSlug}\` is not visible.`, {
+        code: 'CHANNEL_NOT_FOUND',
+      });
+    }
+
+    if (params.requireAdmin) {
+      if (selectedChannelId === null) {
+        throw userError('A channel slug is required for channel approvals.', {
+          code: 'CHANNEL_SLUG_REQUIRED',
+        });
+      }
+      requireChannelAdminActor({
+        actors: snapshot.actors,
+        memberships: snapshot.memberships,
+        normalizedEmail,
+        channelId: selectedChannelId,
+        actorSlug: params.actorSlug,
+      });
+    }
+
     const filtered = snapshot.requests.filter(request => {
+      if (selectedChannelId !== null && request.channelId !== selectedChannelId) {
+        return false;
+      }
       if (params.direction && request.direction !== params.direction) {
         return false;
       }

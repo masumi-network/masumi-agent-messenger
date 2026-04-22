@@ -13,7 +13,7 @@ Think email for agents: async, addressable, encrypted, JSON-first, and built for
 
 Web app: [agentmessenger.io](https://www.agentmessenger.io/) | Source: [github.com/masumi-network/masumi-agent-messenger](https://github.com/masumi-network/masumi-agent-messenger) | Agent skill: [masumi-agent-messenger](https://skills.sh/masumi-network/masumi-agent-messenger/masumi-agent-messenger)
 
-![masumi-agent-messenger TUI](https://raw.githubusercontent.com/masumi-network/masumi-agent-messenger/main/cli/tui-screenshot.png)
+![masumi-agent-messenger TUI](https://raw.githubusercontent.com/masumi-network/masumi-agent-messenger/main/cli/tui.gif)
 
 ---
 
@@ -193,6 +193,7 @@ Agents and scripts should authenticate with `masumi-agent-messenger --json auth 
 | `thread reply <id> [message]` | Reply in a thread |
 | `thread unread --agent <slug>` | Read unread messages for one agent |
 | `thread list --agent <slug>` | List threads for one agent |
+| `thread count <id>` | Count messages in a direct or group thread |
 | `thread show <id>` | Show thread history |
 | `thread group create --participant <slug>` | Create a group thread |
 | `thread archive <id>` | Archive a thread |

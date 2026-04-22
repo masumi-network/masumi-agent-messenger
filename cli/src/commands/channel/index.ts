@@ -167,7 +167,8 @@ export function registerChannelCommands(program: Command): void {
               message.status === 'ok'
                 ? message.text ?? ''
                 : `[${message.error ?? 'Unable to verify message'}]`;
-            return `#${message.channelSeq} ${message.sender}\n  ${body}`;
+            const sentAt = message.createdAt ? ` · ${message.createdAt}` : '';
+            return `#${message.channelSeq} ${message.sender}${sentAt}\n  ${body}`;
           }),
         }),
       });
@@ -232,6 +233,38 @@ export function registerChannelCommands(program: Command): void {
       const options = this.optsWithGlobals() as ChannelOptions;
       await runCommandAction({
         title: 'Masumi channel create',
+        options,
+        run: ({ reporter }) =>
+          createChannel({
+            profileName: options.profile,
+            actorSlug: options.agent,
+            slug,
+            title: options.title,
+            description: options.description,
+            accessMode: options.approvalRequired ? 'approval_required' : 'public',
+            discoverable: options.discoverable !== false,
+            reporter,
+          }),
+        toHuman: result => ({
+          summary: `Channel ${result.slug ?? slug} ${result.status}.`,
+          details: [],
+        }),
+      });
+    });
+
+  channel
+    .command('add')
+    .description('Add a channel from an owned agent')
+    .argument('<slug>', 'Channel slug')
+    .option('--agent <slug>', 'Owned agent slug to create from')
+    .option('--title <title>', 'Channel title')
+    .option('--description <text>', 'Channel description')
+    .option('--approval-required', 'Require admin approval to join')
+    .option('--no-discoverable', 'Hide from discovery/search surfaces')
+    .action(async function (this: Command, slug: string) {
+      const options = this.optsWithGlobals() as ChannelOptions;
+      await runCommandAction({
+        title: 'Masumi channel add',
         options,
         run: ({ reporter }) =>
           createChannel({
@@ -348,6 +381,52 @@ export function registerChannelCommands(program: Command): void {
               { header: 'Requester', key: 'requester' },
               { header: 'Permission', key: 'permission' },
               { header: 'Direction', key: 'direction' },
+              { header: 'Status', key: 'status' },
+              { header: 'Created', key: 'created' },
+            ]
+          ),
+        }),
+      });
+    });
+
+  channel
+    .command('approvals')
+    .description('List join approvals for one channel you administer')
+    .argument('<slug>', 'Channel slug')
+    .option('--agent <slug>', 'Admin agent slug')
+    .option('--all', 'Include resolved (approved/rejected) requests')
+    .action(async function (this: Command, slug: string) {
+      const options = this.optsWithGlobals() as ChannelOptions;
+      await runCommandAction({
+        title: 'Masumi channel approvals',
+        options,
+        run: ({ reporter }) =>
+          listChannelJoinRequests({
+            profileName: options.profile,
+            actorSlug: options.agent,
+            slug,
+            direction: 'incoming',
+            includeResolved: options.all === true,
+            requireAdmin: true,
+            reporter,
+          }),
+        toHuman: result => ({
+          summary:
+            result.requests.length === 0
+              ? renderEmpty(`No channel join approvals found for #${slug}.`)
+              : `Found ${result.requests.length.toString()} channel join approval${result.requests.length === 1 ? '' : 's'} for #${slug}.`,
+          details: renderTable(
+            result.requests.map(request => ({
+              id: request.id,
+              requester: request.requesterSlug,
+              permission: request.permission,
+              status: request.status,
+              created: request.createdAt,
+            })),
+            [
+              { header: 'ID', key: 'id' },
+              { header: 'Requester', key: 'requester' },
+              { header: 'Permission', key: 'permission' },
               { header: 'Status', key: 'status' },
               { header: 'Created', key: 'created' },
             ]

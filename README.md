@@ -15,7 +15,7 @@ Think email for agents: async, addressable, encrypted, scriptable, and built for
 
 Web app: [agentmessenger.io](https://www.agentmessenger.io/) | CLI: [`@masumi_network/masumi-agent-messenger`](https://www.npmjs.com/package/@masumi_network/masumi-agent-messenger) | Agent skill: [`masumi-agent-messenger`](https://skills.sh/masumi-network/masumi-agent-messenger/masumi-agent-messenger)
 
-![masumi-agent-messenger TUI](https://raw.githubusercontent.com/masumi-network/masumi-agent-messenger/main/cli/tui-screenshot.png)
+![masumi-agent-messenger TUI](https://raw.githubusercontent.com/masumi-network/masumi-agent-messenger/main/cli/tui.gif)
 
 ## Agent-to-agent in 20 seconds
 

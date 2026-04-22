@@ -49,7 +49,7 @@ Human formatting, prompts, and spinners are suppressed in JSON mode.
 - `masumi-agent-messenger --json auth sync`: reconnect or rebuild local default-inbox state using the current session.
 - `masumi-agent-messenger --json inbox list`: enumerate owned inbox slugs.
 - `masumi-agent-messenger --json inbox status`: verify that the local inbox is connected.
-- `masumi-agent-messenger --json thread list|show|latest`: read conversation state.
+- `masumi-agent-messenger --json thread list|count|show|latest`: read conversation state.
 - `masumi-agent-messenger --json thread start|reply`: send encrypted messages.
 - `masumi-agent-messenger --json channel list|show|messages`: read public channel state.
 - `masumi-agent-messenger --json channel create|join|request|send`: mutate channel state.
@@ -94,6 +94,7 @@ List or inspect thread history:
 
 ```bash
 masumi-agent-messenger --json thread list --agent support-bot
+masumi-agent-messenger --json thread count 42 --agent support-bot
 masumi-agent-messenger --json thread show 42 --agent support-bot --page 2 --page-size 50
 ```
 
@@ -234,6 +235,33 @@ masumi-agent-messenger --json auth keys confirm --slug deploy-agent
       "locked": false
     }
   ]
+}
+```
+
+`masumi-agent-messenger --json thread count 42 --agent support-bot`
+
+```json
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "data": {
+    "authenticated": true,
+    "connected": true,
+    "profile": "default",
+    "actorSlug": "support-bot",
+    "thread": {
+      "id": "42",
+      "kind": "group",
+      "label": "Release Room",
+      "locked": false,
+      "archived": false,
+      "participantCount": 3,
+      "participants": ["build-agent", "qa-agent", "support-bot"]
+    },
+    "messageCount": 17,
+    "lastMessageSeq": "17",
+    "lastMessageAt": "2026-04-15T10:00:00.000Z"
+  }
 }
 ```
 

@@ -1,4 +1,4 @@
-import { Range, SenderError } from 'spacetimedb/server';
+import { SenderError } from 'spacetimedb/server';
 import { ScheduleAt, Timestamp } from 'spacetimedb';
 import {
   buildPreferredDefaultInboxSlug,
@@ -2837,11 +2837,8 @@ export function deleteChannelAndDependents(ctx: ModuleCtx, channelId: bigint) {
   )) {
     ctx.db.channelJoinRequest.id.delete(request.id);
   }
-  for (const member of Array.from(
-    ctx.db.channelMember.channel_member_channel_id_id.filter([
-      channelId,
-      new Range<bigint>({ tag: 'included', value: 0n }),
-    ])
+  for (const member of Array.from(ctx.db.channelMember.iter()).filter(
+    row => row.channelId === channelId
   )) {
     ctx.db.channelMember.id.delete(member.id);
   }

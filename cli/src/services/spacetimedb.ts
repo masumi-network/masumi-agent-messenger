@@ -14,6 +14,10 @@ import type {
   VisibleDeviceShareRequestRow,
   VisibleInboxRow,
   VisibleMessageRow,
+  VisibleChannelJoinRequestRow,
+  VisibleChannelMessageRow,
+  VisibleChannelMembershipRow,
+  VisibleChannelRow,
 } from '../../../webapp/src/module_bindings/types';
 import { DbConnection as GeneratedDbConnection } from '../../../webapp/src/module_bindings';
 import { connectivityError } from './errors';
@@ -38,6 +42,10 @@ export type ShellRows = {
   deviceRequests: VisibleDeviceShareRequestRow[];
   deviceBundles: VisibleDeviceKeyBundleRow[];
   messages: VisibleMessageRow[];
+  channels: VisibleChannelRow[];
+  channelMessages: VisibleChannelMessageRow[];
+  channelMemberships: VisibleChannelMembershipRow[];
+  channelJoinRequests: VisibleChannelJoinRequestRow[];
 };
 
 type TableLike<Row> = {
@@ -65,6 +73,10 @@ const SHELL_VISIBLE_QUERIES = [
   tables.visibleDeviceShareRequests,
   tables.visibleDeviceKeyBundles,
   tables.visibleMessages,
+  tables.visibleChannels,
+  tables.visibleChannelMessages,
+  tables.visibleChannelMemberships,
+  tables.visibleChannelJoinRequests,
 ] as const;
 
 const SHELL_TABLE_ACCESSORS = [
@@ -82,6 +94,10 @@ const SHELL_TABLE_ACCESSORS = [
   'visibleDeviceShareRequests',
   'visibleDeviceKeyBundles',
   'visibleMessages',
+  'visibleChannels',
+  'visibleChannelMessages',
+  'visibleChannelMemberships',
+  'visibleChannelJoinRequests',
 ] as const satisfies ReadonlyArray<keyof DbConnection['db']>;
 
 function getTable<Row>(
@@ -521,6 +537,16 @@ export function readShellRows(conn: DbConnection): ShellRows {
     deviceRequests: device.requests,
     deviceBundles: device.bundles,
     messages: message.messages,
+    channels: Array.from(conn.db.visibleChannels.iter()) as VisibleChannelRow[],
+    channelMessages: Array.from(
+      conn.db.visibleChannelMessages.iter()
+    ) as VisibleChannelMessageRow[],
+    channelMemberships: Array.from(
+      conn.db.visibleChannelMemberships.iter()
+    ) as VisibleChannelMembershipRow[],
+    channelJoinRequests: Array.from(
+      conn.db.visibleChannelJoinRequests.iter()
+    ) as VisibleChannelJoinRequestRow[],
   };
 }
 
