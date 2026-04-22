@@ -29,9 +29,19 @@ function isInteractiveMessageView(options: MessageOptions): boolean {
   return !options.json && Boolean(process.stdout.isTTY && process.stderr.isTTY);
 }
 
+function renderTrustLines(message: NewMessageFeed['messages'][number]): string[] {
+  return [
+    message.trustNotice ? `[notice] ${message.trustNotice}` : null,
+    message.trustWarning ? `[warning] ${message.trustWarning}` : null,
+  ].filter((line): line is string => Boolean(line));
+}
+
 function renderMessageBody(message: NewMessageFeed['messages'][number]): string {
+  const lines = renderTrustLines(message);
+
   if (message.decryptStatus === 'failed') {
-    return `[${message.decryptError ?? 'Unable to decrypt'}]`;
+    lines.push(`[${message.decryptError ?? 'Unable to decrypt'}]`);
+    return lines.join('\n  ');
   }
 
   if (message.decryptStatus === 'unsupported' && !message.text) {
@@ -42,10 +52,12 @@ function renderMessageBody(message: NewMessageFeed['messages'][number]): string 
       .filter(Boolean)
       .join(' | ');
     const reason = message.unsupportedReasons.join(' ');
-    return `[Unsupported content blocked${metadata ? `: ${metadata}` : ''}]${reason ? ` ${reason}` : ''}`;
+    lines.push(
+      `[Unsupported content blocked${metadata ? `: ${metadata}` : ''}]${reason ? ` ${reason}` : ''}`
+    );
+    return lines.join('\n  ');
   }
 
-  const lines: string[] = [];
   if (message.contentType && (message.contentType !== 'text/plain' || message.headerNames.length > 0)) {
     lines.push(`[content-type ${message.contentType}]`);
   }
@@ -156,7 +168,7 @@ export function registerThreadLatestCommand(command: Command): void {
             const thread = cyan(message.threadLabel);
             const body =
               message.decryptStatus === 'failed'
-                ? red(`[${message.decryptError ?? 'Unable to decrypt'}]`)
+                ? red(renderMessageBody(message))
                 : renderMessageBody(message);
             return `${senderColor(sender)} in ${thread} ${time}\n  ${body}`;
           }),

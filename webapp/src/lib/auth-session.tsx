@@ -18,6 +18,8 @@ export type AuthenticatedBrowserSession = {
     issuer: string;
     subject: string;
     audience: string[];
+    sessionId?: string;
+    jwtId?: string;
     email: string | null;
     emailVerified: boolean;
     name?: string;
@@ -95,6 +97,8 @@ function sameBrowserSession(
     left.expiresAt === right.expiresAt &&
     left.user.issuer === right.user.issuer &&
     left.user.subject === right.user.subject &&
+    left.user.sessionId === right.user.sessionId &&
+    left.user.jwtId === right.user.jwtId &&
     left.user.email === right.user.email &&
     left.user.emailVerified === right.user.emailVerified &&
     left.user.name === right.user.name &&

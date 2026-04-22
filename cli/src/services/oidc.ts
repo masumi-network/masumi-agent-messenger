@@ -57,6 +57,8 @@ export type IdTokenClaims = {
   issuer: string;
   subject: string;
   audience: string[];
+  sessionId?: string;
+  jwtId?: string;
   email: string | null;
   emailVerified: boolean;
   name?: string;
@@ -538,6 +540,8 @@ export function decodeIdTokenClaims(idToken: string): IdTokenClaims {
   const email = parseStringClaim(payload.email) ?? null;
   const name = parseStringClaim(payload.name);
   const nonce = parseStringClaim(payload.nonce);
+  const sessionId = parseStringClaim(payload.sid);
+  const jwtId = parseStringClaim(payload.jti);
   const expiresAtSeconds = parseNumericClaim(payload.exp);
   const audienceValue = payload.aud;
   const audience = Array.isArray(audienceValue)
@@ -556,6 +560,8 @@ export function decodeIdTokenClaims(idToken: string): IdTokenClaims {
     issuer,
     subject,
     audience,
+    sessionId,
+    jwtId,
     email,
     emailVerified: parseBooleanClaim(payload.email_verified),
     name,

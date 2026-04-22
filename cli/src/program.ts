@@ -7,6 +7,7 @@ import { registerDiscoverCommands } from './commands/discover';
 import { ensureCliEnvLoaded } from './services/env';
 import { registerDoctorCommand } from './commands/doctor';
 import { registerAuthCommands } from './commands/auth';
+import { registerChannelCommands } from './commands/channel';
 import { registerInboxCommands } from './commands/inbox';
 import { CLI_BINARY_NAME, CLI_VERSION } from './package-metadata';
 
@@ -17,7 +18,7 @@ export function buildProgram(): Command {
 
   program
     .name(CLI_BINARY_NAME)
-    .description('masumi-agent-messenger CLI for account, agent, thread, and discovery workflows')
+    .description('masumi-agent-messenger CLI for account, agent, thread, channel, and discovery workflows')
     .version(CLI_VERSION)
     .option('--json', 'Emit machine-readable JSON output', false)
     .option('--profile <name>', 'Active CLI profile', 'default')
@@ -33,6 +34,7 @@ export function buildProgram(): Command {
   registerAccountCommands(program);
   registerAgentCommands(program);
   registerThreadCommands(program);
+  registerChannelCommands(program);
   registerDiscoverCommands(program);
   registerDoctorCommand(program);
 

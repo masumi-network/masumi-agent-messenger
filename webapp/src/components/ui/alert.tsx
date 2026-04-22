@@ -3,19 +3,19 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
 const alertVariants = cva(
-  'relative w-full rounded-lg border px-4 py-3 shadow-sm [&>svg~*]:pl-7 [&>svg+div]:translate-y-[-2px] [&>svg]:absolute [&>svg]:left-4 [&>svg]:top-3.5 [&>svg]:text-foreground',
+  'relative w-full rounded-lg border px-4 py-3.5 shadow-xs [&>svg~*]:pl-7 [&>svg+div]:translate-y-[-2px] [&>svg]:absolute [&>svg]:left-4 [&>svg]:top-4 [&>svg]:h-4 [&>svg]:w-4',
   {
     variants: {
       variant: {
         default:
-          'border-blue-500/30 bg-blue-500/10 text-foreground [&>h5]:text-blue-600',
-        info: 'border-blue-500/30 bg-blue-500/10 text-foreground [&>h5]:text-blue-600',
+          'border-blue-500/30 bg-blue-500/10 text-foreground [&>h5]:text-blue-700 [&>svg]:text-blue-600 dark:[&>h5]:text-blue-300 dark:[&>svg]:text-blue-300',
+        info: 'border-blue-500/30 bg-blue-500/10 text-foreground [&>h5]:text-blue-700 [&>svg]:text-blue-600 dark:[&>h5]:text-blue-300 dark:[&>svg]:text-blue-300',
         success:
-          'border-emerald-500/40 bg-emerald-500/10 text-foreground [&>h5]:text-emerald-600',
+          'border-emerald-500/35 bg-emerald-500/10 text-foreground [&>h5]:text-emerald-700 [&>svg]:text-emerald-600 dark:[&>h5]:text-emerald-300 dark:[&>svg]:text-emerald-300',
         warning:
-          'border-amber-500/30 bg-amber-500/10 text-foreground [&>h5]:text-amber-600',
+          'border-amber-500/35 bg-amber-500/10 text-foreground [&>h5]:text-amber-700 [&>svg]:text-amber-600 dark:[&>h5]:text-amber-300 dark:[&>svg]:text-amber-300',
         destructive:
-          'border-destructive/30 bg-destructive/10 text-foreground [&>h5]:text-destructive [&>svg]:text-destructive',
+          'border-destructive/35 bg-destructive/10 text-foreground [&>h5]:text-destructive [&>svg]:text-destructive',
       },
     },
     defaultVariants: {
@@ -32,7 +32,7 @@ const Alert = React.forwardRef<
   <div
     ref={ref}
     role="alert"
-    className={cn(alertVariants({ variant }), 'mx-2 my-1', className)}
+    className={cn(alertVariants({ variant }), onDismiss && 'pr-10', className)}
     {...props}
   >
     {children}
@@ -40,7 +40,7 @@ const Alert = React.forwardRef<
       <button
         onClick={onDismiss}
         aria-label="Dismiss"
-        className="absolute right-3 top-3 rounded p-0.5 opacity-60 hover:opacity-100 focus:outline-none focus:ring-1 focus:ring-current"
+        className="absolute right-2.5 top-2.5 inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background/60 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring/60"
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
@@ -68,7 +68,7 @@ const AlertTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <h5
     ref={ref}
-    className={cn('mb-1 font-medium leading-none tracking-tight', className)}
+    className={cn('mb-1 font-semibold leading-snug tracking-normal', className)}
     {...props}
   />
 ));
@@ -80,7 +80,7 @@ const AlertDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
-    className={cn('text-sm [&_p]:leading-relaxed', className)}
+    className={cn('text-sm leading-relaxed [&_p]:leading-relaxed', className)}
     {...props}
   />
 ));

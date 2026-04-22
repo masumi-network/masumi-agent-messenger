@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import { createInterface } from 'node:readline/promises';
 import {
   addThreadParticipant,
+  countThreadMessages,
   createDirectThread,
   createGroupThread,
   deleteThread,
@@ -110,8 +111,14 @@ function formatThreadRow(params: {
 function renderThreadMessageBody(
   message: Awaited<ReturnType<typeof paginateThreadHistory>>['messages'][number]
 ): string {
+  const lines = [
+    message.trustNotice ? `[notice] ${message.trustNotice}` : null,
+    message.trustWarning ? `[warning] ${message.trustWarning}` : null,
+  ].filter((line): line is string => Boolean(line));
+
   if (message.decryptStatus === 'failed') {
-    return `[${message.decryptError ?? 'Unable to decrypt'}]`;
+    lines.push(`[${message.decryptError ?? 'Unable to decrypt'}]`);
+    return lines.join('\n  ');
   }
 
   if (message.decryptStatus === 'unsupported' && !message.text) {
@@ -122,12 +129,14 @@ function renderThreadMessageBody(
       .filter(Boolean)
       .join(' | ');
     const reason = message.unsupportedReasons.join(' ');
-    return `[Unsupported content blocked${metadata ? `: ${metadata}` : ''}]${
-      reason ? ` ${reason}` : ''
-    }`;
+    lines.push(
+      `[Unsupported content blocked${metadata ? `: ${metadata}` : ''}]${
+        reason ? ` ${reason}` : ''
+      }`
+    );
+    return lines.join('\n  ');
   }
 
-  const lines: string[] = [];
   if (
     message.contentType &&
     (message.contentType !== 'text/plain' || message.headerNames.length > 0)
@@ -153,13 +162,23 @@ function renderThreadMessageBody(
 function renderUnreadMessageBody(
   message: Awaited<ReturnType<typeof paginateNewMessages>>['messages'][number]
 ): string {
+  const lines = [
+    message.trustNotice ? `[notice] ${message.trustNotice}` : null,
+    message.trustWarning ? `[warning] ${message.trustWarning}` : null,
+  ].filter((line): line is string => Boolean(line));
+
   if (message.decryptStatus === 'failed') {
-    return `[${message.decryptError ?? 'Unable to decrypt'}]`;
+    lines.push(`[${message.decryptError ?? 'Unable to decrypt'}]`);
+    return lines.join('\n  ');
   }
   if (message.decryptStatus === 'unsupported' && !message.text) {
-    return `[Unsupported content blocked] ${message.unsupportedReasons.join(' ')}`.trim();
+    lines.push(`[Unsupported content blocked] ${message.unsupportedReasons.join(' ')}`.trim());
+    return lines.join('\n  ');
   }
-  return message.text ?? '[Unable to render message]';
+  if (message.text) {
+    lines.push(message.text);
+  }
+  return lines.join('\n  ') || '[Unable to render message]';
 }
 
 export function registerThreadCommands(program: Command): void {
@@ -249,6 +268,50 @@ export function registerThreadCommands(program: Command): void {
                   ],
           };
         },
+      });
+    });
+
+  thread
+    .command('count')
+    .description('Count messages in a direct or group thread')
+    .argument('<threadId>', 'Thread id to count')
+    .option('--agent <slug>', 'Owned agent slug to use for thread visibility')
+    .action(async function (this: Command, threadId: string) {
+      const options = this.optsWithGlobals() as ThreadOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
+      await runCommandAction({
+        title: 'Masumi thread count',
+        options,
+        run: ({ reporter }) =>
+          countThreadMessages({
+            profileName: options.profile,
+            threadId,
+            actorSlug,
+            reporter,
+          }),
+        toHuman: result => ({
+          summary: `${cyan(result.thread.label)} has ${bold(
+            String(result.messageCount)
+          )} message${result.messageCount === 1 ? '' : 's'}.`,
+          details: renderKeyValue([
+            { key: 'Thread', value: `#${result.thread.id}`, color: dim },
+            { key: 'Type', value: result.thread.kind },
+            { key: 'Agent', value: result.actorSlug, color: cyan },
+            {
+              key: 'Participants',
+              value: result.thread.participants.join(', ') || 'none',
+            },
+            { key: 'Last sequence', value: result.lastMessageSeq, color: dim },
+            {
+              key: 'Last activity',
+              value:
+                result.messageCount > 0
+                  ? formatRelativeTime(result.lastMessageAt)
+                  : 'none',
+              color: gray,
+            },
+          ]),
+        }),
       });
     });
 

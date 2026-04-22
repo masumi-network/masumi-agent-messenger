@@ -81,6 +81,14 @@ export type RotateInboxKeysResult = {
   revokedDeviceIds: string[];
 };
 
+export type RotationDeviceCandidate = {
+  deviceId: string;
+  label: string | null;
+  platform: string | null;
+  status: string;
+  isCurrentDevice: boolean;
+};
+
 function requireOwnedActor(params: {
   actors: VisibleAgentRow[];
   normalizedEmail: string;
@@ -330,6 +338,58 @@ export async function registerInboxAgent(params: {
   }
 }
 
+export async function listRotationDeviceCandidates(params: {
+  profileName: string;
+  reporter: TaskReporter;
+}): Promise<{
+  profile: string;
+  currentDeviceId: string;
+  devices: RotationDeviceCandidate[];
+}> {
+  const { profile, session, claims } = await ensureAuthenticatedSession(params);
+  const normalizedEmail = normalizeEmail(claims.email ?? '');
+  if (!normalizedEmail) {
+    throw userError('Current OIDC session is missing an email claim.', {
+      code: 'OIDC_EMAIL_MISSING',
+    });
+  }
+
+  const secretStore = createSecretStore();
+  const currentDevice = await getOrCreateCliDeviceKeyMaterial(profile.name, secretStore);
+
+  params.reporter.verbose?.('Connecting to SpacetimeDB');
+  const { conn } = await connectAuthenticated({
+    host: profile.spacetimeHost,
+    databaseName: profile.spacetimeDbName,
+    sessionToken: session.idToken,
+  });
+  params.reporter.verbose?.('Connected to SpacetimeDB');
+
+  try {
+    const subscription = await subscribeDeviceTables(conn);
+    try {
+      const rows = readDeviceRows(conn);
+      return {
+        profile: profile.name,
+        currentDeviceId: currentDevice.deviceId,
+        devices: rows.devices
+          .filter(device => device.status === 'approved')
+          .map(device => ({
+            deviceId: device.deviceId,
+            label: device.label ?? null,
+            platform: device.platform ?? null,
+            status: device.status,
+            isCurrentDevice: device.deviceId === currentDevice.deviceId,
+          })),
+      };
+    } finally {
+      subscription.unsubscribe();
+    }
+  } finally {
+    disconnectConnection(conn);
+  }
+}
+
 export async function rotateInboxKeys(params: {
   profileName: string;
   actorSlug?: string;
@@ -408,8 +468,8 @@ export async function rotateInboxKeys(params: {
       const sharedActorCount = countSharedActors(snapshot);
       const sharedKeyVersionCount = countSharedKeyVersions(snapshot);
       const approvedDevices = rows.devices.filter(device => device.status === 'approved');
-      const requestedShareIds = Array.from(new Set(params.shareDeviceIds ?? []));
       const requestedRevokeIds = Array.from(new Set(params.revokeDeviceIds ?? []));
+      const requestedShareIds = Array.from(new Set(params.shareDeviceIds ?? []));
       const sharedDeviceIds: string[] = [];
       const deviceShareBundles = [];
 
@@ -443,6 +503,7 @@ export async function rotateInboxKeys(params: {
           sharedAgentCount: sharedActorCount,
           sharedKeyVersionCount,
           expiresAt: Timestamp.fromDate(new Date(Date.now() + 15 * 60_000)),
+          expiryMode: { tag: 'NeverExpires' as const },
         });
         sharedDeviceIds.push(targetDevice.deviceId);
       }

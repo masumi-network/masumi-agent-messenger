@@ -15,6 +15,9 @@ import type {
   VisibleThreadParticipantRow,
   VisibleThreadReadStateRow,
   VisibleMessageRow,
+  VisibleChannelJoinRequestRow,
+  VisibleChannelMembershipRow,
+  VisibleChannelRow,
 } from '../../../webapp/src/module_bindings/types';
 import type { ShellRows } from './spacetimedb';
 
@@ -91,12 +94,43 @@ export type ShellSecurityState = {
   description: string;
 };
 
+export type ShellChannelSummary = {
+  id: string;
+  slug: string;
+  title: string | null;
+  description: string | null;
+  accessMode: string;
+  discoverable: boolean;
+  lastMessageSeq: string;
+  lastMessageAt: string;
+  permission: string;
+  canSend: boolean;
+  isAdmin: boolean;
+  actorSlug: string;
+  pendingApprovals: number;
+};
+
+export type ShellChannelApprovalSummary = {
+  id: string;
+  channelId: string;
+  channelSlug: string;
+  channelTitle: string | null;
+  requesterAgentDbId: string;
+  requesterSlug: string;
+  requesterDisplayName: string | null;
+  permission: string;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: string;
+  updatedAt: string;
+  adminAgentSlug: string;
+};
+
 export type DashboardAttentionItem = {
   id: string;
   title: string;
   description: string;
   severity: 'info' | 'warning' | 'critical';
-  targetTab: 'dashboard' | 'inboxes' | 'agents' | 'account';
+  targetTab: 'dashboard' | 'inboxes' | 'channels' | 'agents' | 'account';
   targetSection?: string;
 };
 
@@ -143,6 +177,11 @@ export type RootShellViewModel = {
     threads: ShellThreadSummary[];
     requests: ShellRequestSummary[];
     allowlist: ShellAllowlistSummary[];
+  };
+  channels: {
+    channels: ShellChannelSummary[];
+    approvals: ShellChannelApprovalSummary[];
+    pendingApprovalCount: number;
   };
   agents: {
     agentSummaries: OwnedInboxSummary[];
@@ -319,9 +358,125 @@ function buildInboxSections(params: {
   ];
 }
 
+function buildChannelState(params: {
+  channels: VisibleChannelRow[];
+  memberships: VisibleChannelMembershipRow[];
+  requests: VisibleChannelJoinRequestRow[];
+  activeActor: VisibleAgentRow;
+}): RootShellViewModel['channels'] {
+  const membershipByChannelId = new Map<bigint, VisibleChannelMembershipRow>();
+
+  for (const membership of params.memberships) {
+    if (!membership.active || membership.agentDbId !== params.activeActor.id) {
+      continue;
+    }
+    membershipByChannelId.set(membership.channelId, membership);
+  }
+
+  const adminChannelIds = new Set(
+    [...membershipByChannelId.entries()]
+      .filter(([, membership]) => membership.permission === 'admin')
+      .map(([channelId]) => channelId)
+  );
+
+  const pendingApprovalsByChannelId = new Map<bigint, number>();
+  for (const request of params.requests) {
+    if (
+      request.status !== 'pending' ||
+      request.direction !== 'incoming' ||
+      !adminChannelIds.has(request.channelId)
+    ) {
+      continue;
+    }
+    pendingApprovalsByChannelId.set(
+      request.channelId,
+      (pendingApprovalsByChannelId.get(request.channelId) ?? 0) + 1
+    );
+  }
+
+  const channelSummaries = params.channels
+    .filter(channel => membershipByChannelId.has(channel.id))
+    .sort((left, right) => {
+      const leftMembership = membershipByChannelId.get(left.id);
+      const rightMembership = membershipByChannelId.get(right.id);
+      const leftAdmin = leftMembership?.permission === 'admin';
+      const rightAdmin = rightMembership?.permission === 'admin';
+      if (leftAdmin !== rightAdmin) {
+        return leftAdmin ? -1 : 1;
+      }
+
+      const byTime = compareBigIntDesc(
+        left.lastMessageAt.microsSinceUnixEpoch,
+        right.lastMessageAt.microsSinceUnixEpoch
+      );
+      if (byTime !== 0) {
+        return byTime;
+      }
+      return left.slug.localeCompare(right.slug);
+    })
+    .map(channel => {
+      const membership = membershipByChannelId.get(channel.id);
+      return {
+        id: channel.id.toString(),
+        slug: channel.slug,
+        title: channel.title ?? null,
+        description: channel.description ?? null,
+        accessMode: channel.accessMode,
+        discoverable: channel.discoverable,
+        lastMessageSeq: channel.lastMessageSeq.toString(),
+        lastMessageAt: timestampToISOString(channel.lastMessageAt),
+        permission: membership?.permission ?? 'none',
+        canSend: membership?.permission === 'admin' || membership?.permission === 'read_write',
+        isAdmin: membership?.permission === 'admin',
+        actorSlug: params.activeActor.slug,
+        pendingApprovals: pendingApprovalsByChannelId.get(channel.id) ?? 0,
+      } satisfies ShellChannelSummary;
+    });
+
+  const approvals = params.requests
+    .filter(request => {
+      return (
+        request.status === 'pending' &&
+        request.direction === 'incoming' &&
+        adminChannelIds.has(request.channelId)
+      );
+    })
+    .sort((left, right) => {
+      const byUpdated = compareBigIntDesc(
+        left.updatedAt.microsSinceUnixEpoch,
+        right.updatedAt.microsSinceUnixEpoch
+      );
+      if (byUpdated !== 0) {
+        return byUpdated;
+      }
+      return compareBigIntDesc(left.id, right.id);
+    })
+    .map(request => ({
+      id: request.id.toString(),
+      channelId: request.channelId.toString(),
+      channelSlug: request.channelSlug,
+      channelTitle: request.channelTitle ?? null,
+      requesterAgentDbId: request.requesterAgentDbId.toString(),
+      requesterSlug: request.requesterSlug,
+      requesterDisplayName: request.requesterDisplayName ?? null,
+      permission: request.permission,
+      status: 'pending',
+      createdAt: timestampToISOString(request.createdAt),
+      updatedAt: timestampToISOString(request.updatedAt),
+      adminAgentSlug: params.activeActor.slug,
+    }) satisfies ShellChannelApprovalSummary);
+
+  return {
+    channels: channelSummaries,
+    approvals,
+    pendingApprovalCount: approvals.length,
+  };
+}
+
 function buildAttentionItems(params: {
   activeInbox: OwnedInboxSummary;
   requests: ShellRequestSummary[];
+  channelApprovalCount: number;
   securityState: ShellSecurityState;
   connectionHealth: RootShellConnectionHealth;
   pendingBackupPrompt: string | null;
@@ -369,6 +524,17 @@ function buildAttentionItems(params: {
       severity: 'warning',
       targetTab: 'inboxes',
       targetSection: 'pending',
+    });
+  }
+
+  if (params.channelApprovalCount > 0) {
+    items.push({
+      id: 'channels:pending',
+      title: `${params.channelApprovalCount.toString()} pending channel approval${params.channelApprovalCount === 1 ? '' : 's'}`,
+      description: 'Open Channels to approve or reject join requests.',
+      severity: 'warning',
+      targetTab: 'channels',
+      targetSection: 'approvals',
     });
   }
 
@@ -589,6 +755,12 @@ export function buildRootShellViewModel(params: {
     }) satisfies ShellDeviceRequestSummary);
 
   const activeInbox = toOwnedInboxSummary(activeActor);
+  const channelState = buildChannelState({
+    channels: params.rows.channels,
+    memberships: params.rows.channelMemberships,
+    requests: params.rows.channelJoinRequests,
+    activeActor,
+  });
 
   return {
     activeInbox,
@@ -599,6 +771,7 @@ export function buildRootShellViewModel(params: {
       attentionItems: buildAttentionItems({
         activeInbox,
         requests,
+        channelApprovalCount: channelState.pendingApprovalCount,
         securityState: params.securityState,
         connectionHealth: params.connectionHealth,
         pendingBackupPrompt: params.pendingBackupPrompt ?? null,
@@ -615,6 +788,7 @@ export function buildRootShellViewModel(params: {
       requests,
       allowlist,
     },
+    channels: channelState,
     agents: {
       agentSummaries: ownedActors.map(toOwnedInboxSummary),
     },

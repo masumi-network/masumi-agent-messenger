@@ -249,6 +249,7 @@ describe('paginateThreadHistory', () => {
         legacyPlaintext: false,
         replyToMessageId: null,
         trustStatus: 'trusted',
+        trustNotice: null,
         trustWarning: null,
       })),
     };

@@ -1,4 +1,4 @@
-import { Box, Text, useApp, useInput } from 'ink';
+import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TaskBanner } from './task-screen';
 import type { GlobalOptions, TaskReporter } from '../services/command-runtime';
@@ -39,6 +39,17 @@ import {
   removeThreadParticipant,
   setThreadArchived,
 } from '../services/thread';
+import {
+  approveChannelJoin,
+  createChannel,
+  listChannelMembers,
+  readAuthenticatedChannelMessages,
+  rejectChannelJoin,
+  sendChannelMessage,
+  verifyChannelMessages,
+  type ChannelMemberListItem,
+  type ChannelMessageItem,
+} from '../services/channel';
 import { sendMessageToThread, sendMessageToSlug } from '../services/send-message';
 import {
   resolveContactRequest,
@@ -74,6 +85,7 @@ import type { VisibleAgentRow, VisibleMessageRow } from '../../../webapp/src/mod
 type ShellRoute =
   | { type: 'auth' }
   | { type: 'inboxes' }
+  | { type: 'channels' }
   | { type: 'agents' }
   | { type: 'discover' }
   | { type: 'account' }
@@ -81,11 +93,14 @@ type ShellRoute =
 
 type ShellThreadFilter = 'all' | 'unread' | 'direct';
 type InboxFocus = 'navigator' | 'detail' | 'composer';
+type InboxDetailTab = 'messages' | 'members' | 'approval';
+type ChannelMode = 'overview' | 'detail';
+type ChannelTab = 'messages' | 'members' | 'approvals';
 type AccountFocus = 'security' | 'devices';
 type AgentsFocus = 'owned' | 'discover';
 type ShellFocus = 'sidebar' | 'content';
 
-const SIDEBAR_NAV_ITEMS = ['inboxes', 'agents', 'discover', 'account'] as const;
+const SIDEBAR_NAV_ITEMS = ['inboxes', 'channels', 'agents', 'discover', 'account'] as const;
 type SidebarNavItem = (typeof SIDEBAR_NAV_ITEMS)[number];
 
 function toSidebarSelectionIndex(routeType: ShellRoute['type'] | undefined): number {
@@ -102,6 +117,9 @@ export type RootShellSnapshot = {
   inboxSection: InboxSectionKey;
   threadFilter: ShellThreadFilter;
   selectedInboxItemId?: string | null;
+  selectedChannelSlug?: string | null;
+  channelMode: ChannelMode;
+  channelTab: ChannelTab;
   selectedAgentSlug?: string | null;
   agentsFocus: AgentsFocus;
   accountFocus: AccountFocus;
@@ -235,6 +253,7 @@ type LiveThreadMessage = {
   body: string;
   decryptStatus: 'ok' | 'unsupported' | 'failed';
   trustStatus: 'self' | 'trusted' | 'unpinned-first-seen' | 'untrusted-rotation';
+  trustNotice: string | null;
   trustWarning: string | null;
   optimistic?: boolean;
 };
@@ -247,6 +266,26 @@ type LiveThreadWindow = {
   windowEnd: number;
   canScrollOlder: boolean;
   canScrollNewer: boolean;
+};
+
+type ChannelMessagesPageState = {
+  channelId: string | null;
+  messages: ChannelMessageItem[];
+  beforeSeqStack: Array<string | null>;
+  pageIndex: number;
+  loading: boolean;
+  error: string | null;
+  loaded: boolean;
+};
+
+type ChannelMembersPageState = {
+  channelId: string | null;
+  members: ChannelMemberListItem[];
+  afterMemberIdStack: Array<string | null>;
+  pageIndex: number;
+  loading: boolean;
+  error: string | null;
+  loaded: boolean;
 };
 
 type FooterModeItem = {
@@ -282,6 +321,54 @@ const DEFAULT_SECURITY_STATE: ShellSecurityState = {
 const DEFAULT_AGENT_DISCOVERY_TAKE = 10;
 const THREAD_MESSAGE_WINDOW_SIZE = 4;
 const MAX_MESSAGE_BODY_LINES = 15;
+const CHANNEL_MESSAGE_PAGE_SIZE = 8;
+const CHANNEL_MEMBER_PAGE_SIZE = 8;
+const TAB_CELL_WIDTH = 18;
+const CLEAR_ROW_TAIL = '            ';
+const DEFAULT_TERMINAL_COLUMNS = 80;
+const DEFAULT_TERMINAL_ROWS = 24;
+
+type TerminalSize = {
+  columns: number;
+  rows: number;
+};
+
+function resolveTerminalSize(stdout: NodeJS.WriteStream): TerminalSize {
+  const columns =
+    typeof stdout.columns === 'number' && stdout.columns > 0
+      ? stdout.columns
+      : typeof process.stdout.columns === 'number' && process.stdout.columns > 0
+        ? process.stdout.columns
+        : DEFAULT_TERMINAL_COLUMNS;
+  const rows =
+    typeof stdout.rows === 'number' && stdout.rows > 0
+      ? stdout.rows
+      : typeof process.stdout.rows === 'number' && process.stdout.rows > 0
+        ? process.stdout.rows
+        : DEFAULT_TERMINAL_ROWS;
+  return { columns, rows };
+}
+
+function useTerminalSize(): TerminalSize {
+  const { stdout } = useStdout();
+  const [terminalSize, setTerminalSize] = useState<TerminalSize>(() =>
+    resolveTerminalSize(stdout)
+  );
+
+  useEffect(() => {
+    const updateTerminalSize = () => {
+      setTerminalSize(resolveTerminalSize(stdout));
+    };
+
+    updateTerminalSize();
+    stdout.on('resize', updateTerminalSize);
+    return () => {
+      stdout.off('resize', updateTerminalSize);
+    };
+  }, [stdout]);
+
+  return terminalSize;
+}
 
 function createInitialAgentDiscoveryState(): AgentDiscoveryState {
   return {
@@ -303,6 +390,30 @@ function createInitialDiscoverDetailState(): DiscoverDetailState {
     slug: null,
     detail: null,
     error: null,
+  };
+}
+
+function createInitialChannelMessagesState(): ChannelMessagesPageState {
+  return {
+    channelId: null,
+    messages: [],
+    beforeSeqStack: [null],
+    pageIndex: 0,
+    loading: false,
+    error: null,
+    loaded: false,
+  };
+}
+
+function createInitialChannelMembersState(): ChannelMembersPageState {
+  return {
+    channelId: null,
+    members: [],
+    afterMemberIdStack: [null],
+    pageIndex: 0,
+    loading: false,
+    error: null,
+    loaded: false,
   };
 }
 
@@ -352,6 +463,7 @@ function createOptimisticThreadMessage(params: {
     body: params.body,
     decryptStatus: 'ok',
     trustStatus: 'self',
+    trustNotice: null,
     trustWarning: null,
     optimistic: true,
   };
@@ -362,10 +474,14 @@ function maskValue(value: string): string {
 }
 
 function capTextLines(text: string, maxLines: number): string {
+  return capTextToLines(text, maxLines).join('\n');
+}
+
+function capTextToLines(text: string, maxLines: number): string[] {
   const normalized = text.replace(/\r\n/g, '\n');
   const lines = normalized.split('\n');
   if (lines.length <= maxLines) {
-    return text;
+    return lines;
   }
 
   const capped = lines.slice(0, maxLines);
@@ -373,7 +489,7 @@ function capTextLines(text: string, maxLines: number): string {
   capped[lastIndex] = capped[lastIndex].length
     ? `${capped[lastIndex]}…`
     : '…';
-  return capped.join('\n');
+  return capped;
 }
 
 
@@ -386,6 +502,35 @@ function parseCommaSeparated(value: string): string[] {
         .filter(Boolean)
     )
   );
+}
+
+function normalizeChannelAccessModeInput(value: string): 'public' | 'approval_required' | null {
+  const normalized = value.trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (normalized === 'public') {
+    return 'public';
+  }
+  if (
+    normalized === 'approval_required' ||
+    normalized === 'approval' ||
+    normalized === 'private'
+  ) {
+    return 'approval_required';
+  }
+  return null;
+}
+
+function parseYesNoInput(value: string, defaultValue: boolean): boolean | null {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return defaultValue;
+  }
+  if (['yes', 'y', 'true', '1', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['no', 'n', 'false', '0', 'off'].includes(normalized)) {
+    return false;
+  }
+  return null;
 }
 
 function resolveLookupQuery(
@@ -757,6 +902,8 @@ function useRootShellConnection(profileName: string) {
 type LiveInboxSectionItem = NonNullable<RootShellViewModel>['inboxes']['sections'][number]['items'][number];
 type LiveSelectedThread = NonNullable<RootShellViewModel>['inboxes']['threads'][number];
 type LiveSelectedRequest = NonNullable<RootShellViewModel>['inboxes']['requests'][number];
+type LiveChannel = NonNullable<RootShellViewModel>['channels']['channels'][number];
+type LiveChannelApproval = NonNullable<RootShellViewModel>['channels']['approvals'][number];
 
 function useLiveInboxSelection(params: {
   model: RootShellViewModel | null;
@@ -953,6 +1100,7 @@ async function buildLiveThreadMessages(params: {
           `[${decrypted.decryptStatus === 'failed' ? decrypted.decryptError ?? 'Unable to decrypt' : 'Unsupported content blocked'}]`,
         decryptStatus: decrypted.decryptStatus,
         trustStatus: decrypted.trustStatus,
+        trustNotice: decrypted.trustNotice,
         trustWarning: decrypted.trustWarning,
       } satisfies LiveThreadMessage;
     })
@@ -1068,10 +1216,103 @@ function useLiveThreadMessages(params: {
     canScrollNewer: window.canScrollNewer,
     scrollOlder: () =>
       setScrollOffset(current =>
-        Math.min(current + 1, Math.max(allMessages.length - THREAD_MESSAGE_WINDOW_SIZE, 0))
+        Math.min(
+          current + THREAD_MESSAGE_WINDOW_SIZE,
+          Math.max(allMessages.length - THREAD_MESSAGE_WINDOW_SIZE, 0)
+        )
       ),
-    scrollNewer: () => setScrollOffset(current => Math.max(current - 1, 0)),
+    scrollNewer: () =>
+      setScrollOffset(current => Math.max(current - THREAD_MESSAGE_WINDOW_SIZE, 0)),
     resetThreadWindow: () => setScrollOffset(0),
+  };
+}
+
+function useLiveChannelMessages(params: {
+  connectionState: ShellConnectionState;
+  routeType: ShellRoute['type'];
+  channelMode: ChannelMode;
+  channelTab: ChannelTab;
+  selectedChannelId: string | null;
+}): {
+  liveChannelMessages: ChannelMessageItem[];
+  liveChannelMessagesError: string | null;
+  liveChannelMessagesLoading: boolean;
+  liveChannelMessagesLoaded: boolean;
+} {
+  const [messages, setMessages] = useState<ChannelMessageItem[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (
+      params.connectionState.mode !== 'ready' ||
+      params.routeType !== 'channels' ||
+      params.channelMode !== 'detail' ||
+      params.channelTab !== 'messages' ||
+      !params.selectedChannelId
+    ) {
+      setMessages([]);
+      setError(null);
+      setLoading(false);
+      setLoaded(false);
+      return;
+    }
+
+    let cancelled = false;
+    const selectedChannelId = params.selectedChannelId;
+    const rows = params.connectionState.rows.channelMessages
+      .filter(message => message.channelId.toString() === selectedChannelId)
+      .sort((left, right) => {
+        if (left.channelSeq < right.channelSeq) return -1;
+        if (left.channelSeq > right.channelSeq) return 1;
+        return Number(left.id - right.id);
+      })
+      .slice(-CHANNEL_MESSAGE_PAGE_SIZE);
+
+    setLoading(true);
+    void verifyChannelMessages(
+      rows.map(message => ({
+        ...message,
+        replyToMessageId: message.replyToMessageId ?? null,
+      }))
+    )
+      .then(result => {
+        if (!cancelled) {
+          setMessages(result);
+          setError(null);
+          setLoaded(true);
+        }
+      })
+      .catch(cause => {
+        if (!cancelled) {
+          setMessages([]);
+          setError(toCliError(cause).message);
+          setLoaded(true);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    params.channelMode,
+    params.channelTab,
+    params.connectionState,
+    params.routeType,
+    params.selectedChannelId,
+  ]);
+
+  return {
+    liveChannelMessages: messages,
+    liveChannelMessagesError: error,
+    liveChannelMessagesLoading: loading,
+    liveChannelMessagesLoaded: loaded,
   };
 }
 
@@ -1098,11 +1339,100 @@ function renderList(params: {
   return (
     <Box flexDirection="column">
       {params.items.map((item, index) => (
-        <Text key={`${index}:${item}`} color={index === params.selectedIndex ? 'cyan' : params.color}>
+        <Text
+          key={`${index}:${item}`}
+          color={index === params.selectedIndex ? 'cyan' : params.color}
+          bold={index === params.selectedIndex}
+        >
           {index === params.selectedIndex ? '▸ ' : '  '}
           {item}
         </Text>
       ))}
+    </Box>
+  );
+}
+
+function TabStrip<T extends string>({
+  tabs,
+  active,
+}: {
+  tabs: Array<{ key: T; label: string; count?: number }>;
+  active: T;
+}) {
+  return (
+    <Box flexDirection="row" width="100%">
+      {tabs.map(tab => {
+        const isActive = tab.key === active;
+        const label = `${isActive ? '▸ ' : '  '}${tab.label}${
+          tab.count !== undefined ? ` ${tab.count.toString()}` : ''
+        }`;
+        return (
+          <Text
+            key={tab.key}
+            color={isActive ? 'cyan' : 'gray'}
+            bold={isActive}
+          >
+            {label.padEnd(TAB_CELL_WIDTH)}
+          </Text>
+        );
+      })}
+      <Text>{CLEAR_ROW_TAIL}</Text>
+    </Box>
+  );
+}
+
+function MessageBodyLines({ text }: { text: string }) {
+  const lines = capTextToLines(text, MAX_MESSAGE_BODY_LINES);
+  return (
+    <Box flexDirection="column" marginLeft={2}>
+      {lines.map((line, index) => (
+        <Text key={`${index}:${line}`}>{line.length > 0 ? line : ' '}</Text>
+      ))}
+    </Box>
+  );
+}
+
+function ThreadMessageBlock({ message }: { message: LiveThreadMessage }) {
+  return (
+    <Box key={message.id} flexDirection="column" marginBottom={1} width="100%">
+      <Text>
+        <Text color="gray">From </Text>
+        <Text color={senderInkColor(message.senderLabel)} bold>{message.senderLabel}</Text>
+        <Text color="gray">
+          {' · '}
+          {formatTimestamp(message.createdAt)}
+          {message.optimistic ? ' · syncing...' : ''}
+        </Text>
+      </Text>
+      {message.trustNotice ? (
+        <Text color="yellow">  {message.trustNotice}</Text>
+      ) : null}
+      {message.trustWarning ? (
+        <Text color="red">  {message.trustWarning}</Text>
+      ) : null}
+      <MessageBodyLines text={message.body} />
+    </Box>
+  );
+}
+
+function ChannelMessageBlock({ message }: { message: ChannelMessageItem }) {
+  const body = message.text ?? message.error ?? 'Unable to read message.';
+  return (
+    <Box key={message.id} flexDirection="column" marginBottom={1} width="100%">
+      <Text>
+        <Text color="gray">From </Text>
+        <Text color={senderInkColor(message.sender)} bold>{message.sender}</Text>
+        <Text color="gray">
+          {' · '}
+          {message.createdAt ? formatTimestamp(message.createdAt) : 'time unavailable'}
+          {' · '}
+          #{message.channelSeq}
+        </Text>
+        {message.status === 'failed' ? (
+          <Text color="red"> · verification failed</Text>
+        ) : null}
+      </Text>
+      <MessageBodyLines text={body} />
     </Box>
   );
 }
@@ -1146,12 +1476,14 @@ function ModeBar({ mode }: { mode: FooterMode }) {
 
 const SIDEBAR_LABELS: Record<SidebarNavItem, string> = {
   inboxes: 'Inbox',
+  channels: 'Channels',
   agents: 'My Agents',
   discover: 'Discover',
   account: 'Account',
 };
 const SIDEBAR_ICONS: Record<SidebarNavItem, string> = {
   inboxes: '[i]',
+  channels: '[c]',
   agents: '[a]',
   discover: '[d]',
   account: '[u]',
@@ -1165,6 +1497,7 @@ function Sidebar({
   connectionDotColor,
   unreadCount,
   pendingCount,
+  channelApprovalCount,
   shellFocus,
 }: {
   active: ShellRoute['type'];
@@ -1174,12 +1507,15 @@ function Sidebar({
   connectionDotColor: string;
   unreadCount: number;
   pendingCount: number;
+  channelApprovalCount: number;
   shellFocus: ShellFocus;
 }) {
   return (
     <Box
       flexDirection="column"
       width={20}
+      height="100%"
+      overflow="hidden"
       borderStyle="single"
       borderRight
       borderTop={false}
@@ -1188,7 +1524,7 @@ function Sidebar({
       borderColor="gray"
       paddingRight={1}
     >
-      <Text color="cyanBright" bold>◆ AGENT MESSENGER</Text>
+      <Text color="cyanBright" bold>◆ MASUMI AGENT MESSENGER</Text>
       {slug ? <Text color="gray">/{slug}</Text> : <Text color="gray">encrypted inbox</Text>}
       <Text> </Text>
       {SIDEBAR_NAV_ITEMS.map(item => {
@@ -1199,6 +1535,8 @@ function Sidebar({
             ? ` ${unreadCount}`
             : item === 'inboxes' && pendingCount > 0
               ? ` ${pendingCount}p`
+              : item === 'channels' && channelApprovalCount > 0
+                ? ` ${channelApprovalCount}p`
               : '';
         return (
           <Text
@@ -1215,7 +1553,7 @@ function Sidebar({
       <Text> </Text>
       <Text color="gray">↑/↓ select</Text>
       <Text color="gray">Enter open</Text>
-      <Text color="gray">I/A/D/U jump</Text>
+      <Text color="gray">I/C/A/D/U jump</Text>
       <Text color="gray">Tab focus</Text>
       <Text color="gray">Q quit</Text>
       <Text color="gray">? help</Text>
@@ -1328,6 +1666,7 @@ export function RootShell({
 }: RootShellProps) {
   void onHandoff;
   const { exit } = useApp();
+  const terminalSize = useTerminalSize();
   const { state: connectionState, reconnect } = useRootShellConnection(options.profile);
   const [route, setRoute] = useState<ShellRoute>(initialSnapshot?.route ?? { type: 'auth' });
   const [activeInboxSlug, setActiveInboxSlug] = useState<string | null>(
@@ -1342,6 +1681,16 @@ export function RootShell({
   const [selectedInboxItemId, setSelectedInboxItemId] = useState<string | null>(
     initialSnapshot?.selectedInboxItemId ?? null
   );
+  const [selectedChannelSlug, setSelectedChannelSlug] = useState<string | null>(
+    initialSnapshot?.selectedChannelSlug ?? null
+  );
+  const [channelMode, setChannelMode] = useState<ChannelMode>(
+    initialSnapshot?.channelMode ?? 'overview'
+  );
+  const [channelTab, setChannelTab] = useState<ChannelTab>(
+    initialSnapshot?.channelTab ?? 'messages'
+  );
+  const [channelApprovalIndex, setChannelApprovalIndex] = useState(0);
   const [selectedAgentSlug, setSelectedAgentSlug] = useState<string | null>(
     initialSnapshot?.selectedAgentSlug ?? null
   );
@@ -1357,6 +1706,7 @@ export function RootShell({
   const [deviceSelection, setDeviceSelection] = useState(0);
   const [securityActionIndex, setSecurityActionIndex] = useState(0);
   const [inboxFocus, setInboxFocus] = useState<InboxFocus>('navigator');
+  const [inboxDetailTab, setInboxDetailTab] = useState<InboxDetailTab>('messages');
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [threadDraftCursorByThreadId, setThreadDraftCursorByThreadId] = useState<Record<string, number>>({});
   const [optimisticThreadMessagesByThreadId, setOptimisticThreadMessagesByThreadId] = useState<
@@ -1393,7 +1743,15 @@ export function RootShell({
   );
   const [pendingRegistrationPrompt, setPendingRegistrationPrompt] =
     useState<PendingRegistrationPrompt | null>(null);
+  const [channelMessagesState, setChannelMessagesState] = useState<ChannelMessagesPageState>(
+    createInitialChannelMessagesState
+  );
+  const [channelMembersState, setChannelMembersState] = useState<ChannelMembersPageState>(
+    createInitialChannelMembersState
+  );
   const agentDiscoveryRequestRef = useRef(0);
+  const channelMessagesRequestRef = useRef(0);
+  const channelMembersRequestRef = useRef(0);
   const activeTaskFieldKeyRef = useRef<string | null>(null);
   const initialSetupPublicDescriptionRef = useRef<string | null>(null);
 
@@ -1420,6 +1778,12 @@ export function RootShell({
       setActiveInboxSlug(null);
       setSelectedAgentSlug(null);
       setSelectedInboxItemId(null);
+      setSelectedChannelSlug(null);
+      setChannelMode('overview');
+      setChannelTab('messages');
+      setChannelApprovalIndex(0);
+      setChannelMessagesState(createInitialChannelMessagesState());
+      setChannelMembersState(createInitialChannelMembersState());
       setTaskPanel(null);
       setTaskLookup({
         fieldKey: null,
@@ -1440,6 +1804,11 @@ export function RootShell({
     if (connectionState.mode === 'ready' && activeActorRow) {
       if (activeInboxSlug !== activeActorRow.slug) {
         setActiveInboxSlug(activeActorRow.slug);
+        setSelectedChannelSlug(null);
+        setChannelMode('overview');
+        setChannelTab('messages');
+        setChannelMessagesState(createInitialChannelMessagesState());
+        setChannelMembersState(createInitialChannelMembersState());
       }
       if (route.type === 'auth') {
         setRoute({ type: 'inboxes' });
@@ -1652,6 +2021,10 @@ export function RootShell({
     totalThreadMessages,
     threadWindowStart,
     threadWindowEnd,
+    canScrollOlder,
+    canScrollNewer,
+    scrollOlder,
+    scrollNewer,
     resetThreadWindow,
   } = useLiveThreadMessages({
     connectionState,
@@ -1665,6 +2038,27 @@ export function RootShell({
         : [],
     refreshToken: `${liveInboxRefreshToken}:${securityRefreshToken}`,
   });
+
+  const selectedInboxItemKind = selectedInboxItem?.kind ?? null;
+  const inboxTabs = useMemo<Array<{ key: InboxDetailTab; label: string; count?: number }>>(() => {
+    if (selectedInboxItemKind === 'request') {
+      return [{ key: 'approval', label: 'Approval' }];
+    }
+    return [
+      { key: 'messages', label: 'Messages', count: totalThreadMessages },
+      { key: 'members', label: 'Members', count: selectedThread?.participantCount ?? 0 },
+    ];
+  }, [selectedInboxItemKind, selectedThread?.participantCount, totalThreadMessages]);
+
+  useEffect(() => {
+    setInboxDetailTab(selectedInboxItemKind === 'request' ? 'approval' : 'messages');
+  }, [selectedInboxItemId, selectedInboxItemKind]);
+
+  useEffect(() => {
+    if (!inboxTabs.some(tab => tab.key === inboxDetailTab)) {
+      setInboxDetailTab(inboxTabs[0]?.key ?? 'messages');
+    }
+  }, [inboxDetailTab, inboxTabs]);
 
   const securityActions = useMemo<SecurityAction[]>(() => {
     const recoveryLabel =
@@ -1734,6 +2128,122 @@ export function RootShell({
     securityActions[clampIndex(securityActionIndex, securityActions.length)] ?? null;
   const selectedDevice =
     model?.account.devices[clampIndex(deviceSelection, model.account.devices.length)] ?? null;
+  const channelSelectedBySlug: LiveChannel | null =
+    model?.channels.channels.find(channel => channel.slug === selectedChannelSlug) ?? null;
+  const selectedChannel: LiveChannel | null =
+    channelSelectedBySlug ??
+    (selectedChannelSlug === null || channelMode === 'overview'
+      ? model?.channels.channels[0] ?? null
+      : null);
+  const selectedChannelIndex =
+    selectedChannel && model
+      ? model.channels.channels.findIndex(channel => channel.slug === selectedChannel.slug)
+      : 0;
+  const selectedChannelApprovals = useMemo<LiveChannelApproval[]>(() => {
+    if (!model || !selectedChannel?.isAdmin) {
+      return [];
+    }
+    return model.channels.approvals.filter(
+      approval => approval.channelId === selectedChannel.id
+    );
+  }, [model, selectedChannel?.id, selectedChannel?.isAdmin]);
+  const selectedChannelApproval =
+    selectedChannelApprovals[clampIndex(channelApprovalIndex, selectedChannelApprovals.length)] ??
+    null;
+  const canSendSelectedChannel = selectedChannel?.canSend === true;
+  const channelTabs = useMemo<Array<{ key: ChannelTab; label: string; count?: number }>>(
+    () => [
+      { key: 'messages', label: 'Messages' },
+      { key: 'members', label: 'Members' },
+      ...(selectedChannel?.isAdmin
+        ? [
+            {
+              key: 'approvals' as const,
+              label: 'Approvals',
+              count: selectedChannelApprovals.length,
+            },
+          ]
+        : []),
+    ],
+    [selectedChannel?.isAdmin, selectedChannelApprovals.length]
+  );
+  const {
+    liveChannelMessages,
+    liveChannelMessagesError,
+    liveChannelMessagesLoading,
+    liveChannelMessagesLoaded,
+  } = useLiveChannelMessages({
+    connectionState,
+    routeType: route.type,
+    channelMode,
+    channelTab,
+    selectedChannelId: selectedChannel?.id ?? null,
+  });
+  const selectedChannelMessagePageIndex =
+    channelMessagesState.channelId === selectedChannel?.id ? channelMessagesState.pageIndex : 0;
+  const shouldUseLiveChannelMessages =
+    selectedChannel !== null && selectedChannelMessagePageIndex === 0;
+  const selectedChannelMessageItems = shouldUseLiveChannelMessages
+    ? liveChannelMessages
+    : channelMessagesState.channelId === selectedChannel?.id
+      ? channelMessagesState.messages
+      : [];
+  const selectedChannelMemberItems =
+    channelMembersState.channelId === selectedChannel?.id
+      ? channelMembersState.members
+      : [];
+  const selectedChannelMessagesLoading =
+    shouldUseLiveChannelMessages
+      ? liveChannelMessagesLoading && !liveChannelMessagesLoaded
+      : channelMessagesState.channelId === selectedChannel?.id && channelMessagesState.loading;
+  const selectedChannelMembersLoading =
+    channelMembersState.channelId === selectedChannel?.id && channelMembersState.loading;
+  const selectedChannelMessagesError =
+    shouldUseLiveChannelMessages
+      ? liveChannelMessagesError
+      : channelMessagesState.channelId === selectedChannel?.id
+        ? channelMessagesState.error
+        : null;
+  const selectedChannelMembersError =
+    channelMembersState.channelId === selectedChannel?.id ? channelMembersState.error : null;
+  const canPageChannelMessagesNewer = selectedChannelMessagePageIndex > 0;
+  const canPageChannelMessagesOlder =
+    selectedChannel !== null &&
+    selectedChannelMessageItems.length >= CHANNEL_MESSAGE_PAGE_SIZE;
+  const canPageChannelMembersNewer =
+    channelMembersState.channelId === selectedChannel?.id && channelMembersState.pageIndex > 0;
+  const canPageChannelMembersOlder =
+    channelMembersState.channelId === selectedChannel?.id &&
+    selectedChannelMemberItems.length >= CHANNEL_MEMBER_PAGE_SIZE;
+
+  useEffect(() => {
+    if (!model) {
+      return;
+    }
+    if (model.channels.channels.length === 0) {
+      setSelectedChannelSlug(null);
+      setChannelMode('overview');
+      setChannelTab('messages');
+      return;
+    }
+    if (selectedChannelSlug === null) {
+      setSelectedChannelSlug(model.channels.channels[0]?.slug ?? null);
+      setChannelMode('overview');
+      setChannelTab('messages');
+    }
+  }, [model, selectedChannelSlug]);
+
+  useEffect(() => {
+    setChannelApprovalIndex(current =>
+      clampIndex(current, selectedChannelApprovals.length)
+    );
+  }, [selectedChannelApprovals.length]);
+
+  useEffect(() => {
+    if (channelTab === 'approvals' && !selectedChannel?.isAdmin) {
+      setChannelTab('messages');
+    }
+  }, [channelTab, selectedChannel?.isAdmin]);
 
   useEffect(() => {
     setDeviceSelection(current => clampIndex(current, model?.account.devices.length ?? 0));
@@ -1897,6 +2407,9 @@ export function RootShell({
       inboxSection,
       threadFilter,
       selectedInboxItemId,
+      selectedChannelSlug,
+      channelMode,
+      channelTab,
       selectedAgentSlug,
       agentsFocus: route.type === 'discover' ? 'discover' : 'owned',
       accountFocus,
@@ -1905,9 +2418,12 @@ export function RootShell({
     [
       accountFocus,
       activeInboxSlug,
+      channelMode,
+      channelTab,
       threadFilter,
       inboxSection,
       route,
+      selectedChannelSlug,
       selectedAgentSlug,
       selectedInboxItemId,
       shellFocus,
@@ -2094,6 +2610,252 @@ export function RootShell({
     }
   };
 
+  const loadSelectedChannelMessages = async (params?: {
+    beforeSeq?: string | null;
+    pageIndex?: number;
+    beforeSeqStack?: Array<string | null>;
+  }): Promise<void> => {
+    if (!selectedChannel || !model) {
+      return;
+    }
+
+    const requestId = channelMessagesRequestRef.current + 1;
+    channelMessagesRequestRef.current = requestId;
+    const beforeSeq = params?.beforeSeq ?? null;
+    const beforeSeqStack = params?.beforeSeqStack ?? [beforeSeq];
+    const pageIndex = params?.pageIndex ?? Math.max(beforeSeqStack.length - 1, 0);
+
+    setChannelMessagesState(current => ({
+      ...current,
+      channelId: selectedChannel.id,
+      loading: true,
+      error: null,
+      beforeSeqStack,
+      pageIndex,
+    }));
+
+    try {
+      const result = await readAuthenticatedChannelMessages({
+        profileName: options.profile,
+        actorSlug: model.activeInbox.slug,
+        slug: selectedChannel.slug,
+        beforeChannelSeq: beforeSeq ?? undefined,
+        limit: String(CHANNEL_MESSAGE_PAGE_SIZE),
+        reporter: silentReporter(),
+      });
+
+      if (channelMessagesRequestRef.current !== requestId) {
+        return;
+      }
+
+      setChannelMessagesState({
+        channelId: selectedChannel.id,
+        messages: result.messages,
+        beforeSeqStack,
+        pageIndex,
+        loading: false,
+        error: null,
+        loaded: true,
+      });
+    } catch (error) {
+      if (channelMessagesRequestRef.current !== requestId) {
+        return;
+      }
+      setChannelMessagesState(current => ({
+        ...current,
+        channelId: selectedChannel.id,
+        loading: false,
+        loaded: true,
+        error: toCliError(error).message,
+      }));
+    }
+  };
+
+  const pageSelectedChannelMessages = async (direction: 1 | -1): Promise<void> => {
+    if (!selectedChannel || channelMessagesState.loading) {
+      return;
+    }
+    const pageIndex =
+      channelMessagesState.channelId === selectedChannel.id ? channelMessagesState.pageIndex : 0;
+    const beforeSeqStack =
+      channelMessagesState.channelId === selectedChannel.id
+        ? channelMessagesState.beforeSeqStack
+        : [null];
+
+    if (direction < 0) {
+      if (pageIndex <= 0) {
+        return;
+      }
+      const nextIndex = pageIndex - 1;
+      const nextBeforeSeq = beforeSeqStack[nextIndex] ?? null;
+      await loadSelectedChannelMessages({
+        beforeSeq: nextBeforeSeq,
+        pageIndex: nextIndex,
+        beforeSeqStack,
+      });
+      return;
+    }
+
+    const firstMessage = selectedChannelMessageItems[0] ?? null;
+    if (!firstMessage || selectedChannelMessageItems.length < CHANNEL_MESSAGE_PAGE_SIZE) {
+      return;
+    }
+    const nextBeforeSeq = firstMessage.channelSeq;
+    const nextStack = beforeSeqStack.slice(
+      0,
+      pageIndex + 1
+    );
+    nextStack.push(nextBeforeSeq);
+    await loadSelectedChannelMessages({
+      beforeSeq: nextBeforeSeq,
+      pageIndex: nextStack.length - 1,
+      beforeSeqStack: nextStack,
+    });
+  };
+
+  const loadSelectedChannelMembers = async (params?: {
+    afterMemberId?: string | null;
+    pageIndex?: number;
+    afterMemberIdStack?: Array<string | null>;
+  }): Promise<void> => {
+    if (!selectedChannel || !model) {
+      return;
+    }
+
+    const requestId = channelMembersRequestRef.current + 1;
+    channelMembersRequestRef.current = requestId;
+    const afterMemberId = params?.afterMemberId ?? null;
+    const afterMemberIdStack = params?.afterMemberIdStack ?? [afterMemberId];
+    const pageIndex = params?.pageIndex ?? Math.max(afterMemberIdStack.length - 1, 0);
+
+    setChannelMembersState(current => ({
+      ...current,
+      channelId: selectedChannel.id,
+      loading: true,
+      error: null,
+      afterMemberIdStack,
+      pageIndex,
+    }));
+
+    try {
+      const result = await listChannelMembers({
+        profileName: options.profile,
+        actorSlug: model.activeInbox.slug,
+        slug: selectedChannel.slug,
+        afterMemberId: afterMemberId ?? undefined,
+        limit: String(CHANNEL_MEMBER_PAGE_SIZE),
+        reporter: silentReporter(),
+      });
+
+      if (channelMembersRequestRef.current !== requestId) {
+        return;
+      }
+
+      setChannelMembersState({
+        channelId: selectedChannel.id,
+        members: result.members,
+        afterMemberIdStack,
+        pageIndex,
+        loading: false,
+        error: null,
+        loaded: true,
+      });
+    } catch (error) {
+      if (channelMembersRequestRef.current !== requestId) {
+        return;
+      }
+      setChannelMembersState(current => ({
+        ...current,
+        channelId: selectedChannel.id,
+        loading: false,
+        loaded: true,
+        error: toCliError(error).message,
+      }));
+    }
+  };
+
+  const pageSelectedChannelMembers = async (direction: 1 | -1): Promise<void> => {
+    if (!selectedChannel || channelMembersState.loading) {
+      return;
+    }
+    const pageIndex =
+      channelMembersState.channelId === selectedChannel.id ? channelMembersState.pageIndex : 0;
+    const afterMemberIdStack =
+      channelMembersState.channelId === selectedChannel.id
+        ? channelMembersState.afterMemberIdStack
+        : [null];
+
+    if (direction < 0) {
+      if (pageIndex <= 0) {
+        return;
+      }
+      const nextIndex = pageIndex - 1;
+      const nextAfterMemberId = afterMemberIdStack[nextIndex] ?? null;
+      await loadSelectedChannelMembers({
+        afterMemberId: nextAfterMemberId,
+        pageIndex: nextIndex,
+        afterMemberIdStack,
+      });
+      return;
+    }
+
+    const lastMember = selectedChannelMemberItems[selectedChannelMemberItems.length - 1] ?? null;
+    if (!lastMember || selectedChannelMemberItems.length < CHANNEL_MEMBER_PAGE_SIZE) {
+      return;
+    }
+    const nextAfterMemberId = lastMember.id;
+    const nextStack = afterMemberIdStack.slice(
+      0,
+      pageIndex + 1
+    );
+    nextStack.push(nextAfterMemberId);
+    await loadSelectedChannelMembers({
+      afterMemberId: nextAfterMemberId,
+      pageIndex: nextStack.length - 1,
+      afterMemberIdStack: nextStack,
+    });
+  };
+
+  useEffect(() => {
+    if (route.type !== 'channels' || channelMode !== 'detail' || channelTab !== 'messages') {
+      return;
+    }
+    if (!selectedChannel || channelMessagesState.channelId === selectedChannel.id) {
+      return;
+    }
+    void loadSelectedChannelMessages({
+      beforeSeq: null,
+      pageIndex: 0,
+      beforeSeqStack: [null],
+    });
+  }, [
+    channelMessagesState.channelId,
+    channelMode,
+    channelTab,
+    route.type,
+    selectedChannel?.id,
+  ]);
+
+  useEffect(() => {
+    if (route.type !== 'channels' || channelMode !== 'detail' || channelTab !== 'members') {
+      return;
+    }
+    if (!selectedChannel || channelMembersState.channelId === selectedChannel.id) {
+      return;
+    }
+    void loadSelectedChannelMembers({
+      afterMemberId: null,
+      pageIndex: 0,
+      afterMemberIdStack: [null],
+    });
+  }, [
+    channelMembersState.channelId,
+    channelMode,
+    channelTab,
+    route.type,
+    selectedChannel?.id,
+  ]);
+
   const openTaskPanel = (panel: Omit<TaskPanelState, 'stepIndex'>) => {
     setTaskLookup({
       fieldKey: null,
@@ -2192,6 +2954,11 @@ export function RootShell({
 
     setActiveInboxSlug(nextInbox.slug);
     setSelectedAgentSlug(nextInbox.slug);
+    setSelectedChannelSlug(null);
+    setChannelMode('overview');
+    setChannelTab('messages');
+    setChannelMessagesState(createInitialChannelMessagesState());
+    setChannelMembersState(createInitialChannelMembersState());
     setTask(current => ({
       ...current,
       notice: `Active agent set to ${nextInbox.slug}.`,
@@ -2422,6 +3189,247 @@ export function RootShell({
     });
   };
 
+  const openAddThreadParticipantTask = () => {
+    if (!selectedThread || !model || selectedThread.locked) {
+      return;
+    }
+    openTaskPanel({
+      title: 'Add participant',
+      help:
+        'Enter a slug or email to add. Suggestions include verified SaaS matches.',
+      submitLabel: 'Add',
+      fields: [
+        {
+          key: 'participant',
+          label: 'Participant',
+          value: '',
+          placeholder: 'slug or email',
+          lookup: {
+            mode: 'inbox_lookup',
+            tokenMode: 'single',
+          },
+        },
+      ],
+      onSubmit: async values => {
+        setTaskPanel(null);
+        await performTask(
+          `Adding ${values.participant} to thread #${selectedThread.id}`,
+          reporter =>
+            addThreadParticipant({
+              profileName: options.profile,
+              actorSlug: model.activeInbox.slug,
+              threadId: selectedThread.id,
+              participant: values.participant,
+              reporter,
+            }),
+          result => {
+            setLiveInboxRefreshToken(token => token + 1);
+            setTask(current => ({
+              ...current,
+              notice: `Added ${result.participant} to thread.`,
+            }));
+          }
+        );
+      },
+    });
+  };
+
+  const openRemoveThreadParticipantTask = () => {
+    if (!selectedThread || !model || selectedThread.locked) {
+      return;
+    }
+    openTaskPanel({
+      title: 'Remove participant',
+      help: 'Enter the agent slug to remove.',
+      submitLabel: 'Remove',
+      fields: [
+        {
+          key: 'participant',
+          label: 'Participant',
+          value: '',
+          placeholder: 'slug',
+        },
+      ],
+      onSubmit: async values => {
+        setTaskPanel(null);
+        await performTask(
+          `Removing ${values.participant} from thread #${selectedThread.id}`,
+          reporter =>
+            removeThreadParticipant({
+              profileName: options.profile,
+              actorSlug: model.activeInbox.slug,
+              threadId: selectedThread.id,
+              participant: values.participant,
+              reporter,
+            }),
+          result => {
+            setLiveInboxRefreshToken(token => token + 1);
+            setTask(current => ({
+              ...current,
+              notice: `Removed ${result.participant} from thread.`,
+            }));
+          }
+        );
+      },
+    });
+  };
+
+  const openAddChannelTask = () => {
+    openTaskPanel({
+      title: 'Add channel',
+      help:
+        'Create a signed plaintext channel from the active agent. Channels are not end-to-end private.',
+      submitLabel: 'Add',
+      fields: [
+        {
+          key: 'slug',
+          label: 'Slug',
+          value: '',
+          placeholder: 'ops-updates',
+          validate: value =>
+            normalizeInboxSlug(value) ? null : 'Enter a valid channel slug.',
+        },
+        {
+          key: 'title',
+          label: 'Title',
+          value: '',
+          placeholder: 'optional',
+          allowEmpty: true,
+        },
+        {
+          key: 'description',
+          label: 'Description',
+          value: '',
+          placeholder: 'optional public channel description',
+          allowEmpty: true,
+        },
+        {
+          key: 'accessMode',
+          label: 'Access',
+          value: 'public',
+          placeholder: 'public or approval_required',
+          validate: value =>
+            normalizeChannelAccessModeInput(value)
+              ? null
+              : 'Use public or approval_required.',
+        },
+        {
+          key: 'discoverable',
+          label: 'Discoverable',
+          value: 'yes',
+          placeholder: 'yes or no',
+          validate: value =>
+            parseYesNoInput(value, true) === null ? 'Use yes or no.' : null,
+        },
+      ],
+      onSubmit: async values => {
+        setTaskPanel(null);
+        if (!model) {
+          return;
+        }
+        const accessMode = normalizeChannelAccessModeInput(values.accessMode);
+        const discoverable = parseYesNoInput(values.discoverable, true);
+        if (!accessMode || discoverable === null) {
+          setTask(current => ({
+            ...current,
+            error: 'Channel access or discoverability is invalid.',
+          }));
+          return;
+        }
+        await performTask(
+          `Adding channel ${values.slug}`,
+          reporter =>
+            createChannel({
+              profileName: options.profile,
+              actorSlug: model.activeInbox.slug,
+              slug: values.slug,
+              title: values.title || undefined,
+              description: values.description || undefined,
+              accessMode,
+              discoverable,
+              reporter,
+            }),
+          result => {
+            setRoute({ type: 'channels' });
+            setSelectedChannelSlug(result.slug ?? values.slug.trim());
+            setChannelMode('detail');
+            setChannelTab('messages');
+            setChannelMessagesState(createInitialChannelMessagesState());
+            setChannelMembersState(createInitialChannelMembersState());
+            setTask(current => ({
+              ...current,
+              notice: `Channel ${result.slug ?? values.slug.trim()} ${result.status}.`,
+            }));
+          }
+        );
+      },
+    });
+  };
+
+  const openSendChannelMessageTask = () => {
+    if (!selectedChannel || !canSendSelectedChannel) {
+      setTask(current => ({
+        ...current,
+        notice: selectedChannel
+          ? `/${selectedChannel.slug} is read-only for ${selectedChannel.actorSlug}.`
+          : 'Select a channel before sending.',
+      }));
+      return;
+    }
+
+    openTaskPanel({
+      title: `Send to /${selectedChannel.slug}`,
+      help:
+        `Post signed plaintext as ${model?.activeInbox.slug ?? selectedChannel.actorSlug}. Channels are shared feeds, not private threads.`,
+      submitLabel: 'Send',
+      fields: [
+        {
+          key: 'message',
+          label: 'Message',
+          value: '',
+          placeholder: 'channel message body',
+        },
+      ],
+      onSubmit: async values => {
+        setTaskPanel(null);
+        if (!model) {
+          return;
+        }
+        const message = values.message.trim();
+        if (!message) {
+          setTask(current => ({
+            ...current,
+            error: 'Message cannot be empty.',
+          }));
+          return;
+        }
+        await performTask(
+          `Sending message to /${selectedChannel.slug}`,
+          reporter =>
+            sendChannelMessage({
+              profileName: options.profile,
+              actorSlug: model.activeInbox.slug,
+              slug: selectedChannel.slug,
+              message,
+              contentType: 'text/plain',
+              reporter,
+            }),
+          result => {
+            void loadSelectedChannelMessages({
+              beforeSeq: null,
+              pageIndex: 0,
+              beforeSeqStack: [null],
+            });
+            setTask(current => ({
+              ...current,
+              notice: `Sent message to /${result.slug ?? selectedChannel.slug}.`,
+            }));
+          }
+        );
+      },
+    });
+  };
+
   const openCreateAgentTask = () => {
     openTaskPanel({
       title: 'Create agent',
@@ -2464,6 +3472,11 @@ export function RootShell({
           result => {
             setActiveInboxSlug(result.actor.slug);
             setSelectedAgentSlug(result.actor.slug);
+            setSelectedChannelSlug(null);
+            setChannelMode('overview');
+            setChannelTab('messages');
+            setChannelMessagesState(createInitialChannelMessagesState());
+            setChannelMembersState(createInitialChannelMembersState());
             setRoute({ type: 'agents' });
             setPendingRegistrationPrompt(
               result.registration.status === 'skipped'
@@ -2854,6 +3867,11 @@ export function RootShell({
   };
 
   const openRotateKeysTask = () => {
+    const defaultShareDeviceIds =
+      model?.account.devices
+        .filter(device => device.status === 'approved')
+        .map(device => device.deviceId)
+        .join(', ') ?? '';
     const approvedDeviceIds =
       model?.account.devices
         .filter(device => device.status === 'approved')
@@ -2862,14 +3880,14 @@ export function RootShell({
 
     openTaskPanel({
       title: 'Rotate agent keys',
-      help: `Use comma-separated device ids. Approved: ${approvedDeviceIds}`,
+      help: `Rotated keys sync to approved devices listed below by default. Remove ids to leave devices unsynced, or move ids to revoke them. Approved: ${approvedDeviceIds}`,
       submitLabel: 'Rotate',
       fields: [
         {
           key: 'shareDeviceIds',
           label: 'Share to devices',
-          value: '',
-          placeholder: 'optional comma-separated device ids',
+          value: defaultShareDeviceIds,
+          placeholder: 'comma-separated device ids',
           allowEmpty: true,
         },
         {
@@ -3569,6 +4587,15 @@ export function RootShell({
         setInboxFocus('detail');
         return;
       }
+      if (route.type === 'inboxes' && inboxFocus === 'detail') {
+        setInboxFocus('navigator');
+        return;
+      }
+      if (route.type === 'channels' && channelMode === 'detail') {
+        setChannelMode('overview');
+        setChannelTab('messages');
+        return;
+      }
       if (shellFocus === 'content') {
         setShellFocus('sidebar');
       }
@@ -3580,6 +4607,10 @@ export function RootShell({
       const sidebarShortcut = input.toLowerCase();
       if (sidebarShortcut === 'i') {
         setMainRoute('inboxes');
+        return;
+      }
+      if (sidebarShortcut === 'c') {
+        setMainRoute('channels');
         return;
       }
       if (sidebarShortcut === 'a') {
@@ -3619,12 +4650,76 @@ export function RootShell({
     }
 
     if (route.type === 'inboxes') {
+      if (inboxFocus === 'detail' && selectedRequest) {
+        if (key.leftArrow || key.rightArrow) {
+          setInboxDetailTab('approval');
+          return;
+        }
+        if ((input === 'a' || key.return) && selectedRequest.direction === 'incoming') {
+          await performTask(
+            `Approving request #${selectedRequest.id}`,
+            reporter =>
+              resolveContactRequest({
+                profileName: options.profile,
+                requestId: selectedRequest.id,
+                action: 'approve',
+                reporter,
+              }),
+            () => {
+              setLiveInboxRefreshToken(token => token + 1);
+              setInboxFocus('navigator');
+              setTask(current => ({
+                ...current,
+                notice: `Approved request #${selectedRequest.id}.`,
+              }));
+            }
+          );
+          return;
+        }
+        if (input === 'x' && selectedRequest.direction === 'incoming') {
+          await performTask(
+            `Rejecting request #${selectedRequest.id}`,
+            reporter =>
+              resolveContactRequest({
+                profileName: options.profile,
+                requestId: selectedRequest.id,
+                action: 'reject',
+                reporter,
+              }),
+            () => {
+              setLiveInboxRefreshToken(token => token + 1);
+              setInboxFocus('navigator');
+              setTask(current => ({
+                ...current,
+                notice: `Rejected request #${selectedRequest.id}.`,
+              }));
+            }
+          );
+        }
+        return;
+      }
+
       if (inboxFocus === 'detail' && selectedThread) {
-        if (key.escape) {
-          setInboxFocus('navigator');
+        if (key.leftArrow || key.rightArrow) {
+          const currentIndex = inboxTabs.findIndex(tab => tab.key === inboxDetailTab);
+          const direction = key.leftArrow ? -1 : 1;
+          const nextIndex =
+            (Math.max(currentIndex, 0) + direction + inboxTabs.length) % inboxTabs.length;
+          setInboxDetailTab(inboxTabs[nextIndex]?.key ?? 'messages');
           return;
         }
-        if (key.return) {
+        if (inboxDetailTab === 'members') {
+          if (input === '+') {
+            openAddThreadParticipantTask();
+            return;
+          }
+          if (input === '-') {
+            openRemoveThreadParticipantTask();
+            return;
+          }
+          return;
+        }
+        if (input.toLowerCase() === 's') {
           if (securityState.status !== 'healthy') {
             setTask(current => ({
               ...current,
@@ -3638,21 +4733,15 @@ export function RootShell({
           setInboxFocus('composer');
           return;
         }
-        if (input === 'e') {
-          if (securityState.status !== 'healthy') {
-            setTask(current => ({
-              ...current,
-              notice: 'Private keys missing. Recover keys in Account security before sending messages.',
-            }));
-            setRoute({ type: 'account' });
-            setAccountFocus('security');
-            return;
-          }
-          resetThreadWindow();
-          setInboxFocus('composer');
+        if (inboxDetailTab === 'messages' && key.upArrow) {
+          scrollOlder();
           return;
         }
-        if (input === 'm') {
+        if (inboxDetailTab === 'messages' && key.downArrow) {
+          scrollNewer();
+          return;
+        }
+        if (input === 'm' && selectedThread.unreadMessages > 0) {
           await performTask(
             `Marking thread #${selectedThread.id} as read`,
             reporter =>
@@ -3717,8 +4806,12 @@ export function RootShell({
         return;
       }
       if (key.return) {
-        if (selectedThread) {
+        if (selectedRequest) {
+          setInboxDetailTab('approval');
+          setInboxFocus('detail');
+        } else if (selectedThread) {
           resetThreadWindow();
+          setInboxDetailTab('messages');
           setInboxFocus('detail');
         }
         return;
@@ -3731,7 +4824,7 @@ export function RootShell({
         openGroupTask();
         return;
       }
-      if (input === 'm' && selectedThread) {
+      if (input === 'm' && selectedThread && selectedThread.unreadMessages > 0) {
         await performTask(
           `Marking thread #${selectedThread.id} as read`,
           reporter =>
@@ -3772,124 +4865,159 @@ export function RootShell({
         );
         return;
       }
-      if (input === 'a' && selectedRequest?.direction === 'incoming') {
-        await performTask(
-          `Approving request #${selectedRequest.id}`,
-          reporter =>
-            resolveContactRequest({
-              profileName: options.profile,
-              requestId: selectedRequest.id,
-              action: 'approve',
-              reporter,
-            }),
-          () => {
-            setLiveInboxRefreshToken(token => token + 1);
-            setTask(current => ({
-              ...current,
-              notice: `Approved request #${selectedRequest.id}.`,
-            }));
+      return;
+    }
+
+    if (route.type === 'channels') {
+      const lowerInput = input.toLowerCase();
+
+      if (channelMode === 'overview') {
+        if (lowerInput === 'n' || input === '+') {
+          openAddChannelTask();
+          return;
+        }
+        if (input === '[') {
+          cycleActiveInbox(-1);
+          return;
+        }
+        if (input === ']') {
+          cycleActiveInbox(1);
+          return;
+        }
+        if (key.downArrow) {
+          const next =
+            model.channels.channels[
+              clampIndex(selectedChannelIndex + 1, model.channels.channels.length)
+            ];
+          if (next) {
+            setSelectedChannelSlug(next.slug);
+            setChannelApprovalIndex(0);
           }
-        );
-        return;
-      }
-      if (input === 'x' && selectedRequest?.direction === 'incoming') {
-        await performTask(
-          `Rejecting request #${selectedRequest.id}`,
-          reporter =>
-            resolveContactRequest({
-              profileName: options.profile,
-              requestId: selectedRequest.id,
-              action: 'reject',
-              reporter,
-            }),
-          () => {
-            setLiveInboxRefreshToken(token => token + 1);
-            setTask(current => ({
-              ...current,
-              notice: `Rejected request #${selectedRequest.id}.`,
-            }));
+          return;
+        }
+        if (key.upArrow) {
+          const next =
+            model.channels.channels[
+              clampIndex(selectedChannelIndex - 1, model.channels.channels.length)
+            ];
+          if (next) {
+            setSelectedChannelSlug(next.slug);
+            setChannelApprovalIndex(0);
           }
-        );
+          return;
+        }
+        if (key.return && selectedChannel) {
+          setSelectedChannelSlug(selectedChannel.slug);
+          setChannelMode('detail');
+          setChannelTab('messages');
+          setChannelApprovalIndex(0);
+          return;
+        }
         return;
       }
-      if (input === '+' && selectedThread) {
-        openTaskPanel({
-          title: 'Add participant',
-          help:
-            'Enter a slug or email to add. Suggestions include verified SaaS matches.',
-          submitLabel: 'Add',
-          fields: [
-            {
-              key: 'participant',
-              label: 'Participant',
-              value: '',
-              placeholder: 'slug or email',
-              lookup: {
-                mode: 'inbox_lookup',
-                tokenMode: 'single',
-              },
-            },
-          ],
-          onSubmit: async values => {
-            setTaskPanel(null);
-            await performTask(
-              `Adding ${values.participant} to thread #${selectedThread.id}`,
-              reporter =>
-                addThreadParticipant({
-                  profileName: options.profile,
-                  actorSlug: model.activeInbox.slug,
-                  threadId: selectedThread.id,
-                  participant: values.participant,
-                  reporter,
-                }),
-              result => {
-                setLiveInboxRefreshToken(token => token + 1);
-                setTask(current => ({
-                  ...current,
-                notice: `Added ${result.participant} to thread.`,
-                }));
-              }
-            );
-          },
-        });
+
+      if (!selectedChannel) {
+        setChannelMode('overview');
+        setChannelTab('messages');
         return;
       }
-      if (input === '-' && selectedThread) {
-        openTaskPanel({
-          title: 'Remove participant',
-          help: 'Enter the agent slug to remove.',
-          submitLabel: 'Remove',
-          fields: [
-            {
-              key: 'participant',
-              label: 'Participant',
-              value: '',
-              placeholder: 'slug',
-            },
-          ],
-          onSubmit: async values => {
-            setTaskPanel(null);
-            await performTask(
-              `Removing ${values.participant} from thread #${selectedThread.id}`,
-              reporter =>
-                removeThreadParticipant({
-                  profileName: options.profile,
-                  actorSlug: model.activeInbox.slug,
-                  threadId: selectedThread.id,
-                  participant: values.participant,
-                  reporter,
-                }),
-              result => {
-                setLiveInboxRefreshToken(token => token + 1);
-                setTask(current => ({
-                  ...current,
-                notice: `Removed ${result.participant} from thread.`,
-                }));
-              }
-            );
-          },
-        });
+
+      if (key.leftArrow || key.rightArrow) {
+        const currentIndex = channelTabs.findIndex(tab => tab.key === channelTab);
+        const direction = key.leftArrow ? -1 : 1;
+        const nextIndex =
+          (Math.max(currentIndex, 0) + direction + channelTabs.length) % channelTabs.length;
+        setChannelTab(channelTabs[nextIndex]?.key ?? 'messages');
+        return;
       }
+
+      if (channelTab === 'messages') {
+        if (input === '[' || key.upArrow) {
+          await pageSelectedChannelMessages(key.upArrow ? 1 : -1);
+          return;
+        }
+        if (input === ']' || key.downArrow) {
+          await pageSelectedChannelMessages(key.downArrow ? -1 : 1);
+          return;
+        }
+        if (lowerInput === 's' && canSendSelectedChannel) {
+          openSendChannelMessageTask();
+          return;
+        }
+        return;
+      }
+
+      if (channelTab === 'members') {
+        if (input === '[' || key.upArrow) {
+          await pageSelectedChannelMembers(key.upArrow ? 1 : -1);
+          return;
+        }
+        if (input === ']' || key.downArrow) {
+          await pageSelectedChannelMembers(key.downArrow ? -1 : 1);
+          return;
+        }
+        return;
+      }
+
+      if (channelTab === 'approvals') {
+        if (!selectedChannel.isAdmin) {
+          setChannelTab('messages');
+          return;
+        }
+        if (key.downArrow) {
+          setChannelApprovalIndex(current =>
+            clampIndex(current + 1, selectedChannelApprovals.length)
+          );
+          return;
+        }
+        if (key.upArrow) {
+          setChannelApprovalIndex(current =>
+            clampIndex(current - 1, selectedChannelApprovals.length)
+          );
+          return;
+        }
+        if ((input === 'a' || key.return) && selectedChannelApproval) {
+          await performTask(
+            `Approving channel request #${selectedChannelApproval.id}`,
+            reporter =>
+              approveChannelJoin({
+                profileName: options.profile,
+                actorSlug: model.activeInbox.slug,
+                requestId: selectedChannelApproval.id,
+                reporter,
+              }),
+            () => {
+              setChannelApprovalIndex(0);
+              setTask(current => ({
+                ...current,
+                notice: `Approved channel request #${selectedChannelApproval.id}.`,
+              }));
+            }
+          );
+          return;
+        }
+        if (input === 'x' && selectedChannelApproval) {
+          await performTask(
+            `Rejecting channel request #${selectedChannelApproval.id}`,
+            reporter =>
+              rejectChannelJoin({
+                profileName: options.profile,
+                actorSlug: model.activeInbox.slug,
+                requestId: selectedChannelApproval.id,
+                reporter,
+              }),
+            () => {
+              setChannelApprovalIndex(0);
+              setTask(current => ({
+                ...current,
+                notice: `Rejected channel request #${selectedChannelApproval.id}.`,
+              }));
+            }
+          );
+        }
+        return;
+      }
+
       return;
     }
 
@@ -3917,6 +5045,11 @@ export function RootShell({
       if (key.return) {
         if (selectedAgent) {
           setActiveInboxSlug(selectedAgent.slug);
+          setSelectedChannelSlug(null);
+          setChannelMode('overview');
+          setChannelTab('messages');
+          setChannelMessagesState(createInitialChannelMessagesState());
+          setChannelMembersState(createInitialChannelMembersState());
           setTask(current => ({
             ...current,
             notice: `Active agent set to ${selectedAgent.slug}.`,
@@ -4056,6 +5189,8 @@ export function RootShell({
   const sectionTitle =
     route.type === 'inboxes'
       ? 'Inbox'
+      : route.type === 'channels'
+        ? 'Channels'
       : route.type === 'agents'
         ? 'My Agents'
         : route.type === 'discover'
@@ -4068,6 +5203,8 @@ export function RootShell({
   const sectionIcon =
     route.type === 'inboxes'
       ? '[i]'
+      : route.type === 'channels'
+        ? '[c]'
       : route.type === 'agents'
         ? '[a]'
         : route.type === 'discover'
@@ -4077,6 +5214,8 @@ export function RootShell({
             : route.type === 'help'
               ? '[?]'
               : '';
+  const headerRuleWidth = Math.max(0, Math.min(terminalSize.columns - 22, 58));
+  const fullRuleWidth = Math.max(0, Math.min(terminalSize.columns, 80));
 
   const contentHeader = (
     <Box flexDirection="column">
@@ -4090,7 +5229,7 @@ export function RootShell({
           </>
         ) : null}
       </Text>
-      <Text color="gray" dimColor>{'─'.repeat(Math.min((process.stdout.columns || 80) - 22, 58))}</Text>
+      <Text color="gray" dimColor>{'─'.repeat(headerRuleWidth)}</Text>
     </Box>
   );
 
@@ -4224,7 +5363,7 @@ export function RootShell({
         detail: SIDEBAR_LABELS[selectedSidebarNav],
         items: [
           { key: '↑/↓', label: 'select section' },
-          { key: 'I/A/D/U', label: 'open by hotkey' },
+          { key: 'I/C/A/D/U', label: 'open by hotkey' },
           { key: 'Enter', label: 'open selected' },
           { key: '→', label: 'content focus' },
           { key: 'Tab', label: 'content' },
@@ -4236,61 +5375,172 @@ export function RootShell({
     if (route.type === 'inboxes') {
       if (inboxFocus === 'composer' && selectedThread) {
         return {
-          label: 'Compose message',
+          label: 'Thread Composer',
           detail: selectedThread.label,
           items: [
             { key: 'Type', label: 'edit draft' },
             { key: 'Enter', label: 'new line' },
             { key: 'Ctrl+S/X', label: 'send' },
-            { key: 'Esc', label: 'thread' },
+            { key: 'Esc', label: 'thread messages' },
+          ],
+        };
+      }
+
+      if (inboxFocus === 'detail' && selectedRequest) {
+        return {
+          label: 'Thread Approval',
+          detail:
+            selectedRequest.direction === 'incoming'
+              ? selectedRequest.requesterDisplayName ?? selectedRequest.requesterSlug
+              : selectedRequest.targetDisplayName ?? selectedRequest.targetSlug,
+          items: [
+            ...(selectedRequest.direction === 'incoming'
+              ? [{ key: 'A/Enter', label: 'approve' }, { key: 'X', label: 'reject' }]
+              : []),
+            { key: 'Esc', label: 'inbox overview' },
+            { key: 'Tab', label: 'sidebar' },
           ],
         };
       }
 
       if (inboxFocus === 'detail' && selectedThread) {
+        if (inboxDetailTab === 'members') {
+          return {
+            label: 'Thread Members',
+            detail: selectedThread.label,
+            items: [
+              { key: '←/→', label: 'switch tab' },
+              ...(!selectedThread.locked
+                ? [{ key: '+/-', label: 'add/remove member' }]
+                : []),
+              { key: 'Esc', label: 'inbox overview' },
+              { key: 'Tab', label: 'sidebar' },
+            ],
+          };
+        }
+
         return {
-          label: 'Thread viewer',
+          label: 'Thread Messages',
           detail: selectedThread.label,
           items: [
-            { key: 'Enter/E', label: 'compose' },
-            { key: 'M', label: 'mark read' },
-            { key: 'Esc', label: 'thread list' },
+            { key: '←/→', label: 'switch tab' },
+            {
+              key: 'S',
+              label: securityState.status === 'healthy' ? 'write message' : 'recover keys',
+            },
+            ...(canScrollOlder || canScrollNewer
+              ? [{ key: '↑/↓', label: 'page messages' }]
+              : []),
+            ...(selectedThread.unreadMessages > 0 ? [{ key: 'M', label: 'mark read' }] : []),
+            { key: 'Esc', label: 'inbox overview' },
+            { key: 'Tab', label: 'sidebar' },
           ],
         };
       }
 
       if (inboxSection === 'pending' && selectedRequest) {
         return {
-          label: 'Pending request',
+          label: 'Inbox Overview',
           detail:
             selectedRequest.direction === 'incoming'
               ? selectedRequest.requesterDisplayName ?? selectedRequest.requesterSlug
               : selectedRequest.targetDisplayName ?? selectedRequest.targetSlug,
           items: [
-            { key: '↑/↓', label: 'move requests' },
-            ...(selectedRequest.direction === 'incoming'
-              ? [{ key: 'A/X', label: 'approve/reject' }]
-              : []),
+            ...(inboxSectionItems.length > 1 ? [{ key: '↑/↓', label: 'move requests' }] : []),
+            { key: 'Enter', label: 'open approval' },
             { key: '←/→', label: 'section' },
-            { key: '[ ]', label: 'agent' },
+            ...(model.ownedInboxes.length > 1 ? [{ key: '[ ]', label: 'agent' }] : []),
+            { key: 'Tab', label: 'sidebar' },
+          ],
+        };
+      }
+
+      const overviewItemLabel = inboxSection === 'pending' ? 'requests' : 'threads';
+      const selectedOverviewKind = selectedRequest
+        ? 'request'
+        : selectedThread
+          ? 'thread'
+          : 'item';
+      return {
+        label: 'Inbox Overview',
+        detail: `${inboxSection} · ${threadFilter}`,
+        items: [
+          ...(inboxSectionItems.length > 1
+            ? [{ key: '↑/↓', label: `move ${overviewItemLabel}` }]
+            : []),
+          ...(selectedInboxItem ? [{ key: 'Enter', label: `open ${selectedOverviewKind}` }] : []),
+          ...(selectedThread && selectedThread.unreadMessages > 0
+            ? [{ key: 'M', label: 'mark read' }]
+            : []),
+          ...(selectedThread ? [{ key: 'Z', label: selectedThread.archived ? 'restore' : 'archive' }] : []),
+          { key: 'F', label: 'filter' },
+          { key: '←/→', label: 'section' },
+          ...(model.ownedInboxes.length > 1 ? [{ key: '[ ]', label: 'agent' }] : []),
+          { key: 'N/G', label: 'new DM/group' },
+          { key: 'Tab', label: 'sidebar' },
+        ],
+      };
+    }
+
+    if (route.type === 'channels') {
+      if (channelMode === 'overview') {
+        return {
+          label: 'Channel Overview',
+          detail: model.activeInbox.slug,
+          items: [
+            ...(model.channels.channels.length > 1
+              ? [{ key: '↑/↓', label: 'select channel' }]
+              : []),
+            ...(selectedChannel ? [{ key: 'Enter', label: 'open channel' }] : []),
+            { key: 'N/+', label: 'add channel' },
+            ...(model.ownedInboxes.length > 1 ? [{ key: '[ ]', label: 'agent' }] : []),
+            { key: 'Tab', label: 'sidebar' },
+          ],
+        };
+      }
+
+      if (channelTab === 'members') {
+        return {
+          label: 'Channel Members',
+          detail: selectedChannel ? `#${selectedChannel.slug}` : undefined,
+          items: [
+            ...(channelTabs.length > 1 ? [{ key: '←/→', label: 'switch tab' }] : []),
+            ...(canPageChannelMembersNewer || canPageChannelMembersOlder
+              ? [{ key: '↑/↓', label: 'page members' }]
+              : []),
+            { key: 'Esc', label: 'overview' },
+            { key: 'Tab', label: 'sidebar' },
+          ],
+        };
+      }
+
+      if (channelTab === 'approvals' && selectedChannel?.isAdmin) {
+        return {
+          label: 'Channel Approvals',
+          detail: selectedChannel ? `#${selectedChannel.slug}` : undefined,
+          items: [
+            ...(selectedChannelApprovals.length > 1
+              ? [{ key: '↑/↓', label: 'select request' }]
+              : []),
+            ...(selectedChannelApproval ? [{ key: 'A/Enter', label: 'approve' }] : []),
+            ...(selectedChannelApproval ? [{ key: 'X', label: 'reject' }] : []),
+            ...(channelTabs.length > 1 ? [{ key: '←/→', label: 'switch tab' }] : []),
+            { key: 'Esc', label: 'overview' },
             { key: 'Tab', label: 'sidebar' },
           ],
         };
       }
 
       return {
-        label: 'Inbox navigator',
-        detail: `${inboxSection} · ${threadFilter}`,
+        label: 'Channel Messages',
+        detail: selectedChannel ? `#${selectedChannel.slug}` : undefined,
         items: [
-          { key: '↑/↓', label: 'move threads' },
-          { key: 'Enter', label: selectedThread ? 'open thread' : 'select' },
-          ...(selectedThread ? [{ key: 'M', label: 'mark read' }] : []),
-          ...(selectedThread ? [{ key: 'Z', label: selectedThread.archived ? 'restore' : 'archive' }] : []),
-          ...(selectedThread ? [{ key: '+/-', label: 'participants' }] : []),
-          { key: 'F', label: 'filter' },
-          { key: '←/→', label: 'section' },
-          { key: '[ ]', label: 'agent' },
-          { key: 'N/G', label: 'new DM/group' },
+          ...(channelTabs.length > 1 ? [{ key: '←/→', label: 'switch tab' }] : []),
+          ...(canSendSelectedChannel ? [{ key: 'S', label: 'send text' }] : []),
+          ...(canPageChannelMessagesNewer || canPageChannelMessagesOlder
+            ? [{ key: '↑/↓', label: 'page messages' }]
+            : []),
+          { key: 'Esc', label: 'overview' },
           { key: 'Tab', label: 'sidebar' },
         ],
       };
@@ -4354,7 +5604,7 @@ export function RootShell({
 
   if (connectionState.mode === 'loading') {
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" height={terminalSize.rows} overflow="hidden">
         {statusBar}
         <ModeBar mode={footerMode} />
       </Box>
@@ -4363,8 +5613,8 @@ export function RootShell({
 
   if (connectionState.mode === 'signed_out' || route.type === 'auth') {
     return (
-      <Box flexDirection="column">
-        <Text color="gray" dimColor>{'─'.repeat(Math.min(process.stdout.columns || 80, 80))}</Text>
+      <Box flexDirection="column" height={terminalSize.rows} overflow="hidden">
+        <Text color="gray" dimColor>{'─'.repeat(fullRuleWidth)}</Text>
         <Text> </Text>
         <Text color="yellow">You are signed out.</Text>
         <Text color="gray">Sign in to sync, recover keys, and manage devices.</Text>
@@ -4377,7 +5627,7 @@ export function RootShell({
 
   if (!model) {
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" height={terminalSize.rows} overflow="hidden">
         <Text color="yellow">Loading shell state...</Text>
         {statusBar}
         <ModeBar mode={footerMode} />
@@ -4388,7 +5638,7 @@ export function RootShell({
   const attentionItems = model.dashboard.attentionItems;
 
   return (
-    <Box flexDirection="row">
+    <Box flexDirection="row" height={terminalSize.rows} overflow="hidden">
       <Sidebar
         active={route.type}
         selectedNav={selectedSidebarNav}
@@ -4397,31 +5647,40 @@ export function RootShell({
         connectionDotColor={connectionDotColor}
         unreadCount={model.unreadCount}
         pendingCount={model.pendingRequestCount}
+        channelApprovalCount={model.channels.pendingApprovalCount}
         shellFocus={shellFocus}
       />
-      <Box flexDirection="column" flexGrow={1} paddingLeft={1}>
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        height="100%"
+        overflow="hidden"
+        paddingLeft={1}
+      >
         {contentHeader}
 
-        {attentionItems.length > 0 && route.type === 'inboxes' ? (
-          <Box flexDirection="column">
-            {attentionItems.map(item => (
-              <Text key={item.id} color={item.severity === 'critical' ? 'red' : 'yellow'}>
-                {item.severity === 'critical' ? '✗' : '⚠'} {item.title}
-                {item.id.startsWith('security:') ? ' · Press [U] to recover now.' : null}
-              </Text>
-            ))}
-          </Box>
-        ) : null}
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} overflowY="hidden">
+          {attentionItems.length > 0 && route.type === 'inboxes' ? (
+            <Box flexDirection="column">
+              {attentionItems.map(item => (
+                <Text key={item.id} color={item.severity === 'critical' ? 'red' : 'yellow'}>
+                  {item.severity === 'critical' ? '✗' : '⚠'} {item.title}
+                  {item.id.startsWith('security:') ? ' · Press [U] to recover now.' : null}
+                </Text>
+              ))}
+            </Box>
+          ) : null}
 
         {route.type === 'help' ? (
           <Box flexDirection="column">
             <Text>  <Text color="cyan" bold>Inbox</Text> — threads, pending requests, message composition</Text>
+            <Text>  <Text color="cyan" bold>Channels</Text> — signed plaintext channels and admin join approvals</Text>
             <Text>  <Text color="cyan" bold>My Agents</Text> — owned agents, profile, managed agent sync</Text>
             <Text>  <Text color="cyan" bold>Discover</Text> — browse verified SaaS agents and search by slug or email</Text>
             <Text>  <Text color="cyan" bold>Account</Text> — recovery, backups, trusted devices, rotation</Text>
             <Text> </Text>
             <Text color="gray">  Tab moves between content and sidebar. In sidebar, ↑/↓ selects and Enter opens.</Text>
-            <Text color="gray">  In thread detail, Enter opens compose. In compose, Enter adds a line and Ctrl+S sends.</Text>
+            <Text color="gray">  In thread and channel messages, S starts writing. In a thread draft, Enter adds a line and Ctrl+S sends.</Text>
             <Text color="gray">  The footer always shows the current mode and the keys that work there.</Text>
           </Box>
         ) : null}
@@ -4433,8 +5692,20 @@ export function RootShell({
               <Text color="gray"> · filter </Text>
               <Text color="white">{threadFilter}</Text>
             </Text>
+            <Box marginTop={1}>
+              <TabStrip
+                tabs={model.inboxes.sections.map(section => ({
+                  key: section.key,
+                  label: section.label,
+                  count: section.count,
+                }))}
+                active={inboxSection}
+              />
+            </Box>
             <Box marginTop={1} flexDirection="column">
-              <Text color={inboxFocus === 'navigator' ? 'cyan' : 'white'}>◆ Navigator</Text>
+              <Text color={inboxFocus === 'navigator' ? 'cyan' : 'white'} bold={inboxFocus === 'navigator'}>
+                ◆ Inbox overview
+              </Text>
               {renderList({
                 items: inboxSectionItems.map(item => `${item.label} · ${item.subtitle}`),
                 selectedIndex: selectedInboxIndex,
@@ -4445,8 +5716,11 @@ export function RootShell({
               })}
             </Box>
             <Box marginTop={1} flexDirection="column">
-              <Text color={inboxFocus === 'detail' || inboxFocus === 'composer' ? 'cyan' : 'white'}>
-                ◆ Thread
+              <Text
+                color={inboxFocus === 'detail' || inboxFocus === 'composer' ? 'cyan' : 'white'}
+                bold={inboxFocus === 'detail' || inboxFocus === 'composer'}
+              >
+                ◆ Thread detail
               </Text>
               {selectedRequest ? (
                 <Box flexDirection="column">
@@ -4461,6 +5735,11 @@ export function RootShell({
                   <Text color="gray">
                     {selectedRequest.messageCount} message(s) · updated {formatTimestamp(selectedRequest.updatedAt)}
                   </Text>
+                  {inboxFocus === 'detail' ? (
+                    <Box marginTop={1}>
+                      <TabStrip tabs={inboxTabs} active={inboxDetailTab} />
+                    </Box>
+                  ) : null}
                   {firstThreadMessage ? (
                     <Text>
                       First message: <Text color="white">{capTextLines(firstThreadMessage.body, MAX_MESSAGE_BODY_LINES)}</Text>
@@ -4469,83 +5748,268 @@ export function RootShell({
                     <Text color="gray">No visible message preview yet.</Text>
                   )}
                 </Box>
-              ) : selectedThread ? (
-                <Box flexDirection="column">
-                  <Text>
-                    <Text bold>{selectedThread.label}</Text>
-                    <Text color="gray"> · {selectedThread.participantCount.toString()} participants</Text>
-                    {selectedThread.locked ? <Text color="gray"> · locked</Text> : null}
-                  </Text>
-                  <Text color="gray">
-                    Messages {totalThreadMessages === 0 ? '0-0' : `${(threadWindowStart + 1).toString()}-${threadWindowEnd.toString()}`} of {totalThreadMessages.toString()}
-                  </Text>
-                  {threadMessagesError ? <Text color="red">✗ {threadMessagesError}</Text> : null}
-                  {threadMessages.length > 0 ? (
-                    threadMessages.map(message => (
-                      <Box key={message.id} flexDirection="column" marginBottom={1}>
-                        <Text>
-                          <Text color={senderInkColor(message.senderLabel)} bold>{message.senderLabel}</Text>
-                          <Text color="gray">
-                            {' · '}
-                            {formatTimestamp(message.createdAt)}
-                            {message.optimistic ? ' · syncing…' : ''}
-                          </Text>
-                        </Text>
-                          <Text>
-                            {capTextLines(message.body, MAX_MESSAGE_BODY_LINES)}
-                          </Text>
-                      </Box>
-                    ))
-                  ) : (
-                    <Text color="gray">No visible messages yet.</Text>
-                  )}
-                  <Box marginTop={1} flexDirection="column">
-                    <Text color={inboxFocus === 'composer' ? 'cyan' : 'gray'}>
-                      {inboxFocus === 'composer' ? '◆ Draft' : 'Draft'}
+                ) : selectedThread ? (
+                  <Box flexDirection="column">
+                    <Text>
+                      <Text bold>{selectedThread.label}</Text>
+                      <Text color="gray"> · {selectedThread.participantCount.toString()} participants</Text>
+                      {selectedThread.locked ? <Text color="gray"> · locked</Text> : null}
                     </Text>
-                    {(threadDrafts[selectedThread.id] ?? '').length > 0 ? (
-                      inboxFocus === 'composer' ? (
-                        <Text>
-                          <Text>
-                            {(threadDrafts[selectedThread.id] ?? '').slice(
-                              0,
-                              clampCursor(
-                                threadDraftCursorByThreadId[selectedThread.id] ??
-                                  (threadDrafts[selectedThread.id] ?? '').length,
-                                (threadDrafts[selectedThread.id] ?? '').length
-                              )
-                            )}
-                          </Text>
-                          <Text color="cyan">_</Text>
-                          <Text>
-                            {(threadDrafts[selectedThread.id] ?? '').slice(
-                              clampCursor(
-                                threadDraftCursorByThreadId[selectedThread.id] ??
-                                  (threadDrafts[selectedThread.id] ?? '').length,
-                                (threadDrafts[selectedThread.id] ?? '').length
-                              )
-                            )}
-                          </Text>
-                        </Text>
-                      ) : (
-                        <Text>{threadDrafts[selectedThread.id]}</Text>
-                      )
-                    ) : (
-                      <Text color="gray">
-                        {inboxFocus === 'composer'
-                          ? 'Type your message. Enter adds a new line.'
-                          : 'Press Enter or E to start writing.'}
-                      </Text>
-                    )}
-                    {inboxFocus === 'composer' && (threadDrafts[selectedThread.id] ?? '').length === 0 ? (
-                      <Text color="cyan">_</Text>
+                    {inboxFocus === 'detail' || inboxFocus === 'composer' ? (
+                      <Box marginTop={1}>
+                        <TabStrip tabs={inboxTabs} active={inboxDetailTab} />
+                      </Box>
                     ) : null}
+                    {inboxDetailTab === 'members' && inboxFocus === 'detail' ? (
+                      <Box marginTop={1} flexDirection="column">
+                        <Text color="gray">
+                          {selectedThread.participantCount.toString()} member
+                          {selectedThread.participantCount === 1 ? '' : 's'}
+                        </Text>
+                        {selectedThread.participants.length > 0 ? (
+                          selectedThread.participants.map(participant => (
+                            <Text key={participant}>
+                              <Text color={participant === model.activeInbox.slug ? 'cyan' : undefined}>
+                                {participant}
+                              </Text>
+                              {participant === model.activeInbox.slug ? (
+                                <Text color="gray"> · active agent</Text>
+                              ) : null}
+                            </Text>
+                          ))
+                        ) : (
+                          <Text color="gray">No visible participants yet.</Text>
+                        )}
+                      </Box>
+                    ) : (
+                      <>
+                        <Text color="gray">
+                          Thread messages · {totalThreadMessages === 0 ? '0-0' : `${(threadWindowStart + 1).toString()}-${threadWindowEnd.toString()}`} of {totalThreadMessages.toString()}{CLEAR_ROW_TAIL}
+                        </Text>
+                        {threadMessagesError ? <Text color="red">✗ {threadMessagesError}</Text> : null}
+                        {threadMessages.length > 0 ? (
+                          threadMessages.map(message => (
+                            <ThreadMessageBlock key={message.id} message={message} />
+                          ))
+                        ) : (
+                          <Text color="gray">No visible messages yet.</Text>
+                        )}
+                        <Box marginTop={1} flexDirection="column">
+                          <Text color={inboxFocus === 'composer' ? 'cyan' : 'gray'}>
+                            {inboxFocus === 'composer' ? '◆ Draft' : 'Draft'}
+                          </Text>
+                          {(threadDrafts[selectedThread.id] ?? '').length > 0 ? (
+                            inboxFocus === 'composer' ? (
+                              <Text>
+                                <Text>
+                                  {(threadDrafts[selectedThread.id] ?? '').slice(
+                                    0,
+                                    clampCursor(
+                                      threadDraftCursorByThreadId[selectedThread.id] ??
+                                        (threadDrafts[selectedThread.id] ?? '').length,
+                                      (threadDrafts[selectedThread.id] ?? '').length
+                                    )
+                                  )}
+                                </Text>
+                                <Text color="cyan">_</Text>
+                                <Text>
+                                  {(threadDrafts[selectedThread.id] ?? '').slice(
+                                    clampCursor(
+                                      threadDraftCursorByThreadId[selectedThread.id] ??
+                                        (threadDrafts[selectedThread.id] ?? '').length,
+                                      (threadDrafts[selectedThread.id] ?? '').length
+                                    )
+                                  )}
+                                </Text>
+                              </Text>
+                            ) : (
+                              <Text>{threadDrafts[selectedThread.id]}</Text>
+                            )
+                          ) : (
+                            <Text color="gray">
+                              {inboxFocus === 'composer'
+                                ? 'Type your message. Enter adds a new line.'
+                                : 'Press S to start writing.'}
+                            </Text>
+                          )}
+                          {inboxFocus === 'composer' && (threadDrafts[selectedThread.id] ?? '').length === 0 ? (
+                            <Text color="cyan">_</Text>
+                          ) : null}
+                        </Box>
+                      </>
+                    )}
                   </Box>
-                </Box>
               ) : (
                 <Text color="gray">Select a thread or pending request to see details here.</Text>
               )}
             </Box>
+          </Box>
+        ) : null}
+
+        {route.type === 'channels' ? (
+          <Box flexDirection="column">
+            <Text color="gray">
+              agent <Text color="white">{model.activeInbox.slug}</Text>
+              <Text color="gray"> · pending approvals </Text>
+              <Text color="white">{model.channels.pendingApprovalCount.toString()}</Text>
+            </Text>
+              {channelMode === 'overview' ? (
+                <Box marginTop={1} flexDirection="column">
+                  <Text color="cyan" bold>◆ Channel overview</Text>
+                  {renderList({
+                    items: model.channels.channels.map(channel => {
+                      const labels = [
+                        channel.permission,
+                        channel.canSend ? 'can send' : null,
+                        channel.pendingApprovals > 0
+                          ? `${channel.pendingApprovals.toString()} pending`
+                          : null,
+                        channel.discoverable ? 'discoverable' : 'hidden',
+                      ].filter(Boolean);
+                      return `#${channel.slug} · ${channel.title ?? 'untitled'} · ${labels.join(' · ')}`;
+                    }),
+                    selectedIndex: clampIndex(selectedChannelIndex, model.channels.channels.length),
+                    empty: 'No channels for the active agent yet. Press N or + to add one.',
+                  })}
+                {selectedChannel ? (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text>
+                      <Text color="cyan">◆ Selected </Text>
+                      <Text bold>#{selectedChannel.slug}</Text>
+                      <Text color="gray"> · {selectedChannel.title ?? 'untitled'}</Text>
+                    </Text>
+                    <Text color="gray">
+                      {selectedChannel.accessMode === 'approval_required'
+                        ? 'approval required'
+                        : selectedChannel.accessMode}
+                      <Text color="gray"> · messages </Text>
+                      {selectedChannel.lastMessageSeq}
+                      <Text color="gray"> · last </Text>
+                      {formatTimestamp(selectedChannel.lastMessageAt)}
+                    </Text>
+                    <Text color="gray">
+                      {model.activeInbox.slug} has {selectedChannel.permission}
+                      {canSendSelectedChannel ? ' · can send' : ''}
+                      {selectedChannel.pendingApprovals > 0
+                        ? ` · ${selectedChannel.pendingApprovals.toString()} pending`
+                        : ''}
+                    </Text>
+                    {selectedChannel.description ? (
+                      <Text>{selectedChannel.description}</Text>
+                    ) : null}
+                  </Box>
+                ) : null}
+              </Box>
+            ) : selectedChannel ? (
+              <Box marginTop={1} flexDirection="column">
+                <Text>
+                  <Text color="cyan" bold>◆ #{selectedChannel.slug}</Text>
+                  <Text color="gray"> · {selectedChannel.title ?? 'untitled'}</Text>
+                </Text>
+                <Text color="gray">
+                  {model.activeInbox.slug} has {selectedChannel.permission}
+                  {canSendSelectedChannel ? ' · can send' : ''}
+                  {selectedChannel.isAdmin ? ' · admin' : ''}
+                  <Text color="gray"> · messages </Text>
+                  {selectedChannel.lastMessageSeq}
+                </Text>
+                {selectedChannel.description ? <Text>{selectedChannel.description}</Text> : null}
+                <Box marginTop={1}>
+                  <TabStrip tabs={channelTabs} active={channelTab} />
+                </Box>
+                {channelTab === 'messages' ? (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text color="gray">
+                      Channel messages · page {(selectedChannelMessagePageIndex + 1).toString()}
+                      {selectedChannelMessagesLoading ? ' · loading' : ''}
+                      {canPageChannelMessagesNewer ? ' · newer available' : ''}
+                      {canPageChannelMessagesOlder ? ' · older available' : ''}
+                      {CLEAR_ROW_TAIL}
+                    </Text>
+                    {selectedChannelMessagesError ? (
+                      <Text color="red">✗ {selectedChannelMessagesError}</Text>
+                    ) : null}
+                    {selectedChannelMessageItems.length > 0 ? (
+                      selectedChannelMessageItems.map(message => (
+                        <ChannelMessageBlock key={message.id} message={message} />
+                      ))
+                    ) : selectedChannelMessagesLoading ? (
+                      <Text color="gray">Loading channel messages...</Text>
+                    ) : (
+                      <Text color="gray">No visible channel messages yet.</Text>
+                    )}
+                  </Box>
+                ) : null}
+                {channelTab === 'members' ? (
+                  <Box marginTop={1} flexDirection="column">
+                    <Text color="gray">
+                      Channel members · page {(channelMembersState.pageIndex + 1).toString()}
+                      {selectedChannelMembersLoading ? ' · loading' : ''}
+                      {canPageChannelMembersNewer ? ' · newer available' : ''}
+                      {canPageChannelMembersOlder ? ' · older available' : ''}
+                      {CLEAR_ROW_TAIL}
+                    </Text>
+                    {selectedChannelMembersError ? (
+                      <Text color="red">✗ {selectedChannelMembersError}</Text>
+                    ) : null}
+                    {selectedChannelMemberItems.length > 0 ? (
+                      selectedChannelMemberItems.map(member => (
+                        <Text key={member.id}>
+                          <Text color={member.agentSlug === model.activeInbox.slug ? 'cyan' : undefined}>
+                            {member.agentDisplayName?.trim() || member.agentSlug}
+                          </Text>
+                          <Text color="gray">
+                            {' '}· {member.agentSlug} · {member.permission}
+                            {member.active ? '' : ' · inactive'} · sent {member.lastSentSeq}
+                          </Text>
+                        </Text>
+                      ))
+                    ) : selectedChannelMembersLoading ? (
+                      <Text color="gray">Loading channel members...</Text>
+                    ) : (
+                      <Text color="gray">No visible channel members yet.</Text>
+                    )}
+                  </Box>
+                ) : null}
+                {channelTab === 'approvals' && selectedChannel.isAdmin ? (
+                  <Box marginTop={1} flexDirection="column">
+                    {renderList({
+                      items: selectedChannelApprovals.map(request => {
+                        const requester =
+                          request.requesterDisplayName?.trim() || request.requesterSlug;
+                        return `${requester} · ${request.permission} · ${formatTimestamp(request.updatedAt)}`;
+                      }),
+                      selectedIndex: clampIndex(
+                        channelApprovalIndex,
+                        selectedChannelApprovals.length
+                      ),
+                      empty: `No pending join approvals for #${selectedChannel.slug}.`,
+                    })}
+                    {selectedChannelApproval ? (
+                      <Box marginTop={1} flexDirection="column">
+                        <Text>
+                          <Text bold>
+                            {selectedChannelApproval.requesterDisplayName ??
+                              selectedChannelApproval.requesterSlug}
+                          </Text>
+                          <Text color="gray">
+                            {' '}requested {selectedChannelApproval.permission}
+                          </Text>
+                        </Text>
+                        <Text color="gray">
+                          request #{selectedChannelApproval.id} · created{' '}
+                          {formatTimestamp(selectedChannelApproval.createdAt)}
+                        </Text>
+                      </Box>
+                    ) : null}
+                  </Box>
+                ) : null}
+              </Box>
+            ) : (
+              <Box marginTop={1} flexDirection="column">
+                <Text color="gray">Select or add a channel to open details.</Text>
+              </Box>
+            )}
           </Box>
         ) : null}
 
@@ -4795,8 +6259,12 @@ export function RootShell({
           </Box>
         ) : null}
 
-        {statusBar}
-        <ModeBar mode={footerMode} />
+        </Box>
+
+        <Box flexShrink={0} flexDirection="column">
+          {statusBar}
+          <ModeBar mode={footerMode} />
+        </Box>
       </Box>
     </Box>
   );

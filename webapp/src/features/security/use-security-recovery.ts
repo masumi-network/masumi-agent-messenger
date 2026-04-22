@@ -5,17 +5,21 @@ import {
   clearPendingDeviceShareKeyMaterial,
   getOrCreateDeviceKeyMaterial,
   loadStoredAgentKeyPair,
+  loadStoredDeviceKeyMaterial,
   type DeviceKeyMaterial,
 } from '@/lib/agent-session';
 import { describeLocalVaultRequirement, type DefaultKeyIssue } from '@/lib/app-shell';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import {
   buildApprovedDeviceShare,
+  decryptClaimedDeviceShare,
+  importDeviceShareSnapshot,
   importClaimedDeviceShare,
   prepareLocalDeviceShareRequest,
   resolveVerifiedDeviceShareRequest,
   type DeviceShareRequestLookupConnection,
 } from '@/lib/device-share';
+import { markImportedRotationSnapshotKeysPending } from '@/lib/imported-rotation-key-confirmation';
 import type { UseKeyVaultResult } from '@/hooks/use-key-vault';
 import { reducers } from '@/module_bindings';
 import type {
@@ -23,6 +27,10 @@ import type {
   VisibleDeviceKeyBundleRow,
 } from '@/module_bindings/types';
 import { matchesPublishedActorKeys } from '../workspace/actor-settings';
+import { isTimestampInFuture } from '../../../../shared/spacetime-time';
+import type { AgentKeyPair } from '../../../../shared/agent-crypto';
+import type { DeviceKeyShareSnapshot } from '../../../../shared/device-sharing';
+import { importedRotationActorKey } from '../../../../shared/imported-rotation-key-confirmation';
 
 type PendingDeviceRequest = {
   device: DeviceKeyMaterial;
@@ -31,6 +39,25 @@ type PendingDeviceRequest = {
   verificationWords: string[];
   expiresAt: string;
 };
+
+function deviceKeyBundleNeverExpires(bundle: { expiryMode: { tag: string } }): boolean {
+  return bundle.expiryMode.tag === 'NeverExpires' || bundle.expiryMode.tag === 'neverExpires';
+}
+
+async function loadKnownCurrentKeysForSnapshot(
+  snapshot: DeviceKeyShareSnapshot
+): Promise<Map<string, AgentKeyPair | null>> {
+  const knownCurrentKeys = new Map<string, AgentKeyPair | null>();
+  await Promise.all(
+    snapshot.actors.map(async actor => {
+      knownCurrentKeys.set(
+        importedRotationActorKey(actor.identity),
+        await loadStoredAgentKeyPair(actor.identity)
+      );
+    })
+  );
+  return knownCurrentKeys;
+}
 
 export type SecurityLiveConnection = DeviceShareRequestLookupConnection & {
   procedures: DeviceShareRequestLookupConnection['procedures'] & {
@@ -64,6 +91,7 @@ export function useSecurityRecovery(params: {
   const [deviceVerificationCode, setDeviceVerificationCode] = useState('');
   const [pendingDeviceRequest, setPendingDeviceRequest] =
     useState<PendingDeviceRequest | null>(null);
+  const [currentDeviceId, setCurrentDeviceId] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const pendingDeviceRequestRef = useRef<PendingDeviceRequest | null>(null);
   const deviceShareClaimDeviceIdRef = useRef<string | null>(null);
@@ -83,6 +111,31 @@ export function useSecurityRecovery(params: {
   useEffect(() => {
     pendingDeviceRequestRef.current = pendingDeviceRequest;
   }, [pendingDeviceRequest]);
+
+  useEffect(() => {
+    if (!params.vault.unlocked) {
+      return deferEffectStateUpdate(() => {
+        setCurrentDeviceId(null);
+      });
+    }
+
+    let cancelled = false;
+    void loadStoredDeviceKeyMaterial(params.normalizedEmail)
+      .then(device => {
+        if (!cancelled) {
+          setCurrentDeviceId(device?.deviceId ?? null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCurrentDeviceId(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [params.normalizedEmail, params.vault.unlocked]);
 
   const inspectDefaultKeyIssue = useCallback(async (): Promise<DefaultKeyIssue> => {
     if (!params.existingDefaultActor) {
@@ -147,7 +200,11 @@ export function useSecurityRecovery(params: {
     }
 
     const matchingBundle = params.deviceShareBundles.find(bundle => {
-      return bundle.targetDeviceId === targetDeviceId && !bundle.consumedAt;
+      return (
+        bundle.targetDeviceId === targetDeviceId &&
+        !bundle.consumedAt &&
+        (deviceKeyBundleNeverExpires(bundle) || isTimestampInFuture(bundle.expiresAt))
+      );
     });
     if (!matchingBundle) {
       return;
@@ -241,6 +298,129 @@ export function useSecurityRecovery(params: {
     params.liveConnection,
     params.normalizedEmail,
     pendingDeviceRequest,
+  ]);
+
+  useEffect(() => {
+    if (
+      !currentDeviceId ||
+      !params.liveConnection ||
+      !params.existingDefaultActor ||
+      !params.vault.unlocked
+    ) {
+      return;
+    }
+    if (deviceShareClaimDeviceIdRef.current !== null) {
+      return;
+    }
+
+    const liveConnection = params.liveConnection;
+    const matchingBundle = params.deviceShareBundles.find(bundle => {
+      return (
+        bundle.targetDeviceId === currentDeviceId &&
+        !bundle.consumedAt &&
+        (deviceKeyBundleNeverExpires(bundle) || isTimestampInFuture(bundle.expiresAt))
+      );
+    });
+    if (!matchingBundle) {
+      return;
+    }
+
+    deviceShareClaimDeviceIdRef.current = currentDeviceId;
+    const claimIsCurrent = () =>
+      mountedRef.current && deviceShareClaimDeviceIdRef.current === currentDeviceId;
+
+    deferEffectStateUpdate(() => {
+      if (claimIsCurrent()) {
+        setDeviceShareBusy(true);
+      }
+    });
+
+    void (async () => {
+      const device = await loadStoredDeviceKeyMaterial(params.normalizedEmail);
+      if (!device || device.deviceId !== currentDeviceId) {
+        return;
+      }
+
+      const result = await liveConnection.procedures.claimDeviceKeyBundle({
+        deviceId: currentDeviceId,
+      });
+      const bundle = result[0];
+      if (!bundle) {
+        return;
+      }
+
+      const snapshot = await decryptClaimedDeviceShare({
+        normalizedEmail: params.normalizedEmail,
+        device,
+        sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
+        bundleCiphertext: bundle.bundleCiphertext,
+        bundleIv: bundle.bundleIv,
+        bundleAlgorithm: bundle.bundleAlgorithm,
+      });
+      const knownCurrentKeys = deviceKeyBundleNeverExpires(matchingBundle)
+        ? await loadKnownCurrentKeysForSnapshot(snapshot)
+        : null;
+      await importDeviceShareSnapshot(snapshot);
+      if (knownCurrentKeys) {
+        markImportedRotationSnapshotKeysPending({
+          snapshot,
+          knownCurrentKeys,
+        });
+      }
+      if (!claimIsCurrent()) {
+        return;
+      }
+
+      let nextIssue: DefaultKeyIssue;
+      try {
+        nextIssue = await inspectDefaultKeyIssue();
+      } catch (keyIssueError) {
+        if (claimIsCurrent()) {
+          setError(
+            keyIssueError instanceof Error
+              ? `Rotated private keys were imported, but the local key status could not be refreshed. ${keyIssueError.message}`
+              : 'Rotated private keys were imported, but the local key status could not be refreshed.'
+          );
+        }
+        return;
+      }
+
+      if (!claimIsCurrent()) {
+        return;
+      }
+
+      setDefaultKeyIssue(nextIssue);
+      setFeedback(
+        nextIssue
+          ? 'A key bundle arrived, but the default inbox keys are still incomplete for this browser.'
+          : 'Rotated private keys imported on this device.'
+      );
+    })()
+      .catch(claimError => {
+        if (claimIsCurrent()) {
+          setError(
+            claimError instanceof Error
+              ? claimError.message
+              : 'Unable to import the shared device bundle'
+          );
+        }
+      })
+      .finally(() => {
+        if (deviceShareClaimDeviceIdRef.current === currentDeviceId) {
+          deviceShareClaimDeviceIdRef.current = null;
+          if (mountedRef.current) {
+            setDeviceShareBusy(false);
+          }
+        }
+      });
+  }, [
+    currentDeviceId,
+    inspectDefaultKeyIssue,
+    params.deviceShareBundles,
+    params.existingDefaultActor,
+    params.liveConnection,
+    params.normalizedEmail,
+    params.vault.unlocked,
   ]);
 
   async function ensureCurrentDeviceRegistration(): Promise<DeviceKeyMaterial> {
@@ -361,6 +541,7 @@ export function useSecurityRecovery(params: {
         targetDeviceId: request.deviceId,
         targetDeviceEncryptionPublicKey: request.deviceEncryptionPublicKey,
         sourceDevice,
+        expiresInMinutes: 15,
       });
 
       await Promise.resolve(

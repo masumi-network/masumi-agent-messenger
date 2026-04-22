@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { Query, TypedTableDef } from 'spacetimedb';
 import { DbConnection, tables } from '@/module_bindings';
 import { useSpacetimeDB } from 'spacetimedb/tanstack';
 import {
@@ -8,7 +9,7 @@ import {
 import { deferEffectStateUpdate } from './effect-state';
 
 type LiveTableName = keyof typeof tables;
-type LiveTableQuery = (typeof tables)[LiveTableName];
+type LiveTableQuery = Query<TypedTableDef>;
 
 type TableLike<Row> = {
   iter(): Iterable<Row>;
@@ -139,6 +140,86 @@ export function useLiveTable<Row>(
           setError(describeInboxAuthLeaseRefreshError(error));
         }
       });
+
+    return () => {
+      cancelled = true;
+      subscription?.unsubscribe();
+      removeListeners?.();
+      setRows([]);
+      setReady(false);
+      setError(null);
+    };
+  }, [accessorName, connection, isActive, tableQuery]);
+
+  return [rows, ready, error];
+}
+
+export function usePublicLiveTable<Row>(
+  tableQuery: LiveTableQuery,
+  accessorName: LiveTableName
+): [Row[], boolean, string | null] {
+  const connectionState = useSpacetimeDB();
+  const [rows, setRows] = useState<Row[]>([]);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const connection = connectionState.getConnection?.() as DbConnection | null;
+  const isActive = connectionState.isActive && connection !== null;
+
+  useEffect(() => {
+    if (!isActive || !connection) {
+      return;
+    }
+
+    let cancelled = false;
+    let subscription: { unsubscribe: () => void } | null = null;
+    let removeListeners: (() => void) | null = null;
+
+    deferEffectStateUpdate(() => {
+      if (!cancelled) {
+        setReady(false);
+        setError(null);
+      }
+    });
+
+    const table = getTable<Row>(connection, accessorName);
+    const refresh = () => {
+      setRows(Array.from(table.iter()));
+    };
+
+    const handleInsert = () => {
+      refresh();
+    };
+    const handleDelete = () => {
+      refresh();
+    };
+    const handleUpdate = () => {
+      refresh();
+    };
+
+    table.onInsert(handleInsert);
+    table.onDelete(handleDelete);
+    table.onUpdate?.(handleUpdate);
+    removeListeners = () => {
+      table.removeOnInsert(handleInsert);
+      table.removeOnDelete(handleDelete);
+      table.removeOnUpdate?.(handleUpdate);
+    };
+
+    refresh();
+
+    subscription = connection
+      .subscriptionBuilder()
+      .onApplied(() => {
+        refresh();
+        setReady(true);
+        setError(null);
+      })
+      .onError(subscriptionError => {
+        setReady(false);
+        setError(readSubscriptionError(subscriptionError));
+      })
+      .subscribe([tableQuery]);
 
     return () => {
       cancelled = true;

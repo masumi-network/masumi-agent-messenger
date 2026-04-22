@@ -11,6 +11,7 @@ import { registerAuthCodeCommands } from './code';
 import { registerAuthDeviceCommands } from './device';
 import { registerAuthLoginCommand } from './login';
 import { registerAuthLogoutCommand } from './logout';
+import { registerAuthKeysConfirmCommand } from './keys-confirm';
 import { registerAuthKeysRemoveCommand } from './keys-remove';
 import { registerAuthRecoverCommand } from './recover';
 import { registerAuthSendVerificationEmailCommand } from './send-verification-email';
@@ -166,6 +167,7 @@ export function registerAuthCommands(program: Command): void {
   registerAuthDeviceCommands(auth);
   registerAuthBackupCommands(auth);
   registerAuthRotateCommand(auth);
+  registerAuthKeysConfirmCommand(auth);
   registerAuthStatusCommand(auth);
   registerAuthLogoutCommand(auth);
   registerAuthKeysRemoveCommand(auth);

@@ -17,6 +17,7 @@ Encryption, key derivation, and inbox state logic must produce the same results 
 | File | Description |
 |---|---|
 | `agent-crypto.ts` | Agent keypair generation, message encryption/decryption, signing and verification |
+| `channel-crypto.ts` | Channel plaintext serialization and signature verification |
 | `passphrase-crypto.ts` | Passphrase-based key derivation for local key storage |
 | `device-sharing.ts` | Device key-share protocol — wrapping and unwrapping private keys for transfer |
 | `key-backup.ts` | Encrypted key backup export and import |
@@ -35,7 +36,7 @@ Encryption, key derivation, and inbox state logic must produce the same results 
 | File | Description |
 |---|---|
 | `message-format.ts` | Message content type and header capability declarations |
-| `message-limits.ts` | Size constraints for ciphertext, IVs, and signatures |
+| `message-limits.ts` | Size constraints for serialized payloads, thread ciphertext, channel plaintext, IVs, and signatures |
 
 ### Agent discovery
 

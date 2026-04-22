@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { lock as acquireLock } from 'proper-lockfile';
 import {
   comparePeerKeys,
   confirmPeerRotation,
@@ -28,6 +29,10 @@ export type {
 };
 
 export { fingerprintTuple };
+
+const PEER_KEY_TRUST_LOCK_STALE_MS = 30_000;
+const PEER_KEY_TRUST_LOCK_RETRIES = 10;
+const PEER_KEY_TRUST_LOCK_RETRY_MS = 100;
 
 function resolveTrustFilePath(): string {
   return path.join(resolveConfigDirectory(), 'peer-key-trust.json');
@@ -64,6 +69,37 @@ async function writeStore(store: PeerKeyTrustStore): Promise<void> {
   await rename(tmpPath, filePath);
 }
 
+async function withTrustStoreLock<T>(action: () => Promise<T>): Promise<T> {
+  const filePath = resolveTrustFilePath();
+  await mkdir(path.dirname(filePath), { recursive: true });
+
+  let release: () => Promise<void>;
+  try {
+    release = await acquireLock(filePath, {
+      realpath: false,
+      stale: PEER_KEY_TRUST_LOCK_STALE_MS,
+      update: 1000,
+      retries: {
+        retries: PEER_KEY_TRUST_LOCK_RETRIES,
+        factor: 1,
+        minTimeout: PEER_KEY_TRUST_LOCK_RETRY_MS,
+        maxTimeout: PEER_KEY_TRUST_LOCK_RETRY_MS,
+      },
+    });
+  } catch (error) {
+    throw userError('Peer key trust store is busy. Try again in a moment.', {
+      code: 'PEER_KEY_TRUST_BUSY',
+      cause: error,
+    });
+  }
+
+  try {
+    return await action();
+  } finally {
+    await release();
+  }
+}
+
 export async function loadPeerKeyTrustStore(): Promise<PeerKeyTrustStore> {
   return readStore();
 }
@@ -82,15 +118,17 @@ export async function pinFirstObservation(
   observed: PeerKeyTuple,
   now: () => string = () => new Date().toISOString()
 ): Promise<void> {
-  const store = await readStore();
-  if (store.peers[publicIdentity]) {
-    throw userError(
-      `Peer ${publicIdentity} is already pinned. Use confirm-rotation to update.`,
-      { code: 'PEER_KEY_ALREADY_PINNED' }
-    );
-  }
-  const next = pinPeerKeys(store, publicIdentity, observed, now());
-  await writeStore(next);
+  await withTrustStoreLock(async () => {
+    const store = await readStore();
+    if (store.peers[publicIdentity]) {
+      throw userError(
+        `Peer ${publicIdentity} is already pinned. Use the rotation update path.`,
+        { code: 'PEER_KEY_ALREADY_PINNED' }
+      );
+    }
+    const next = pinPeerKeys(store, publicIdentity, observed, now());
+    await writeStore(next);
+  });
 }
 
 export async function autoPinPeerIfUnknown(
@@ -101,8 +139,15 @@ export async function autoPinPeerIfUnknown(
   const store = await readStore();
   const comparison = comparePeerKeys(store, publicIdentity, observed);
   if (comparison.status === 'unpinned') {
-    const next = pinPeerKeys(store, publicIdentity, observed, now());
-    await writeStore(next);
+    return withTrustStoreLock(async () => {
+      const store = await readStore();
+      const lockedComparison = comparePeerKeys(store, publicIdentity, observed);
+      if (lockedComparison.status === 'unpinned') {
+        const next = pinPeerKeys(store, publicIdentity, observed, now());
+        await writeStore(next);
+      }
+      return lockedComparison;
+    });
   }
   return comparison;
 }
@@ -112,17 +157,21 @@ export async function confirmPeerKeyRotation(
   observed: PeerKeyTuple,
   now: () => string = () => new Date().toISOString()
 ): Promise<void> {
-  const store = await readStore();
-  const next = confirmPeerRotation(store, publicIdentity, observed, now());
-  await writeStore(next);
+  await withTrustStoreLock(async () => {
+    const store = await readStore();
+    const next = confirmPeerRotation(store, publicIdentity, observed, now());
+    await writeStore(next);
+  });
 }
 
 export async function unpinPeerKeys(publicIdentity: string): Promise<boolean> {
-  const store = await readStore();
-  if (!store.peers[publicIdentity]) return false;
-  const next = unpinPeer(store, publicIdentity);
-  await writeStore(next);
-  return true;
+  return withTrustStoreLock(async () => {
+    const store = await readStore();
+    if (!store.peers[publicIdentity]) return false;
+    const next = unpinPeer(store, publicIdentity);
+    await writeStore(next);
+    return true;
+  });
 }
 
 export async function listTrustedPeers(): Promise<PinnedPeer[]> {

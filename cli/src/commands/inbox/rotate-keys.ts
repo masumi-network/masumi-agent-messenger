@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { rotateInboxKeys } from '../../services/inbox-management';
+import { resolveRotationDeviceSelection } from '../../services/key-rotation-device-selection';
 import { maybeOfferBackupAfterKeyCreation } from '../../services/key-backup-prompt';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
 import { cyan, red, renderKeyValue } from '../../services/render';
@@ -33,12 +34,19 @@ export function registerAuthRotateCommand(command: Command): void {
         title: 'Masumi auth rotate',
         options,
         preferPlainReporter: true,
-        run: ({ reporter }) =>
-          rotateInboxKeys({
+        run: async ({ reporter }) => {
+          const deviceSelection = await resolveRotationDeviceSelection({
+            profileName: options.profile,
+            json: options.json,
+            reporter,
+            explicitShareDeviceIds: options.shareDevice ?? [],
+            explicitRevokeDeviceIds: options.revokeDevice ?? [],
+          });
+          return rotateInboxKeys({
             profileName: options.profile,
             actorSlug: options.slug,
-            shareDeviceIds: options.shareDevice,
-            revokeDeviceIds: options.revokeDevice,
+            shareDeviceIds: deviceSelection.shareDeviceIds,
+            revokeDeviceIds: deviceSelection.revokeDeviceIds,
             reporter,
           }).then(async result => {
             if (!options.json) {
@@ -49,7 +57,8 @@ export function registerAuthRotateCommand(command: Command): void {
               });
             }
             return result;
-          }),
+          });
+        },
         toHuman: result => ({
           summary: `Rotated keys for ${cyan(result.actor.slug)}.`,
           details: renderKeyValue([

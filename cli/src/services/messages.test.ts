@@ -1,10 +1,15 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Timestamp } from 'spacetimedb';
 import {
+  decryptVisibleMessage,
   paginateNewMessages,
   selectUnreadIncomingMessages,
   type NewMessageFeed,
 } from './messages';
+import { comparePinnedPeer, pinFirstObservation } from './peer-key-trust';
 import type { VisibleAgentRow } from '../../../webapp/src/module_bindings/types';
 
 function timestamp(microsSinceUnixEpoch: bigint) {
@@ -229,6 +234,7 @@ describe('paginateNewMessages', () => {
       legacyPlaintext: false,
       replyToMessageId: null,
       trustStatus: 'trusted',
+      trustNotice: null,
       trustWarning: null,
     })),
   };
@@ -246,5 +252,108 @@ describe('paginateNewMessages', () => {
     expect(paginated.previousPage).toBe(1);
     expect(paginated.nextPage).toBe(3);
     expect(paginated.messages.map(message => message.id)).toEqual(['3', '4']);
+  });
+});
+
+describe('decryptVisibleMessage trust handling', () => {
+  it('does not promote an unconfirmed rotated signing key while reading inbound messages', async () => {
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'messages-peer-trust-'));
+    process.env.XDG_CONFIG_HOME = tempDir;
+
+    const ownActor = actor({
+      id: 1n,
+      inboxId: 10n,
+      normalizedEmail: 'agent@example.com',
+      slug: 'agent',
+      inboxIdentifier: undefined,
+      isDefault: true,
+      publicIdentity: 'agent',
+      displayName: 'Agent',
+      currentEncryptionPublicKey: 'agent-enc',
+      currentEncryptionKeyVersion: 'enc-v1',
+      currentSigningPublicKey: 'agent-sig',
+      currentSigningKeyVersion: 'sig-v1',
+      createdAt: timestamp(1n),
+      updatedAt: timestamp(1n),
+    });
+    const rotatedSender = actor({
+      id: 2n,
+      inboxId: 20n,
+      normalizedEmail: 'other@example.com',
+      slug: 'other',
+      inboxIdentifier: undefined,
+      isDefault: true,
+      publicIdentity: 'other',
+      displayName: 'Other',
+      currentEncryptionPublicKey: 'other-enc-v2',
+      currentEncryptionKeyVersion: 'enc-v2',
+      currentSigningPublicKey: 'other-sig-v2',
+      currentSigningKeyVersion: 'sig-v2',
+      createdAt: timestamp(1n),
+      updatedAt: timestamp(1n),
+    });
+
+    try {
+      await pinFirstObservation(
+        rotatedSender.publicIdentity,
+        {
+          encryptionPublicKey: 'other-enc-v1',
+          encryptionKeyVersion: 'enc-v1',
+          signingPublicKey: 'other-sig-v1',
+          signingKeyVersion: 'sig-v1',
+        },
+        () => '2026-04-21T00:00:00.000Z'
+      );
+
+      const decrypted = await decryptVisibleMessage({
+        message: {
+          id: 100n,
+          threadId: 200n,
+          threadSeq: 2n,
+          membershipVersion: 1n,
+          senderAgentDbId: rotatedSender.id,
+          senderSeq: 2n,
+          secretVersion: 'sec-v1',
+          secretVersionStart: false,
+          signingKeyVersion: 'sig-v2',
+          ciphertext: 'ciphertext',
+          iv: 'iv',
+          cipherAlgorithm: 'aes-gcm-256-v1',
+          signature: 'signature',
+          replyToMessageId: undefined,
+          createdAt: timestamp(2n),
+        },
+        defaultActor: ownActor,
+        actorsById: new Map([
+          [ownActor.id, ownActor],
+          [rotatedSender.id, rotatedSender],
+        ]),
+        bundlesByActorId: new Map(),
+        ownActorIds: new Set([ownActor.id]),
+        secretEnvelopes: [],
+        recipientKeyPair: null,
+      });
+
+      expect(decrypted.trustStatus).toBe('untrusted-rotation');
+      expect(decrypted.trustWarning).toBe(
+        'other has rotated keys. Message signature is not trusted.'
+      );
+      await expect(
+        comparePinnedPeer(rotatedSender.publicIdentity, {
+          encryptionPublicKey: rotatedSender.currentEncryptionPublicKey,
+          encryptionKeyVersion: rotatedSender.currentEncryptionKeyVersion,
+          signingPublicKey: rotatedSender.currentSigningPublicKey,
+          signingKeyVersion: rotatedSender.currentSigningKeyVersion,
+        })
+      ).resolves.toMatchObject({ status: 'rotated' });
+    } finally {
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });

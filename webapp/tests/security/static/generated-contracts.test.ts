@@ -1,12 +1,52 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const WEBAPP_ROOT = resolve(fileURLToPath(new URL('../../../', import.meta.url)));
+const BACKEND_SRC_ROOT = resolve(WEBAPP_ROOT, '../spacetimedb/src');
 
 function readRelativeFile(relativePath: string): string {
   return readFileSync(resolve(WEBAPP_ROOT, relativePath), 'utf8');
+}
+
+function readBackendFile(relativePath: string): string {
+  return readFileSync(resolve(BACKEND_SRC_ROOT, relativePath), 'utf8');
+}
+
+function readBackendSourceDirectory(directory: string): string {
+  return readdirSync(directory, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map(entry => {
+      const fullPath = resolve(directory, entry.name);
+      if (entry.isDirectory()) {
+        return readBackendSourceDirectory(fullPath);
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.ts')) {
+        return '';
+      }
+      return `\n// ${fullPath.slice(BACKEND_SRC_ROOT.length + 1)}\n${readFileSync(fullPath, 'utf8')}`;
+    })
+    .join('\n');
+}
+
+function readBackendSource(): string {
+  return readBackendSourceDirectory(BACKEND_SRC_ROOT);
+}
+
+function sourceBetween(source: string, startNeedle: string, endNeedle?: string): string {
+  const start = source.indexOf(startNeedle);
+  if (start < 0) {
+    throw new Error(`Source marker was not found: ${startNeedle}`);
+  }
+  if (!endNeedle) {
+    return source.slice(start);
+  }
+  const end = source.indexOf(endNeedle, start);
+  if (end < 0) {
+    throw new Error(`Source marker was not found: ${endNeedle}`);
+  }
+  return source.slice(start, end);
 }
 
 function extractGeneratedObject(source: string, name: string): string {
@@ -62,7 +102,7 @@ describe('generated and source security contracts', () => {
   it('does not expose split owned/peer agent views', () => {
     const generatedTypes = readRelativeFile('src/module_bindings/types.ts');
     const generatedIndex = readRelativeFile('src/module_bindings/index.ts');
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
+    const backend = readBackendSource();
 
     expect(backend).not.toContain('visibleOwnedAgents');
     expect(backend).not.toContain('visiblePeerAgents');
@@ -97,7 +137,7 @@ describe('generated and source security contracts', () => {
       'utf8'
     );
     const inboxState = readFileSync(resolve(WEBAPP_ROOT, '../shared/inbox-state.ts'), 'utf8');
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
+    const backend = readBackendSource();
     const generatedTypes = readRelativeFile('src/module_bindings/types.ts');
     const contactRequestRow = extractGeneratedObject(generatedTypes, 'ContactRequest');
 
@@ -145,10 +185,10 @@ describe('generated and source security contracts', () => {
   });
 
   it('protects backend key and sender-secret rotation invariants', () => {
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
-    const rotateAgentKeysReducer = backend.slice(
-      backend.indexOf('export const rotateAgentKeys'),
-      backend.indexOf('export const createDirectThread')
+    const backend = readBackendSource();
+    const rotateAgentKeysReducer = sourceBetween(
+      readBackendFile('operations/identity/agent-key-bundle.ts'),
+      'export const rotateAgentKeys'
     );
 
     expect(backend).toContain(
@@ -182,14 +222,16 @@ describe('generated and source security contracts', () => {
   });
 
   it('lets historical participants manage read and archive state without send access', () => {
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
-    const markReadReducer = backend.slice(
-      backend.indexOf('export const markThreadRead'),
-      backend.indexOf('export const setThreadArchived')
+    const backend = readBackendSource();
+    const threadReadStateSource = readBackendFile('operations/threads/thread-read-state.ts');
+    const markReadReducer = sourceBetween(
+      threadReadStateSource,
+      'export const markThreadRead',
+      'export const setThreadArchived'
     );
-    const archiveReducer = backend.slice(
-      backend.indexOf('export const setThreadArchived'),
-      backend.indexOf('export const deleteThread')
+    const archiveReducer = sourceBetween(
+      threadReadStateSource,
+      'export const setThreadArchived'
     );
 
     expect(backend).toContain('function requireVisibleThreadParticipant');
@@ -241,6 +283,7 @@ describe('generated and source security contracts', () => {
     const registrationServer = readRelativeFile('src/lib/inbox-agent-registration.server.ts');
     const registerRoute = readRelativeFile('src/routes/api.masumi.inbox-agent.register.ts');
     const syncRoute = readRelativeFile('src/routes/api.masumi.inbox-agent.sync.ts');
+    const workspaceShell = readRelativeFile('src/features/workspace/use-workspace-shell.ts');
     const generatedTypes = readRelativeFile('src/module_bindings/types.ts');
     const masumiReducer = readRelativeFile(
       'src/module_bindings/upsert_masumi_inbox_agent_registration_reducer.ts'
@@ -253,6 +296,9 @@ describe('generated and source security contracts', () => {
     expect(registrationServer).toContain("buildMasumiApiUrl(session.user.issuer, 'credits')");
     expect(registrationServer).not.toContain('agents/verify');
     expect(registrationServer).not.toContain('masumiVerified');
+    expect(workspaceShell).toContain('syncBrowserInboxAgentRegistration');
+    expect(workspaceShell).toContain('upsertMasumiInboxAgentRegistration');
+    expect(workspaceShell).toContain('ownedInboxAgentRegistrationRefresh');
     expect(generatedTypes).not.toContain('masumiVerified');
     expect(masumiReducer).not.toContain('masumiVerified');
     expect(generatedTypes).toContain('agentIdentifier: __t.option(__t.string())');
@@ -286,7 +332,7 @@ describe('generated and source security contracts', () => {
   });
 
   it('scopes device ids and share-code resolution to the owning inbox', () => {
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
+    const backend = readBackendSource();
     const generatedTypes = readRelativeFile('src/module_bindings/types.ts');
     const deviceRow = extractGeneratedObject(generatedTypes, 'Device');
     const shareRequestRow = extractGeneratedObject(generatedTypes, 'DeviceShareRequest');
@@ -302,7 +348,7 @@ describe('generated and source security contracts', () => {
   });
 
   it('keeps reducer-only identifiers deterministic and reply targets readable', () => {
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
+    const backend = readBackendSource();
     const slugHelpers = readFileSync(resolve(WEBAPP_ROOT, '../shared/inbox-slug.ts'), 'utf8');
 
     expect(slugHelpers).not.toContain('Date.now()');
@@ -312,7 +358,7 @@ describe('generated and source security contracts', () => {
   });
 
   it('matches public message visibility to exact sender membership secret envelopes', () => {
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
+    const backend = readBackendSource();
 
     expect(backend).toContain('function buildSenderSecretVisibilityKey');
     expect(backend).toContain('envelope.membershipVersion');
@@ -321,13 +367,15 @@ describe('generated and source security contracts', () => {
   });
 
   it('expires stale inbox auth leases without waiting for a cooperating client', () => {
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
-    const clientConnected = backend.slice(
-      backend.indexOf('export const clientConnected'),
-      backend.indexOf('export const refreshInboxAuthLease')
+    const backend = readBackendSource();
+    const clientConnected = sourceBetween(
+      readBackendFile('operations/identity/inbox.ts'),
+      'export const clientConnected',
+      'export const refreshInboxAuthLease'
     );
 
-    expect(backend).toContain('scheduled: (): any => expireInboxAuthLease');
+    expect(backend).toContain("scheduled: (): any => getScheduledReducer('expireInboxAuthLease')");
+    expect(backend).toContain('expireInboxAuthLease,');
     expect(backend).toContain('isTimestampExpired(lease.expiresAt, Timestamp.now())');
     expect(backend).toContain('!isTimestampExpired(lease.expiresAt, ctx.timestamp)');
     expect(backend).toContain('function isExpectedInboxAuthLeaseRefreshError');
@@ -340,16 +388,18 @@ describe('generated and source security contracts', () => {
   });
 
   it('expires stale rate-limit buckets through the scheduler', () => {
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
+    const backend = readBackendSource();
     const generatedTypes = readRelativeFile('src/module_bindings/types.ts');
     const rateLimitRow = extractGeneratedObject(generatedTypes, 'RateLimit');
     const rateLimitReportRow = extractGeneratedObject(generatedTypes, 'RateLimitReport');
 
     expect(backend).toContain('const rateLimitCleanupTable = table(');
     expect(backend).toContain("name: 'rate_limit_cleanup'");
-    expect(backend).toContain('scheduled: (): any => expireRateLimitBucket');
+    expect(backend).toContain("scheduled: (): any => getScheduledReducer('expireRateLimitBucket')");
+    expect(backend).toContain('expireRateLimitBucket,');
     expect(backend).toContain("name: 'rate_limit_report'");
-    expect(backend).toContain('scheduled: (): any => expireRateLimitReport');
+    expect(backend).toContain("scheduled: (): any => getScheduledReducer('expireRateLimitReport')");
+    expect(backend).toContain('expireRateLimitReport,');
     expect(backend).toContain('rateLimitCleanup: rateLimitCleanupTable');
     expect(backend).toContain('rateLimitReportCleanup: rateLimitReportCleanupTable');
     expect(backend).toContain('scheduleRateLimitCleanup(dbCtx, bucketKey, expiresAt, now);');
@@ -366,12 +416,48 @@ describe('generated and source security contracts', () => {
     expect(rateLimitReportRow).toContain('limitedCount: __t.u64()');
   });
 
+  it('rate-limits channel admin operations', () => {
+    const backend = readBackendSource();
+    const memberOperations = readBackendFile('operations/channels/channel-member.ts');
+    const joinRequestOperations = readBackendFile('operations/channels/channel-join-request.ts');
+    const setPermissionReducer = sourceBetween(
+      memberOperations,
+      'export const setChannelMemberPermission',
+      'export const removeChannelMember'
+    );
+    const removeMemberReducer = sourceBetween(
+      memberOperations,
+      'export const removeChannelMember'
+    );
+    const approveJoinReducer = sourceBetween(
+      joinRequestOperations,
+      'export const approveChannelJoin',
+      'export const rejectChannelJoin'
+    );
+    const rejectJoinReducer = sourceBetween(
+      joinRequestOperations,
+      'export const rejectChannelJoin'
+    );
+
+    expect(backend).toContain('const CHANNEL_ADMIN_RATE_WINDOW_MS = 60_000');
+    expect(backend).toContain('const CHANNEL_ADMIN_RATE_MAX_PER_WINDOW = 30n');
+    expect(backend).toContain(
+      'bucketKey: `channel_admin:${ctx.sender.toHexString()}:${channelId.toString()}`'
+    );
+    expect(backend).toContain("action: 'channel_admin'");
+    expect(setPermissionReducer).toContain('enforceChannelAdminRateLimit(ctx, channelId);');
+    expect(removeMemberReducer).toContain('enforceChannelAdminRateLimit(ctx, channelId);');
+    expect(approveJoinReducer).toContain('enforceChannelAdminRateLimit(ctx, channel.id);');
+    expect(rejectJoinReducer).toContain('enforceChannelAdminRateLimit(ctx, request.channelId);');
+  });
+
   it('uses thread invites and shared fanout caps for group membership', () => {
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
+    const backend = readBackendSource();
     const generatedIndex = readRelativeFile('src/module_bindings/index.ts');
 
     expect(backend).toContain('const MAX_THREAD_FANOUT = 50');
-    expect(backend).toContain('threadInvite: table(');
+    expect(backend).toContain('export const threadInviteTable = table(');
+    expect(backend).toContain('threadInvite: threadInviteTable');
     expect(backend).toContain('export const visibleThreadInvites');
     expect(backend).toContain('export const acceptThreadInvite');
     expect(backend).toContain('export const rejectThreadInvite');
@@ -388,14 +474,13 @@ describe('generated and source security contracts', () => {
   });
 
   it('keeps device-share expiry client-derived in visible views', () => {
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
-    const shareView = backend.slice(
-      backend.indexOf('export const visibleDeviceShareRequests'),
-      backend.indexOf('export const visibleDeviceKeyBundles')
+    const shareView = sourceBetween(
+      readBackendFile('operations/identity/device-share-request.ts'),
+      'export const visibleDeviceShareRequests'
     );
-    const bundleView = backend.slice(
-      backend.indexOf('export const visibleDeviceKeyBundles'),
-      backend.indexOf('export const visibleThreads')
+    const bundleView = sourceBetween(
+      readBackendFile('operations/identity/device-key-bundle.ts'),
+      'export const visibleDeviceKeyBundles'
     );
     const slugRoute = readRelativeFile('src/routes/$slug.tsx');
     const rootShellModel = readFileSync(
@@ -412,7 +497,7 @@ describe('generated and source security contracts', () => {
   });
 
   it('rejects device key bundles that cannot be claimed', () => {
-    const backend = readFileSync(resolve(WEBAPP_ROOT, '../spacetimedb/src/index.ts'), 'utf8');
+    const backend = readBackendSource();
 
     expect(backend).toContain('const DEVICE_KEY_BUNDLE_MAX_LIFETIME_MS = 15 * 60_000');
     expect(backend).toContain('function requireClaimableDeviceKeyBundleExpiry');

@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   comparePeerKeys,
@@ -13,6 +16,7 @@ import {
   unpinPeer,
   type PeerKeyTuple,
 } from '../../../shared/peer-key-trust';
+import { autoPinPeerIfUnknown as autoPinPeerIfUnknownInStore } from './peer-key-trust';
 
 const tupleA: PeerKeyTuple = {
   encryptionPublicKey: 'enc-A',
@@ -146,5 +150,27 @@ describe('peer-key-trust', () => {
         },
       })
     ).toThrow(PeerKeyTrustStoreParseError);
+  });
+
+  it('returns the locked comparison when another process pins first', async () => {
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'peer-key-trust-'));
+    process.env.XDG_CONFIG_HOME = tempDir;
+
+    try {
+      const results = await Promise.all([
+        autoPinPeerIfUnknownInStore('alice', tupleA),
+        autoPinPeerIfUnknownInStore('alice', tupleBRotatedKeys),
+      ]);
+
+      expect(results.map(result => result.status).sort()).toEqual(['rotated', 'unpinned']);
+    } finally {
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });

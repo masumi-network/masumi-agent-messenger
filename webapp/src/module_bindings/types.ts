@@ -55,6 +55,100 @@ export const AgentKeyBundle = __t.object("AgentKeyBundle", {
 });
 export type AgentKeyBundle = __Infer<typeof AgentKeyBundle>;
 
+export const Channel = __t.object("Channel", {
+  id: __t.u64(),
+  slug: __t.string(),
+  title: __t.option(__t.string()),
+  description: __t.option(__t.string()),
+  accessMode: __t.string(),
+  discoverable: __t.bool(),
+  creatorAgentDbId: __t.u64(),
+  nextChannelSeq: __t.u64(),
+  lastMessageSeq: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+  lastMessageAt: __t.timestamp(),
+});
+export type Channel = __Infer<typeof Channel>;
+
+export const ChannelJoinRequest = __t.object("ChannelJoinRequest", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  requesterAgentDbId: __t.u64(),
+  requesterInboxId: __t.u64(),
+  uniqueKey: __t.string(),
+  permission: __t.string(),
+  status: __t.string(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+  resolvedAt: __t.option(__t.timestamp()),
+  resolvedByAgentDbId: __t.option(__t.u64()),
+});
+export type ChannelJoinRequest = __Infer<typeof ChannelJoinRequest>;
+
+export const ChannelMember = __t.object("ChannelMember", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  agentDbId: __t.u64(),
+  inboxId: __t.u64(),
+  uniqueKey: __t.string(),
+  permission: __t.string(),
+  active: __t.bool(),
+  lastSentSeq: __t.u64(),
+  joinedAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type ChannelMember = __Infer<typeof ChannelMember>;
+
+export const ChannelMemberListRow = __t.object("ChannelMemberListRow", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  agentDbId: __t.u64(),
+  agentPublicIdentity: __t.string(),
+  agentSlug: __t.string(),
+  agentDisplayName: __t.option(__t.string()),
+  agentCurrentEncryptionPublicKey: __t.string(),
+  agentCurrentEncryptionKeyVersion: __t.string(),
+  permission: __t.string(),
+  active: __t.bool(),
+  lastSentSeq: __t.u64(),
+  joinedAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type ChannelMemberListRow = __Infer<typeof ChannelMemberListRow>;
+
+export const ChannelMessage = __t.object("ChannelMessage", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  channelSeq: __t.u64(),
+  channelSeqKey: __t.string(),
+  senderAgentDbId: __t.u64(),
+  senderPublicIdentity: __t.string(),
+  senderSeq: __t.u64(),
+  senderSigningKeyVersion: __t.string(),
+  plaintext: __t.string(),
+  signature: __t.string(),
+  replyToMessageId: __t.option(__t.u64()),
+  createdAt: __t.timestamp(),
+});
+export type ChannelMessage = __Infer<typeof ChannelMessage>;
+
+export const ChannelMessageRow = __t.object("ChannelMessageRow", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  channelSeq: __t.u64(),
+  senderAgentDbId: __t.u64(),
+  senderPublicIdentity: __t.string(),
+  senderSeq: __t.u64(),
+  senderSigningPublicKey: __t.string(),
+  senderSigningKeyVersion: __t.string(),
+  plaintext: __t.string(),
+  signature: __t.string(),
+  replyToMessageId: __t.option(__t.u64()),
+  createdAt: __t.timestamp(),
+});
+export type ChannelMessageRow = __Infer<typeof ChannelMessageRow>;
+
 export const ClaimedDeviceKeyBundleRow = __t.object("ClaimedDeviceKeyBundleRow", {
   bundleId: __t.u64(),
   targetDeviceId: __t.string(),
@@ -69,6 +163,9 @@ export const ClaimedDeviceKeyBundleRow = __t.object("ClaimedDeviceKeyBundleRow",
   sharedKeyVersionCount: __t.u64(),
   createdAt: __t.timestamp(),
   expiresAt: __t.timestamp(),
+  get expiryMode() {
+    return DeviceKeyBundleExpiryMode;
+  },
 });
 export type ClaimedDeviceKeyBundleRow = __Infer<typeof ClaimedDeviceKeyBundleRow>;
 
@@ -163,6 +260,9 @@ export const DeviceKeyBundle = __t.object("DeviceKeyBundle", {
   createdAt: __t.timestamp(),
   expiresAt: __t.timestamp(),
   consumedAt: __t.option(__t.timestamp()),
+  get expiryMode() {
+    return DeviceKeyBundleExpiryMode;
+  },
 });
 export type DeviceKeyBundle = __Infer<typeof DeviceKeyBundle>;
 
@@ -178,8 +278,27 @@ export const DeviceKeyBundleAttachment = __t.object("DeviceKeyBundleAttachment",
   sharedAgentCount: __t.u64(),
   sharedKeyVersionCount: __t.u64(),
   expiresAt: __t.timestamp(),
+  get expiryMode() {
+    return DeviceKeyBundleExpiryMode;
+  },
 });
 export type DeviceKeyBundleAttachment = __Infer<typeof DeviceKeyBundleAttachment>;
+
+export const DeviceKeyBundleExpiry = __t.object("DeviceKeyBundleExpiry", {
+  id: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  bundleId: __t.u64(),
+  expiresAt: __t.timestamp(),
+  createdAt: __t.timestamp(),
+});
+export type DeviceKeyBundleExpiry = __Infer<typeof DeviceKeyBundleExpiry>;
+
+// The tagged union or sum type for the algebraic type `DeviceKeyBundleExpiryMode`.
+export const DeviceKeyBundleExpiryMode = __t.enum("DeviceKeyBundleExpiryMode", {
+  Expires: __t.unit(),
+  NeverExpires: __t.unit(),
+});
+export type DeviceKeyBundleExpiryMode = __Infer<typeof DeviceKeyBundleExpiryMode>;
 
 export const DeviceShareRequest = __t.object("DeviceShareRequest", {
   id: __t.u64(),
@@ -262,6 +381,37 @@ export const Message = __t.object("Message", {
   createdAt: __t.timestamp(),
 });
 export type Message = __Infer<typeof Message>;
+
+export const PublicChannel = __t.object("PublicChannel", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  slug: __t.string(),
+  title: __t.option(__t.string()),
+  description: __t.option(__t.string()),
+  accessMode: __t.string(),
+  discoverable: __t.bool(),
+  lastMessageSeq: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+  lastMessageAt: __t.timestamp(),
+});
+export type PublicChannel = __Infer<typeof PublicChannel>;
+
+export const PublicRecentChannelMessage = __t.object("PublicRecentChannelMessage", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  channelSeq: __t.u64(),
+  channelSeqKey: __t.string(),
+  senderAgentDbId: __t.u64(),
+  senderPublicIdentity: __t.string(),
+  senderSeq: __t.u64(),
+  senderSigningKeyVersion: __t.string(),
+  plaintext: __t.string(),
+  signature: __t.string(),
+  replyToMessageId: __t.option(__t.u64()),
+  createdAt: __t.timestamp(),
+});
+export type PublicRecentChannelMessage = __Infer<typeof PublicRecentChannelMessage>;
 
 export const PublishedAgentLookupRow = __t.object("PublishedAgentLookupRow", {
   slug: __t.string(),
@@ -393,6 +543,25 @@ export const SecretEnvelopeAttachment = __t.object("SecretEnvelopeAttachment", {
 });
 export type SecretEnvelopeAttachment = __Infer<typeof SecretEnvelopeAttachment>;
 
+export const SelectedPublicRecentChannelMessageRow = __t.object("SelectedPublicRecentChannelMessageRow", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  channelSeq: __t.u64(),
+  senderAgentDbId: __t.u64(),
+  senderPublicIdentity: __t.string(),
+  senderSeq: __t.u64(),
+  senderSigningPublicKey: __t.string(),
+  senderSigningKeyVersion: __t.string(),
+  plaintext: __t.string(),
+  signature: __t.string(),
+  replyToMessageId: __t.option(__t.u64()),
+  createdAt: __t.timestamp(),
+});
+export type SelectedPublicRecentChannelMessageRow = __Infer<typeof SelectedPublicRecentChannelMessageRow>;
+
+export const SelectedPublicRecentChannelMessages = __t.object("SelectedPublicRecentChannelMessages", {});
+export type SelectedPublicRecentChannelMessages = __Infer<typeof SelectedPublicRecentChannelMessages>;
+
 export const Thread = __t.object("Thread", {
   id: __t.u64(),
   dedupeKey: __t.string(),
@@ -519,6 +688,82 @@ export type VisibleAgentRow = __Infer<typeof VisibleAgentRow>;
 export const VisibleAgents = __t.object("VisibleAgents", {});
 export type VisibleAgents = __Infer<typeof VisibleAgents>;
 
+export const VisibleChannelJoinRequestRow = __t.object("VisibleChannelJoinRequestRow", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  channelSlug: __t.string(),
+  channelTitle: __t.option(__t.string()),
+  requesterAgentDbId: __t.u64(),
+  requesterPublicIdentity: __t.string(),
+  requesterSlug: __t.string(),
+  requesterDisplayName: __t.option(__t.string()),
+  requesterCurrentEncryptionPublicKey: __t.string(),
+  requesterCurrentEncryptionKeyVersion: __t.string(),
+  permission: __t.string(),
+  status: __t.string(),
+  direction: __t.string(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+  resolvedAt: __t.option(__t.timestamp()),
+  resolvedByAgentDbId: __t.option(__t.u64()),
+});
+export type VisibleChannelJoinRequestRow = __Infer<typeof VisibleChannelJoinRequestRow>;
+
+export const VisibleChannelJoinRequests = __t.object("VisibleChannelJoinRequests", {});
+export type VisibleChannelJoinRequests = __Infer<typeof VisibleChannelJoinRequests>;
+
+export const VisibleChannelMembershipRow = __t.object("VisibleChannelMembershipRow", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  agentDbId: __t.u64(),
+  permission: __t.string(),
+  active: __t.bool(),
+  lastSentSeq: __t.u64(),
+  joinedAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type VisibleChannelMembershipRow = __Infer<typeof VisibleChannelMembershipRow>;
+
+export const VisibleChannelMemberships = __t.object("VisibleChannelMemberships", {});
+export type VisibleChannelMemberships = __Infer<typeof VisibleChannelMemberships>;
+
+export const VisibleChannelMessageRow = __t.object("VisibleChannelMessageRow", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  channelSeq: __t.u64(),
+  senderAgentDbId: __t.u64(),
+  senderPublicIdentity: __t.string(),
+  senderSeq: __t.u64(),
+  senderSigningPublicKey: __t.string(),
+  senderSigningKeyVersion: __t.string(),
+  plaintext: __t.string(),
+  signature: __t.string(),
+  replyToMessageId: __t.option(__t.u64()),
+  createdAt: __t.timestamp(),
+});
+export type VisibleChannelMessageRow = __Infer<typeof VisibleChannelMessageRow>;
+
+export const VisibleChannelMessages = __t.object("VisibleChannelMessages", {});
+export type VisibleChannelMessages = __Infer<typeof VisibleChannelMessages>;
+
+export const VisibleChannelRow = __t.object("VisibleChannelRow", {
+  id: __t.u64(),
+  slug: __t.string(),
+  title: __t.option(__t.string()),
+  description: __t.option(__t.string()),
+  accessMode: __t.string(),
+  discoverable: __t.bool(),
+  creatorAgentDbId: __t.u64(),
+  lastMessageSeq: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+  lastMessageAt: __t.timestamp(),
+});
+export type VisibleChannelRow = __Infer<typeof VisibleChannelRow>;
+
+export const VisibleChannels = __t.object("VisibleChannels", {});
+export type VisibleChannels = __Infer<typeof VisibleChannels>;
+
 export const VisibleContactAllowlistEntries = __t.object("VisibleContactAllowlistEntries", {});
 export type VisibleContactAllowlistEntries = __Infer<typeof VisibleContactAllowlistEntries>;
 
@@ -577,6 +822,9 @@ export const VisibleDeviceKeyBundleRow = __t.object("VisibleDeviceKeyBundleRow",
   createdAt: __t.timestamp(),
   expiresAt: __t.timestamp(),
   consumedAt: __t.option(__t.timestamp()),
+  get expiryMode() {
+    return DeviceKeyBundleExpiryMode;
+  },
 });
 export type VisibleDeviceKeyBundleRow = __Infer<typeof VisibleDeviceKeyBundleRow>;
 

@@ -431,6 +431,14 @@ function registerAccountDeviceCommands(command: Command): void {
             ? renderKeyValue([
                 { key: 'Shared actors', value: String(result.sharedActorCount) },
                 { key: 'Shared key versions', value: String(result.sharedKeyVersionCount) },
+                ...(result.pendingImportedRotationKeyCount > 0
+                  ? [
+                      {
+                        key: 'Pending confirmations',
+                        value: String(result.pendingImportedRotationKeyCount),
+                      },
+                    ]
+                  : []),
               ])
             : renderKeyValue([{ key: 'Device', value: result.deviceId, color: dim }]),
         }),

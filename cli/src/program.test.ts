@@ -288,6 +288,121 @@ async function loadProgramWithMocks(params: {
     messageId: '100',
     threadSeq: '3',
   }));
+  const countThreadMessages = vi.fn(async (input: { threadId: string; actorSlug?: string }) => ({
+    authenticated: true as const,
+    connected: true as const,
+    profile: 'default',
+    actorSlug: input.actorSlug ?? 'agent',
+    thread: {
+      id: input.threadId,
+      kind: 'group',
+      label: 'Support Group',
+      locked: false,
+      archived: false,
+      participantCount: 2,
+      participants: ['agent', 'support-bot'],
+    },
+    messageCount: 7,
+    lastMessageSeq: '7',
+    lastMessageAt: '2026-04-15T10:00:00.000Z',
+  }));
+  const listThreads = vi.fn(async () => ({
+    authenticated: true as const,
+    connected: true as const,
+    profile: 'default',
+    actorSlug: 'agent',
+    includeArchived: false,
+    totalThreads: 0,
+    threads: [],
+  }));
+  const readThreadHistory = vi.fn(async () => ({
+    authenticated: true as const,
+    connected: true as const,
+    profile: 'default',
+    actorSlug: 'agent',
+    thread: {
+      id: '42',
+      kind: 'direct',
+      label: 'Support Bot',
+      locked: false,
+      archived: false,
+    },
+    lastReadThreadSeq: '0',
+    totalMessages: 0,
+    messages: [],
+  }));
+  const paginateThreadHistory = vi.fn(
+    (history: Awaited<ReturnType<typeof readThreadHistory>>) => ({
+      ...history,
+      page: 1,
+      pageSize: 20,
+      totalPages: 1,
+      hasPrevious: false,
+      hasNext: false,
+      nextPage: null,
+      previousPage: null,
+    })
+  );
+  const createDirectThread = vi.fn(async () => ({
+    profile: 'default',
+    actorSlug: 'agent',
+    threadId: '42',
+    label: 'Support Bot',
+    kind: 'direct' as const,
+    locked: false,
+    participants: ['agent', 'support-bot'],
+    invitedParticipants: [],
+  }));
+  const createGroupThread = vi.fn(async () => ({
+    profile: 'default',
+    actorSlug: 'agent',
+    threadId: '43',
+    label: 'Support Group',
+    kind: 'group' as const,
+    locked: false,
+    participants: ['agent', 'support-bot'],
+    invitedParticipants: [],
+  }));
+  const addThreadParticipant = vi.fn(async () => ({
+    profile: 'default',
+    actorSlug: 'agent',
+    threadId: '43',
+    label: 'Support Group',
+    participant: 'support-bot',
+    action: 'added' as const,
+    participants: ['agent', 'support-bot'],
+    invitedParticipants: [],
+  }));
+  const removeThreadParticipant = vi.fn(async () => ({
+    profile: 'default',
+    actorSlug: 'agent',
+    threadId: '43',
+    label: 'Support Group',
+    participant: 'support-bot',
+    action: 'removed' as const,
+    participants: ['agent'],
+    invitedParticipants: [],
+  }));
+  const markThreadRead = vi.fn(async () => ({
+    profile: 'default',
+    actorSlug: 'agent',
+    threadId: '42',
+    label: 'Support Bot',
+    throughSeq: '7',
+  }));
+  const setThreadArchived = vi.fn(async () => ({
+    profile: 'default',
+    actorSlug: 'agent',
+    threadId: '42',
+    label: 'Support Bot',
+    archived: true,
+  }));
+  const deleteThread = vi.fn(async () => ({
+    profile: 'default',
+    actorSlug: 'agent',
+    threadId: '42',
+    label: 'Support Bot',
+  }));
 
   const resolveContactRequest = vi.fn(async (input: { requestId: string; action: string }) => ({
     profile: 'default',
@@ -366,6 +481,79 @@ async function loadProgramWithMocks(params: {
         messagePreviewVisibleBeforeApproval: false,
       },
     },
+  }));
+  const listPublicChannels = vi.fn(async () => ({
+    profile: 'default',
+    channels: [],
+  }));
+  const showPublicChannel = vi.fn(async () => ({
+    profile: 'default',
+    channel: null,
+  }));
+  const readPublicChannelMessages = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    anonymous: true,
+    cappedToRecent: true,
+    messages: [],
+  }));
+  const readAuthenticatedChannelMessages = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    anonymous: false,
+    cappedToRecent: false,
+    messages: [],
+  }));
+  const listChannelMembers = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    members: [],
+  }));
+  const createChannel = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    status: 'created',
+  }));
+  const joinPublicChannel = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    status: 'joined',
+  }));
+  const requestChannelJoin = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    status: 'requested',
+  }));
+  const listChannelJoinRequests = vi.fn(async () => ({
+    profile: 'default',
+    requests: [],
+  }));
+  const approveChannelJoin = vi.fn(async (_input: { requestId: string }) => ({
+    profile: 'default',
+    channelId: '1',
+    status: 'approved',
+  }));
+  const rejectChannelJoin = vi.fn(async () => ({
+    profile: 'default',
+    status: 'rejected',
+  }));
+  const setChannelMemberPermission = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    channelId: '1',
+    status: 'permission-updated',
+  }));
+  const removeChannelMember = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    channelId: '1',
+    status: 'member-removed',
+  }));
+  const sendChannelMessage = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    channelId: '1',
+    status: 'sent',
   }));
   const lookupPublishedAgentBySlug = vi.fn(async (input: { slug: string }) => [
     {
@@ -481,6 +669,20 @@ async function loadProgramWithMocks(params: {
     };
   });
 
+  vi.doMock('./services/thread', () => ({
+    addThreadParticipant,
+    countThreadMessages,
+    createDirectThread,
+    createGroupThread,
+    deleteThread,
+    listThreads,
+    markThreadRead,
+    paginateThreadHistory,
+    readThreadHistory,
+    removeThreadParticipant,
+    setThreadArchived,
+  }));
+
   vi.doMock('./services/contact-management', async importOriginal => {
     const actual = await importOriginal<typeof import('./services/contact-management')>();
     return {
@@ -496,6 +698,23 @@ async function loadProgramWithMocks(params: {
   vi.doMock('./services/discover', () => ({
     discoverAgents,
     showDiscoveredAgent,
+  }));
+
+  vi.doMock('./services/channel', () => ({
+    approveChannelJoin,
+    createChannel,
+    joinPublicChannel,
+    listChannelJoinRequests,
+    listChannelMembers,
+    listPublicChannels,
+    showPublicChannel,
+    readAuthenticatedChannelMessages,
+    readPublicChannelMessages,
+    rejectChannelJoin,
+    removeChannelMember,
+    requestChannelJoin,
+    sendChannelMessage,
+    setChannelMemberPermission,
   }));
 
   const programModule = await import('./program');
@@ -515,7 +734,10 @@ async function loadProgramWithMocks(params: {
       resolvePreferredAgentSlug,
       useOwnedAgent,
       listOwnedAgents,
+      getOwnedAgentProfile,
       updateOwnedAgentMessageCapabilities,
+      countThreadMessages,
+      listThreads,
       sendMessageToSlug,
       sendMessageToThread,
       resolveContactRequest,
@@ -524,6 +746,20 @@ async function loadProgramWithMocks(params: {
       removeContactAllowlist,
       discoverAgents,
       showDiscoveredAgent,
+      listPublicChannels,
+      showPublicChannel,
+      readPublicChannelMessages,
+      readAuthenticatedChannelMessages,
+      listChannelMembers,
+      createChannel,
+      joinPublicChannel,
+      requestChannelJoin,
+      listChannelJoinRequests,
+      approveChannelJoin,
+      rejectChannelJoin,
+      setChannelMemberPermission,
+      removeChannelMember,
+      sendChannelMessage,
       lookupPublishedAgentBySlug,
       lookupPublishedAgentsByEmail,
       connectAnonymous,
@@ -574,10 +810,12 @@ describe('CLI help', () => {
     const { buildProgram } = await import('./program');
     const help = buildProgram().helpInformation();
 
-    expect(help).toContain('masumi-agent-messenger CLI for account, agent, thread, and discovery workflows');
+    expect(help).toContain('masumi-agent-messenger CLI for account, agent, thread, channel, and discovery');
+    expect(help).toContain('workflows');
     expect(help).toContain('account');
     expect(help).toContain('agent');
     expect(help).toContain('thread');
+    expect(help).toContain('channel');
     expect(help).toContain('discover');
     expect(help).not.toContain('\nauth');
     expect(help).not.toContain('\ninbox');
@@ -621,6 +859,7 @@ describe('CLI help', () => {
 
     expect(help).toContain('list');
     expect(help).toContain('show');
+    expect(help).toContain('count');
     expect(help).toContain('latest');
     expect(help).toContain('start');
     expect(help).toContain('reply');
@@ -638,6 +877,23 @@ describe('CLI help', () => {
 
     expect(help).toContain('search');
     expect(help).toContain('show');
+  });
+
+  it('shows the channel help', async () => {
+    const { buildProgram } = await import('./program');
+    const channel = buildProgram().commands.find(command => command.name() === 'channel');
+    const help = channel?.helpInformation() ?? '';
+
+    expect(help).toContain('list');
+    expect(help).toContain('show');
+    expect(help).toContain('messages');
+    expect(help).toContain('create');
+    expect(help).toContain('add');
+    expect(help).toContain('join');
+    expect(help).toContain('request');
+    expect(help).toContain('approvals');
+    expect(help).toContain('send');
+    expect(help).toContain('members');
   });
 });
 
@@ -757,6 +1013,62 @@ describe('CLI command parsing', () => {
     );
   });
 
+  it('parses agent show in json mode', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'agent',
+      'show',
+      'support-bot',
+    ]);
+
+    expect(mocks.getOwnedAgentProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorSlug: 'support-bot',
+        profileName: 'default',
+      })
+    );
+    expect(mocks.runCommandAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Masumi agent show',
+        options: expect.objectContaining({
+          json: true,
+        }),
+      })
+    );
+  });
+
+  it('parses agent show in human mode', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      'agent',
+      'show',
+      '--agent',
+      'support-bot',
+    ]);
+
+    expect(mocks.getOwnedAgentProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorSlug: 'support-bot',
+        profileName: 'default',
+      })
+    );
+    expect(mocks.runCommandAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Masumi agent show',
+        options: expect.objectContaining({
+          json: false,
+        }),
+      })
+    );
+  });
+
   it('parses thread start positional arguments', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
@@ -777,6 +1089,38 @@ describe('CLI command parsing', () => {
         message: 'hello there',
         actorSlug: 'agent',
         profileName: 'default',
+      })
+    );
+  });
+
+  it('parses thread count with explicit agent context', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'thread',
+      'count',
+      '42',
+      '--agent',
+      'support-bot',
+    ]);
+
+    expect(mocks.resolvePreferredAgentSlug).toHaveBeenCalledWith('default', 'support-bot');
+    expect(mocks.countThreadMessages).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'support-bot',
+        threadId: '42',
+      })
+    );
+    expect(mocks.runCommandAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Masumi thread count',
+        options: expect.objectContaining({
+          json: true,
+        }),
       })
     );
   });
@@ -802,6 +1146,149 @@ describe('CLI command parsing', () => {
         requestId: '42',
         action: 'approve',
         actorSlug: 'support-bot',
+      })
+    );
+  });
+
+  it('parses channel create options', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channel',
+      'create',
+      'release-room',
+      '--agent',
+      'deploy-agent',
+      '--title',
+      'Release Room',
+      '--description',
+      'Deployment handoffs',
+      '--approval-required',
+      '--no-discoverable',
+    ]);
+
+    expect(mocks.createChannel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'deploy-agent',
+        slug: 'release-room',
+        title: 'Release Room',
+        description: 'Deployment handoffs',
+        accessMode: 'approval_required',
+        discoverable: false,
+      })
+    );
+  });
+
+  it('parses channel add as a create alias', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channel',
+      'add',
+      'release-room',
+      '--agent',
+      'deploy-agent',
+      '--approval-required',
+    ]);
+
+    expect(mocks.createChannel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'deploy-agent',
+        slug: 'release-room',
+        accessMode: 'approval_required',
+        discoverable: true,
+      })
+    );
+  });
+
+  it('parses channel approvals scoped to an administered channel', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channel',
+      'approvals',
+      'release-room',
+      '--agent',
+      'deploy-agent',
+      '--all',
+    ]);
+
+    expect(mocks.listChannelJoinRequests).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'deploy-agent',
+        slug: 'release-room',
+        direction: 'incoming',
+        includeResolved: true,
+        requireAdmin: true,
+      })
+    );
+  });
+
+  it('parses channel approvals without secret material', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channel',
+      'approve',
+      '42',
+      '--agent',
+      'deploy-agent',
+      '--permission',
+      'read_write',
+    ]);
+
+    const call = mocks.approveChannelJoin.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(call).toEqual(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'deploy-agent',
+        requestId: '42',
+        permission: 'read_write',
+      })
+    );
+    expect(call).not.toHaveProperty('secretEnvelope');
+  });
+
+  it('parses the plural channels alias for sending', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channels',
+      'send',
+      'release-room',
+      'ship',
+      'it',
+      '--agent',
+      'deploy-agent',
+      '--content-type',
+      'text/plain',
+    ]);
+
+    expect(mocks.sendChannelMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'deploy-agent',
+        slug: 'release-room',
+        message: 'ship it',
+        contentType: 'text/plain',
       })
     );
   });
@@ -919,7 +1406,7 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('requires --force before accepting rotated inbox trust keys', async () => {
+  it('accepts rotated inbox trust keys without --force', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
     mocks.loadPeerKeyTrustStore.mockResolvedValueOnce({
       version: 1,
@@ -938,21 +1425,26 @@ describe('CLI command parsing', () => {
       },
     });
 
-    await expect(
-      buildProgram().parseAsync([
-        'node',
-        'masumi-agent-messenger',
-        '--json',
-        'inbox',
-        'trust',
-        'pin',
-        'Support-Bot',
-      ])
-    ).rejects.toMatchObject({ code: 'PEER_KEY_ROTATION_FORCE_REQUIRED' });
-    expect(mocks.confirmPeerKeyRotation).not.toHaveBeenCalled();
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'inbox',
+      'trust',
+      'pin',
+      'Support-Bot',
+    ]);
+
+    expect(mocks.confirmPeerKeyRotation).toHaveBeenCalledWith(
+      'support-bot:public-identity',
+      expect.objectContaining({
+        encryptionKeyVersion: 'enc-v1',
+        signingKeyVersion: 'sig-v1',
+      })
+    );
   });
 
-  it('accepts rotated inbox trust keys with --force', async () => {
+  it('accepts --force for rotated inbox trust keys as compatibility', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
     mocks.loadPeerKeyTrustStore.mockResolvedValueOnce({
       version: 1,

@@ -12,6 +12,9 @@ import type {
   VisibleDeviceRow,
   VisibleDeviceShareRequestRow,
   VisibleMessageRow,
+  VisibleChannelJoinRequestRow,
+  VisibleChannelMembershipRow,
+  VisibleChannelRow,
 } from '../../../webapp/src/module_bindings/types';
 
 function ts(iso: string) {
@@ -158,6 +161,64 @@ function makeDeviceRequest(
   } as VisibleDeviceShareRequestRow;
 }
 
+function makeChannel(overrides: Partial<VisibleChannelRow>): VisibleChannelRow {
+  return {
+    id: 0n,
+    slug: 'ops',
+    title: null,
+    description: null,
+    accessMode: 'public',
+    discoverable: true,
+    creatorAgentDbId: 0n,
+    lastMessageSeq: 0n,
+    createdAt: ts('2026-04-15T10:00:00.000Z'),
+    updatedAt: ts('2026-04-15T10:00:00.000Z'),
+    lastMessageAt: ts('2026-04-15T10:00:00.000Z'),
+    ...overrides,
+  } as VisibleChannelRow;
+}
+
+function makeChannelMembership(
+  overrides: Partial<VisibleChannelMembershipRow>
+): VisibleChannelMembershipRow {
+  return {
+    id: 0n,
+    channelId: 0n,
+    agentDbId: 0n,
+    permission: 'read',
+    active: true,
+    lastSentSeq: 0n,
+    joinedAt: ts('2026-04-15T10:00:00.000Z'),
+    updatedAt: ts('2026-04-15T10:00:00.000Z'),
+    ...overrides,
+  } as VisibleChannelMembershipRow;
+}
+
+function makeChannelJoinRequest(
+  overrides: Partial<VisibleChannelJoinRequestRow>
+): VisibleChannelJoinRequestRow {
+  return {
+    id: 0n,
+    channelId: 0n,
+    channelSlug: 'ops',
+    channelTitle: null,
+    requesterAgentDbId: 0n,
+    requesterPublicIdentity: 'requester-public',
+    requesterSlug: 'requester',
+    requesterDisplayName: null,
+    requesterCurrentEncryptionPublicKey: 'requester-encryption-public',
+    requesterCurrentEncryptionKeyVersion: 'enc-v1',
+    permission: 'read',
+    status: 'pending',
+    direction: 'incoming',
+    createdAt: ts('2026-04-15T10:00:00.000Z'),
+    updatedAt: ts('2026-04-15T10:00:00.000Z'),
+    resolvedAt: null,
+    resolvedByAgentDbId: null,
+    ...overrides,
+  } as VisibleChannelJoinRequestRow;
+}
+
 function makeRows(overrides: Partial<ShellRows> = {}): ShellRows {
   return {
     inboxes: [],
@@ -174,6 +235,10 @@ allowlistEntries: [],
     deviceRequests: [],
     deviceBundles: [],
     messages: [],
+    channels: [],
+    channelMessages: [],
+    channelMemberships: [],
+    channelJoinRequests: [],
     ...overrides,
   };
 }
@@ -390,5 +455,159 @@ describe('buildRootShellViewModel', () => {
     expect(model?.account.securityState).toMatchObject({
       status: 'missing',
     });
+  });
+
+  it('derives selectable channels and admin approval rows', () => {
+    const defaultActor = makeActor({
+      id: 1n,
+      inboxId: 10n,
+      normalizedEmail: 'agent@example.com',
+      slug: 'agent',
+      publicIdentity: 'agent-public',
+      isDefault: true,
+    });
+    const supportActor = makeActor({
+      id: 2n,
+      inboxId: 10n,
+      normalizedEmail: 'agent@example.com',
+      slug: 'support',
+      publicIdentity: 'support-public',
+    });
+    const requester = makeActor({
+      id: 3n,
+      inboxId: 20n,
+      normalizedEmail: 'friend@example.com',
+      slug: 'friend',
+      publicIdentity: 'friend-public',
+    });
+
+    const rows = makeRows({
+      actors: [defaultActor, supportActor, requester],
+      channels: [
+        makeChannel({
+          id: 200n,
+          slug: 'ops',
+          title: 'Ops',
+          accessMode: 'approval_required',
+          lastMessageAt: ts('2026-04-15T10:10:00.000Z'),
+        }),
+        makeChannel({
+          id: 201n,
+          slug: 'read-only',
+          title: 'Read Only',
+          lastMessageAt: ts('2026-04-15T10:20:00.000Z'),
+        }),
+        makeChannel({
+          id: 202n,
+          slug: 'writers',
+          title: 'Writers',
+          lastMessageAt: ts('2026-04-15T10:30:00.000Z'),
+        }),
+      ],
+      channelMemberships: [
+        makeChannelMembership({
+          channelId: 200n,
+          agentDbId: supportActor.id,
+          permission: 'admin',
+        }),
+        makeChannelMembership({
+          channelId: 201n,
+          agentDbId: defaultActor.id,
+          permission: 'read',
+        }),
+        makeChannelMembership({
+          channelId: 202n,
+          agentDbId: defaultActor.id,
+          permission: 'read_write',
+        }),
+      ],
+      channelJoinRequests: [
+        makeChannelJoinRequest({
+          id: 300n,
+          channelId: 200n,
+          channelSlug: 'ops',
+          channelTitle: 'Ops',
+          requesterAgentDbId: requester.id,
+          requesterSlug: 'friend',
+          permission: 'read_write',
+        }),
+        makeChannelJoinRequest({
+          id: 301n,
+          channelId: 201n,
+          channelSlug: 'read-only',
+          channelTitle: 'Read Only',
+          requesterAgentDbId: requester.id,
+          requesterSlug: 'friend',
+        }),
+      ],
+    });
+
+    const model = buildRootShellViewModel({
+      rows,
+      normalizedEmail: 'agent@example.com',
+      activeInboxSlug: 'agent',
+      securityState: {
+        status: 'healthy',
+        title: 'Private keys are ready',
+        description: 'Local keys match the published inbox keys.',
+      },
+      connectionHealth: 'live',
+    });
+
+    expect(model?.channels.channels.map(channel => channel.slug)).toEqual([
+      'writers',
+      'read-only',
+    ]);
+    expect(model?.channels.channels.find(channel => channel.slug === 'read-only')).toMatchObject({
+      slug: 'read-only',
+      isAdmin: false,
+      canSend: false,
+      actorSlug: 'agent',
+      pendingApprovals: 0,
+    });
+    expect(model?.channels.channels.find(channel => channel.slug === 'writers')).toMatchObject({
+      slug: 'writers',
+      isAdmin: false,
+      canSend: true,
+      actorSlug: 'agent',
+      permission: 'read_write',
+      pendingApprovals: 0,
+    });
+    expect(model?.channels.approvals).toEqual([]);
+    expect(model?.channels.pendingApprovalCount).toBe(0);
+
+    const supportModel = buildRootShellViewModel({
+      rows,
+      normalizedEmail: 'agent@example.com',
+      activeInboxSlug: 'support',
+      securityState: {
+        status: 'healthy',
+        title: 'Private keys are ready',
+        description: 'Local keys match the published inbox keys.',
+      },
+      connectionHealth: 'live',
+    });
+
+    expect(supportModel?.channels.channels.map(channel => channel.slug)).toEqual(['ops']);
+    expect(supportModel?.channels.channels[0]).toMatchObject({
+      slug: 'ops',
+      isAdmin: true,
+      canSend: true,
+      actorSlug: 'support',
+      pendingApprovals: 1,
+    });
+    expect(supportModel?.channels.approvals).toEqual([
+      expect.objectContaining({
+        id: '300',
+        channelSlug: 'ops',
+        requesterSlug: 'friend',
+        permission: 'read_write',
+        adminAgentSlug: 'support',
+      }),
+    ]);
+    expect(supportModel?.channels.pendingApprovalCount).toBe(1);
+    expect(supportModel?.dashboard.attentionItems.map(item => item.id)).toContain(
+      'channels:pending'
+    );
   });
 });

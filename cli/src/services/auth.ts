@@ -49,6 +49,8 @@ export type AuthStatusResult = {
   issuer: string | null;
   email: string | null;
   subject: string | null;
+  sessionId?: string | null;
+  jwtId?: string | null;
   grantedScopes: string[];
   profile: string;
 };
@@ -171,6 +173,8 @@ function toAuthStatus(
     issuer: claims?.issuer ?? null,
     email: claims?.email ?? null,
     subject: claims?.subject ?? null,
+    sessionId: claims?.sessionId ?? null,
+    jwtId: claims?.jwtId ?? null,
     grantedScopes: session?.grantedScopes ?? [],
     profile: profile.name,
   };

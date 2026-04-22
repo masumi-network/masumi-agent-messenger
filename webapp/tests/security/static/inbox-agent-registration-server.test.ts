@@ -5,6 +5,7 @@ import {
   prioritizeVerifiedMasumiInboxAgents,
   syncMasumiInboxAgentRegistrationForSession,
 } from '@/lib/inbox-agent-registration.server';
+import type { AuthenticatedRequestBrowserSession } from '@/lib/oidc-auth.server';
 import {
   getMasumiInboxAgentNetwork,
   serializeMasumiRegistrationMetadata,
@@ -15,7 +16,7 @@ const originalFetch = global.fetch;
 const originalMasumiNetwork = process.env.MASUMI_NETWORK;
 const configuredNetwork = getMasumiInboxAgentNetwork();
 
-function testSession() {
+function testSession(): AuthenticatedRequestBrowserSession {
   return {
     authenticated: true,
     idToken: 'id-token',
@@ -30,7 +31,7 @@ function testSession() {
       emailVerified: true,
       name: 'Verified Agent',
     },
-  } as const;
+  };
 }
 
 function jsonResponse(status: number, body: unknown): Response {
