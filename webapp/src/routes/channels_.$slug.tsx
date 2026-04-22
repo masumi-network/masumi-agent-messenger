@@ -79,6 +79,7 @@ import {
   type ChannelMessageSignatureInput,
 } from '../../../shared/channel-crypto';
 import { normalizeEmail } from '../../../shared/inbox-slug';
+import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 import {
   formatEncryptedMessageBody,
   normalizeEncryptedMessagePayload,
@@ -177,7 +178,10 @@ function pickPreferredChannelActor(params: {
   const ownedActors = defaultActor
     ? params.actors.filter(actor => actor.inboxId === defaultActor.inboxId)
     : params.actors.filter(actor => actor.normalizedEmail === params.normalizedSessionEmail);
-  const ownedActorsById = new Map(ownedActors.map(actor => [actor.id, actor]));
+  const usableOwnedActors = ownedActors.filter(
+    actor => !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+  );
+  const ownedActorsById = new Map(usableOwnedActors.map(actor => [actor.id, actor]));
 
   const memberActorId = params.memberships
     .filter(
@@ -217,7 +221,14 @@ function pickPreferredChannelActor(params: {
     return ownedActorsById.get(pendingRequestActorId) ?? null;
   }
 
-  return defaultActor ?? ownedActors[0] ?? null;
+  return (
+    (defaultActor &&
+      !isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState)
+      ? defaultActor
+      : null) ??
+    usableOwnedActors[0] ??
+    null
+  );
 }
 
 function toSignatureInput(message: {

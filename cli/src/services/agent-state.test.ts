@@ -114,6 +114,7 @@ describe('getOwnedAgentProfile', () => {
     mocks.actors = [];
     mocks.conn.reducers.upsertMasumiInboxAgentRegistration.mockReset();
     mocks.disconnectConnection.mockReset();
+    mocks.saveActiveAgentSlug.mockReset();
     mocks.unsubscribe.mockReset();
     mocks.loadProfile.mockResolvedValue({
       name: 'default',
@@ -349,5 +350,71 @@ describe('getOwnedAgentProfile', () => {
       registrationState: 'RegistrationConfirmed',
     });
     expect(mocks.saveActiveAgentSlug).toHaveBeenCalledWith('default', 'owner');
+  });
+
+  it('refuses to select an agent that syncs as deregistered', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      jsonResponse(200, {
+        status: 'success',
+        data: {
+          registrations: [
+            {
+              id: 'agent-123',
+              name: 'Owner',
+              description: null,
+              agentSlug: 'owner',
+              status: 'Deregistered',
+              createdAt: '2026-04-15T10:00:00.000Z',
+              updatedAt: '2026-04-15T10:05:00.000Z',
+              statusUpdatedAt: '2026-04-15T10:05:00.000Z',
+              agentIdentifier: 'did:masumi:owner',
+            },
+          ],
+        },
+      })
+    ) as typeof fetch;
+    mocks.actors = [
+      actor({
+        id: 1n,
+        inboxId: 10n,
+        normalizedEmail: 'owner@example.com',
+        slug: 'owner',
+        inboxIdentifier: undefined,
+        isDefault: true,
+        publicIdentity: 'owner',
+        displayName: 'Owner',
+        currentEncryptionPublicKey: 'enc',
+        currentEncryptionKeyVersion: 'enc-v1',
+        currentSigningPublicKey: 'sig',
+        currentSigningKeyVersion: 'sig-v1',
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'agent-123',
+        masumiAgentIdentifier: 'did:masumi:owner',
+        masumiRegistrationState: 'RegistrationConfirmed',
+        createdAt: timestamp(1n),
+        updatedAt: timestamp(1n),
+      }),
+    ];
+
+    await expect(
+      useOwnedAgent({
+        profileName: 'default',
+        actorSlug: 'owner',
+        reporter: {
+          info() {},
+          success() {},
+        },
+      })
+    ).rejects.toMatchObject({
+      code: 'AGENT_DEREGISTERED',
+    });
+    expect(mocks.saveActiveAgentSlug).not.toHaveBeenCalled();
+    expect(mocks.conn.reducers.upsertMasumiInboxAgentRegistration).toHaveBeenCalledWith({
+      agentDbId: 1n,
+      masumiRegistrationNetwork: configuredNetwork,
+      masumiInboxAgentId: 'agent-123',
+      masumiAgentIdentifier: 'did:masumi:owner',
+      masumiRegistrationState: 'DeregistrationConfirmed',
+    });
   });
 });

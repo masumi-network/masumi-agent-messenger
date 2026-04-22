@@ -10,6 +10,31 @@ export const MASUMI_INBOX_AGENT_REQUIRED_CREDITS = 1;
 export const DEFAULT_MASUMI_DISCOVERY_PAGE_SIZE = 20;
 export const MAX_MASUMI_DISCOVERY_PAGE_SIZE = 50;
 
+/**
+ * Thrown when a Masumi inbox-agent target is deregistering or already
+ * deregistered and cannot be used for chats. Typed so call sites can re-throw
+ * it without relying on fragile error-message substring matching.
+ */
+export class DeregisteredInboxAgentError extends Error {
+  readonly slug: string;
+  readonly state: string | null | undefined;
+
+  constructor(params: { slug: string; state?: string | null }) {
+    super(
+      `Agent \`${params.slug}\` is deregistering or deregistered and cannot be used for chats.`
+    );
+    this.name = 'DeregisteredInboxAgentError';
+    this.slug = params.slug;
+    this.state = params.state ?? null;
+  }
+}
+
+export function isDeregisteredInboxAgentError(
+  error: unknown
+): error is DeregisteredInboxAgentError {
+  return error instanceof DeregisteredInboxAgentError;
+}
+
 export const MASUMI_INBOX_AGENT_STATES = [
   'RegistrationRequested',
   'RegistrationInitiated',
@@ -25,6 +50,7 @@ export type MasumiInboxAgentState = (typeof MASUMI_INBOX_AGENT_STATES)[number];
 
 export const MASUMI_REGISTRATION_OUTCOMES = [
   'registered',
+  'deregistered',
   'already_registered_or_discovered',
   'pending',
   'skipped',
@@ -42,6 +68,7 @@ export function masumiRegistrationOutcomeToHttpStatus(
   switch (outcome) {
     case 'registered':
       return 201;
+    case 'deregistered':
     case 'already_registered_or_discovered':
       return 200;
     case 'pending':
@@ -122,7 +149,10 @@ type RegistryInboxAgentBrowseEndpoint =
   MasumiOpenApiPaths['/registry/api/v1/inbox-agent-registration']['post'];
 type RegistryInboxAgentSearchEndpoint =
   MasumiOpenApiPaths['/registry/api/v1/inbox-agent-registration-search']['post'];
-type PayInboxAgentsEndpoint = MasumiOpenApiPaths['/pay/api/v1/inbox-agents']['post'];
+type PayInboxAgentsCreateEndpoint = MasumiOpenApiPaths['/pay/api/v1/inbox-agents']['post'];
+type PayInboxAgentsListEndpoint = MasumiOpenApiPaths['/pay/api/v1/inbox-agents']['get'];
+type PayInboxAgentDeregisterEndpoint =
+  MasumiOpenApiPaths['/pay/api/v1/inbox-agents/{inboxAgentId}/deregister']['post'];
 type ApiCreditsEndpoint = MasumiOpenApiPaths['/api/credits']['get'];
 
 export type MasumiRegistryInboxAgentBrowseRequest = NonNullable<
@@ -147,13 +177,23 @@ export type MasumiRegistryInboxAgentStatus = NonNullable<
 >[number];
 
 export type MasumiPayInboxAgentCreateRequest = NonNullable<
-  PayInboxAgentsEndpoint['requestBody']
+  PayInboxAgentsCreateEndpoint['requestBody']
 >['content']['application/json'];
 
 export type MasumiPayInboxAgentCreateResponse =
-  PayInboxAgentsEndpoint['responses'][200]['content']['application/json'];
+  PayInboxAgentsCreateEndpoint['responses'][200]['content']['application/json'];
 
-export type MasumiPayInboxAgentRecord = MasumiPayInboxAgentCreateResponse['data'];
+export type MasumiPayInboxAgentListResponse =
+  PayInboxAgentsListEndpoint['responses'][200]['content']['application/json'];
+
+export type MasumiPayInboxAgentDeregisterResponse =
+  PayInboxAgentDeregisterEndpoint['responses'][200]['content']['application/json'];
+
+export type MasumiPayInboxAgentListRecord = MasumiPayInboxAgentListResponse['data'][number];
+export type MasumiPayInboxAgentRecord =
+  | MasumiPayInboxAgentCreateResponse['data']
+  | MasumiPayInboxAgentListRecord
+  | MasumiPayInboxAgentDeregisterResponse['data'];
 export type MasumiApiCreditsResponse =
   ApiCreditsEndpoint['responses'][200]['content']['application/json'];
 export type MasumiApiCreditsData = MasumiApiCreditsResponse['data'];
@@ -307,7 +347,65 @@ export function toMasumiInboxAgentState(value: string | null): MasumiInboxAgentS
 export function isNonDeregisteredInboxAgentState(
   state: MasumiInboxAgentState
 ): boolean {
-  return state !== 'DeregistrationConfirmed';
+  return !isDeregisteredInboxAgentState(state);
+}
+
+export function isDeregisteredInboxAgentState(
+  state: string | null | undefined
+): boolean {
+  return state === 'DeregistrationConfirmed';
+}
+
+export function isDeregisteringInboxAgentState(
+  state: string | null | undefined
+): boolean {
+  return state === 'DeregistrationRequested' || state === 'DeregistrationInitiated';
+}
+
+export function isDeregisteringOrDeregisteredInboxAgentState(
+  state: string | null | undefined
+): boolean {
+  return isDeregisteringInboxAgentState(state) || isDeregisteredInboxAgentState(state);
+}
+
+export function isFailedRegistrationInboxAgentState(
+  state: string | null | undefined
+): boolean {
+  return state === 'RegistrationFailed';
+}
+
+export function isUnavailableForChatInboxAgentState(
+  state: string | null | undefined
+): boolean {
+  return (
+    isDeregisteredInboxAgentState(state) ||
+    isFailedRegistrationInboxAgentState(state)
+  );
+}
+
+export function isAnyDeregistrationInboxAgentState(
+  state: string | null | undefined
+): boolean {
+  return (
+    state === 'DeregistrationRequested' ||
+    state === 'DeregistrationInitiated' ||
+    state === 'DeregistrationConfirmed' ||
+    state === 'DeregistrationFailed'
+  );
+}
+
+export function isDeregisteredMasumiRegistrationMetadata(
+  metadata: MasumiActorRegistrationMetadata | null | undefined
+): boolean {
+  return isDeregisteredInboxAgentState(metadata?.masumiRegistrationState);
+}
+
+export function isDeregisteringOrDeregisteredMasumiRegistrationMetadata(
+  metadata: MasumiActorRegistrationMetadata | null | undefined
+): boolean {
+  return isDeregisteringOrDeregisteredInboxAgentState(
+    metadata?.masumiRegistrationState
+  );
 }
 
 export function masumiRegistrationOutcomeFromState(
@@ -325,7 +423,7 @@ export function masumiRegistrationOutcomeFromState(
     case 'DeregistrationFailed':
       return 'failed';
     case 'DeregistrationConfirmed':
-      return 'skipped';
+      return 'deregistered';
     case undefined:
     case null:
       return null;
@@ -393,6 +491,32 @@ export function parseMasumiPayInboxAgentEntry(value: unknown): MasumiInboxAgentE
   throw new Error('Masumi inbox-agent response is invalid');
 }
 
+export function parseMasumiPayInboxAgentCollection(value: unknown): {
+  agents: MasumiInboxAgentEntry[];
+  nextCursor: string | null;
+} {
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    'success' in value &&
+    value.success === true &&
+    'data' in value &&
+    Array.isArray(value.data)
+  ) {
+    return {
+      agents: value.data.map(record =>
+        fromMasumiPayInboxAgentRecord(record as MasumiPayInboxAgentListRecord)
+      ),
+      nextCursor:
+        'nextCursor' in value && typeof value.nextCursor === 'string'
+          ? value.nextCursor
+          : null,
+    };
+  }
+
+  throw new Error('Masumi inbox-agent list response is invalid');
+}
+
 export function parseMasumiRegistryInboxAgentCollection(value: unknown): {
   agents: MasumiInboxAgentEntry[];
   nextCursor: string | null;
@@ -445,11 +569,15 @@ export function normalizeInboxAgentSlug(value: string): string {
 export function pickNewestExactInboxAgentMatch(params: {
   entries: MasumiInboxAgentEntry[];
   slug: string;
+  includeDeregistered?: boolean;
 }): MasumiInboxAgentEntry | null {
   const normalizedSlug = normalizeInboxAgentSlug(params.slug);
   const matches = params.entries
     .filter(entry => normalizeInboxAgentSlug(entry.agentSlug) === normalizedSlug)
-    .filter(entry => isNonDeregisteredInboxAgentState(entry.state))
+    .filter(
+      entry =>
+        params.includeDeregistered || isNonDeregisteredInboxAgentState(entry.state)
+    )
     .sort((left, right) => {
       const leftTime = Date.parse(left.updatedAt);
       const rightTime = Date.parse(right.updatedAt);

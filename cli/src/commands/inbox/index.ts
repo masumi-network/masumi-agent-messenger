@@ -6,6 +6,7 @@ import { registerInboxCreateCommand } from './create';
 import { registerInboxListCommand } from './list';
 import { registerInboxStatusCommand } from './status';
 import { registerInboxAgentRegisterCommand } from './register-agent';
+import { registerInboxAgentDeregisterCommand } from './deregister-agent';
 import { registerInboxRequestCommands } from './approvals';
 import { registerInboxPublicCommand } from './public';
 import { registerInboxAllowlistCommand } from './allowlist';
@@ -39,6 +40,7 @@ export function registerInboxCommands(program: Command): void {
         { value: 'create', label: 'Create a new inbox slug' },
         { value: 'status', label: 'Show inbox status' },
         { value: 'agent-register', label: 'Register a managed agent' },
+        { value: 'agent-deregister', label: 'Deregister a managed agent' },
         { value: 'public-show', label: 'Show public profile' },
         { value: 'request-list', label: 'List approval requests' },
         { value: 'allowlist-list', label: 'List allowlist entries' },
@@ -55,6 +57,9 @@ export function registerInboxCommands(program: Command): void {
       }
       case 'agent-register':
         await invokeMenuCommand(options, ['inbox', 'agent', 'register']);
+        return;
+      case 'agent-deregister':
+        await invokeMenuCommand(options, ['inbox', 'agent', 'deregister']);
         return;
       case 'public-show':
         await invokeMenuCommand(options, ['inbox', 'public', 'show']);
@@ -81,6 +86,7 @@ export function registerInboxCommands(program: Command): void {
   const agent = inbox.command('agent').description('Managed inbox-agent registration commands');
   registerInboxAgentListCommand(agent);
   registerInboxAgentRegisterCommand(agent);
+  registerInboxAgentDeregisterCommand(agent);
 
   registerInboxPublicCommand(inbox);
   registerInboxRequestCommands(inbox);

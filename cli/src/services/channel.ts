@@ -5,6 +5,7 @@ import {
   type ChannelMessageSignatureInput,
 } from '../../../shared/channel-crypto';
 import type { AgentKeyPair } from '../../../shared/agent-crypto';
+import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import {
   formatEncryptedMessageBody,
@@ -362,6 +363,14 @@ function requireOwnedActor(params: {
 }): Agent {
   const defaultActor = requireDefaultActor(params.actors, params.normalizedEmail);
   if (!params.actorSlug) {
+    if (isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState)) {
+      throw userError(
+        `Agent \`${defaultActor.slug}\` is deregistering or deregistered and cannot be used for channels.`,
+        {
+          code: 'AGENT_DEREGISTERED',
+        }
+      );
+    }
     return defaultActor;
   }
   const normalizedSlug = normalizeInboxSlug(params.actorSlug);
@@ -377,6 +386,14 @@ function requireOwnedActor(params: {
     throw userError(`No owned agent found for slug \`${normalizedSlug}\`.`, {
       code: 'OWNED_ACTOR_NOT_FOUND',
     });
+  }
+  if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)) {
+    throw userError(
+      `Agent \`${actor.slug}\` is deregistering or deregistered and cannot be used for channels.`,
+      {
+        code: 'AGENT_DEREGISTERED',
+      }
+    );
   }
   return actor;
 }
@@ -402,7 +419,9 @@ function requireChannelAdminActor(params: {
         ...params.actors.filter(
           actor => actor.inboxId === defaultActor.inboxId && actor.id !== defaultActor.id
         ),
-      ];
+      ].filter(
+        actor => !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+      );
   const adminActor = candidates.find(actor =>
     params.memberships.some(
       membership =>

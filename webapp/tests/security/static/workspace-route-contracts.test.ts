@@ -14,12 +14,12 @@ describe('workspace route contracts', () => {
     expect(source).toContain("to: '/'");
   });
 
-  it('keeps /$slug/manage as a compatibility redirect into inbox settings', () => {
+  it('keeps /$slug/manage as a compatibility redirect into agent management', () => {
     const source = readRoute('src/routes/$slug.manage.tsx');
 
-    expect(source).toContain("to: '/$slug'");
-    expect(source).toContain("to: '/'");
-    expect(source).toContain("buildWorkspaceSearch({ tab: 'settings' })");
+    expect(source).toContain("to: '/agents'");
+    expect(source).not.toContain("to: '/$slug'");
+    expect(source).not.toContain("buildWorkspaceSearch({ tab: 'settings' })");
   });
 
   it('boots first-run browser sessions from the root route instead of bouncing to agents', () => {
@@ -67,11 +67,12 @@ describe('workspace route contracts', () => {
     expect(source).toContain("compose: 'direct'");
   });
 
-  it('keeps inbox settings focused on inbox-only sections after moving profile management', () => {
+  it('keeps inbox workspace focused on inbox-only sections after moving profile management', () => {
     const source = readRoute('src/routes/$slug.tsx');
 
     expect(source).toContain('value="inbox"');
-    expect(source).toContain('value="settings"');
+    expect(source).toContain('value="approvals"');
+    expect(source).not.toContain('value="settings"');
     expect(source).not.toContain('>Profile<');
   });
 });

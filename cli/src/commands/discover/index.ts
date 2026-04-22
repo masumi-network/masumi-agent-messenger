@@ -14,6 +14,12 @@ import {
 } from '../../services/render';
 import { showCommandHelp } from '../menu';
 import { userError } from '../../services/errors';
+import {
+  isDeregisteringOrDeregisteredInboxAgentState,
+  isFailedRegistrationInboxAgentState,
+  isPendingMasumiInboxAgentState,
+  type MasumiInboxAgentState,
+} from '../../../../shared/inbox-agent-registration';
 
 type DiscoverOptions = GlobalOptions & {
   agent?: string;
@@ -41,6 +47,21 @@ function parsePositiveInteger(value: string, label: string): number {
     });
   }
   return parsed;
+}
+
+function formatRegistrationState(state: MasumiInboxAgentState): string {
+  if (isFailedRegistrationInboxAgentState(state)) {
+    return yellow('invalid');
+  }
+  if (isDeregisteringOrDeregisteredInboxAgentState(state)) {
+    return yellow(
+      state === 'DeregistrationConfirmed' ? 'deregistered' : 'deregistering'
+    );
+  }
+  if (isPendingMasumiInboxAgentState(state)) {
+    return yellow('pending');
+  }
+  return 'registered';
 }
 
 export function registerDiscoverCommands(program: Command): void {
@@ -82,6 +103,7 @@ export function registerDiscoverCommands(program: Command): void {
           const columns: TableColumn[] = [
             { header: 'Slug', key: 'slug', color: cyan },
             { header: 'Name', key: 'name' },
+            { header: 'State', key: 'state' },
             { header: 'Description', key: 'description' },
             { header: 'Agent ID', key: 'agentId', color: dim },
           ];
@@ -116,6 +138,7 @@ export function registerDiscoverCommands(program: Command): void {
                       result.results.map(item => ({
                         slug: item.slug,
                         name: item.displayName ?? '',
+                        state: formatRegistrationState(item.registrationState),
                         description: item.description ?? '',
                         agentId: item.agentIdentifier ?? '',
                       })),
@@ -159,6 +182,10 @@ export function registerDiscoverCommands(program: Command): void {
             {
               key: 'Inbox published',
               value: formatOptionalBoolean(result.selected.inboxPublished),
+            },
+            {
+              key: 'State',
+              value: formatRegistrationState(result.selected.registrationState),
             },
             {
               key: 'Agent ID',
@@ -230,10 +257,7 @@ export function registerDiscoverCommands(program: Command): void {
               : [
                   {
                     key: 'Public route',
-                    value:
-                      result.detailScope === 'saas_only'
-                        ? yellow('available for exact slug lookup')
-                        : yellow('not published'),
+                    value: yellow('not published'),
                   },
                 ]),
             ...(result.matchedActors.length > 1

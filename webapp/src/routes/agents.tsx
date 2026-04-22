@@ -7,6 +7,7 @@ import {
   Copy,
   Plus,
   ShieldCheck,
+  Trash,
   Users,
 } from '@phosphor-icons/react';
 import { useReducer } from 'spacetimedb/tanstack';
@@ -17,6 +18,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
@@ -35,6 +37,7 @@ import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { buildRouteHead } from '@/lib/seo';
 import { useKeyVault } from '@/hooks/use-key-vault';
 import {
+  deregisterBrowserInboxAgent,
   registerBrowserInboxAgent,
   readActorRegistrationMetadata,
 } from '@/lib/inbox-agent-registration';
@@ -43,6 +46,7 @@ import { reducers } from '@/module_bindings';
 import { cn } from '@/lib/utils';
 import {
   buildMasumiRegistrationSyncKey,
+  canAttemptManagedAgentDeregistration,
   canAttemptManagedAgentRegistration,
   getActorPublishedCapabilities,
   getActorSupportedContentTypes,
@@ -56,6 +60,7 @@ import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell'
 import { MAX_PUBLIC_DESCRIPTION_CHARS } from '../../../shared/contact-policy';
 import {
   createEmptyMasumiRegistrationResult,
+  isDeregisteringOrDeregisteredInboxAgentState,
   registrationResultFromMetadata,
   type MasumiRegistrationResult,
 } from '../../../shared/inbox-agent-registration';
@@ -81,6 +86,35 @@ type AgentsPageProps = {
   signInReturnTo?: string;
 };
 
+function getManagedRegistrationLabel(
+  registration: MasumiRegistrationResult
+): string {
+  switch (registration.registrationState) {
+    case 'DeregistrationConfirmed':
+      return 'Deregistered';
+    case 'DeregistrationRequested':
+    case 'DeregistrationInitiated':
+      return 'Deregistering';
+    default:
+      break;
+  }
+
+  switch (registration.status) {
+    case 'registered':
+      return 'Registered';
+    case 'deregistered':
+      return 'Deregistered';
+    case 'pending':
+      return 'Pending';
+    case 'failed':
+    case 'service_unavailable':
+    case 'scope_missing':
+      return 'Error';
+    default:
+      return 'Not registered';
+  }
+}
+
 export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {}) {
   const navigate = useNavigate();
   const vault = useKeyVault();
@@ -99,8 +133,11 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
   const [newDisplayName, setNewDisplayName] = useState('');
   const [showCreateAgentDialog, setShowCreateAgentDialog] = useState(false);
   const [showVaultDialog, setShowVaultDialog] = useState(false);
+  const [showDeregisterAgentDialog, setShowDeregisterAgentDialog] = useState(false);
+  const [deregisterConfirmationSlug, setDeregisterConfirmationSlug] = useState('');
   const [createBusy, setCreateBusy] = useState(false);
-  const [inboxAgentBusy, setInboxAgentBusy] = useState(false);
+  const [inboxAgentAction, setInboxAgentAction] =
+    useState<'register' | 'deregister' | null>(null);
   const [publicLinkedEmailBusy, setPublicLinkedEmailBusy] = useState(false);
   const [publicMessageCapabilitiesBusy, setPublicMessageCapabilitiesBusy] =
     useState(false);
@@ -123,6 +160,7 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
   const setAgentPublicMessageCapabilitiesReducer = useReducer(
     reducers.setAgentPublicMessageCapabilities
   );
+  const inboxAgentBusy = inboxAgentAction !== null;
 
   const normalizedEmail = useMemo(
     () =>
@@ -176,6 +214,9 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
             registration.attempted ||
             registration.error !== null,
           registered: registration.status === 'registered',
+          deregistered: isDeregisteringOrDeregisteredInboxAgentState(
+            registration.registrationState
+          ),
         };
       }),
     [ownedAgentRegistrationRefresh, subscribedOwnedAgentEntries]
@@ -231,7 +272,10 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
     hasActor: Boolean(selectedOwnedAgent ?? existingDefaultActor),
   });
   const canCreate = writeAccess.canWrite && Boolean(existingDefaultActor);
-  const canManageSelectedAgent = writeAccess.canWrite && Boolean(selectedOwnedAgent);
+  const canManageSelectedAgent =
+    writeAccess.canWrite &&
+    Boolean(selectedOwnedAgent) &&
+    !selectedOwnedAgentEntry?.deregistered;
   const needsBootstrapRedirect =
     workspace.status === 'ready' && workspace.tablesReady && !existingDefaultActor;
 
@@ -283,10 +327,37 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
     () => canAttemptManagedAgentRegistration(managedAgentRegistration),
     [managedAgentRegistration]
   );
+  const canDeregisterManagedAgent = useMemo(
+    () => canAttemptManagedAgentDeregistration(managedAgentRegistration),
+    [managedAgentRegistration]
+  );
+  const deregisterConfirmationMatches =
+    Boolean(selectedOwnedAgent) &&
+    deregisterConfirmationSlug.trim() === selectedOwnedAgent?.slug;
 
   function resetMessages() {
     setError(null);
     setFeedback(null);
+  }
+
+  function openDeregisterManagedAgentDialog() {
+    if (!selectedOwnedAgent) {
+      return;
+    }
+
+    if (!canDeregisterManagedAgent) {
+      setError('Only confirmed managed inbox-agent registrations can be deregistered.');
+      return;
+    }
+
+    if (!canManageSelectedAgent) {
+      setError(writeAccess.reason ?? 'Your current session is read-only.');
+      return;
+    }
+
+    resetMessages();
+    setDeregisterConfirmationSlug('');
+    setShowDeregisterAgentDialog(true);
   }
 
   async function handleCreateAgent(event: React.FormEvent<HTMLFormElement>) {
@@ -379,7 +450,7 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
       return;
     }
 
-    setInboxAgentBusy(true);
+    setInboxAgentAction('register');
     resetMessages();
 
     try {
@@ -415,7 +486,64 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
           : 'Registration failed'
       );
     } finally {
-      setInboxAgentBusy(false);
+      setInboxAgentAction(null);
+    }
+  }
+
+  async function handleDeregisterManagedAgent() {
+    if (!session || !selectedOwnedAgent) {
+      return;
+    }
+
+    if (!canDeregisterManagedAgent) {
+      setError('Only confirmed managed inbox-agent registrations can be deregistered.');
+      return;
+    }
+
+    if (!canManageSelectedAgent) {
+      setError(writeAccess.reason ?? 'Your current session is read-only.');
+      return;
+    }
+
+    if (!deregisterConfirmationMatches) {
+      setError(`Type ${selectedOwnedAgent.slug} to confirm deregistration.`);
+      return;
+    }
+
+    setInboxAgentAction('deregister');
+    resetMessages();
+    setShowDeregisterAgentDialog(false);
+    setDeregisterConfirmationSlug('');
+
+    try {
+      const result = await deregisterBrowserInboxAgent({
+        session,
+        actor: selectedOwnedAgent,
+        persistRegistration: async payload => {
+          await Promise.resolve(upsertMasumiInboxAgentRegistrationReducer(payload));
+        },
+      });
+      setManagedAgentRegistration(result.registration);
+      if (
+        result.registration.registrationState === 'DeregistrationRequested' ||
+        result.registration.registrationState === 'DeregistrationInitiated'
+      ) {
+        setFeedback(
+          'Deregistration submitted. It may take a moment to finish on the Masumi network.'
+        );
+      } else if (result.registration.registrationState === 'DeregistrationConfirmed') {
+        setFeedback('Deregistration is confirmed on the Masumi network.');
+      } else if (result.registration.error) {
+        setError(result.registration.error);
+      }
+    } catch (deregistrationError) {
+      setError(
+        deregistrationError instanceof Error
+          ? deregistrationError.message
+          : 'Deregistration failed'
+      );
+    } finally {
+      setInboxAgentAction(null);
     }
   }
 
@@ -600,6 +728,85 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
             </DialogContent>
           </Dialog>
 
+          <Dialog
+            open={showDeregisterAgentDialog}
+            onOpenChange={open => {
+              if (inboxAgentBusy) {
+                return;
+              }
+              setShowDeregisterAgentDialog(open);
+              if (!open) {
+                setDeregisterConfirmationSlug('');
+              }
+            }}
+          >
+            <DialogContent className="max-w-md border-destructive/30 bg-background/95">
+              <DialogHeader>
+                <DialogTitle>Deregister managed agent</DialogTitle>
+                <DialogDescription>
+                  This removes the selected agent from Masumi network discovery.
+                </DialogDescription>
+              </DialogHeader>
+              {selectedOwnedAgent ? (
+                <form
+                  className="space-y-4"
+                  onSubmit={event => {
+                    event.preventDefault();
+                    void handleDeregisterManagedAgent();
+                  }}
+                >
+                  <Alert variant="destructive">
+                    <AlertTitle>Confirm deregistration</AlertTitle>
+                    <AlertDescription>
+                      /{selectedOwnedAgent.slug} will no longer be available for new chats
+                      through Masumi discovery. Local inbox history and the SpacetimeDB agent
+                      row remain in place.
+                    </AlertDescription>
+                  </Alert>
+                  <div className="space-y-2">
+                    <Label htmlFor="deregister-confirm-slug">
+                      Type the agent slug to continue
+                    </Label>
+                    <Input
+                      id="deregister-confirm-slug"
+                      value={deregisterConfirmationSlug}
+                      onChange={event =>
+                        setDeregisterConfirmationSlug(event.target.value)
+                      }
+                      placeholder={selectedOwnedAgent.slug}
+                      disabled={inboxAgentBusy}
+                      className="font-mono"
+                    />
+                  </div>
+                  <DialogFooter>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setShowDeregisterAgentDialog(false)}
+                      disabled={inboxAgentBusy}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="submit"
+                      variant="destructive"
+                      disabled={
+                        inboxAgentBusy ||
+                        !canDeregisterManagedAgent ||
+                        !deregisterConfirmationMatches
+                      }
+                    >
+                      <Trash className="h-4 w-4" />
+                      {inboxAgentAction === 'deregister'
+                        ? 'Deregistering...'
+                        : 'Deregister agent'}
+                    </Button>
+                  </DialogFooter>
+                </form>
+              ) : null}
+            </DialogContent>
+          </Dialog>
+
           {(feedback || error) ? (
             <div className="space-y-2">
               {feedback ? (
@@ -664,6 +871,9 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
                         ownedAgentRegistrationRefresh.refreshKey
                   );
                 const rowIsRegistered = rowRegistration.status === 'registered';
+                const rowIsDeregistered = isDeregisteringOrDeregisteredInboxAgentState(
+                  rowRegistration.registrationState
+                );
                 const rowIsPending = rowRegistration.status === 'pending';
                 const rowHasError =
                   rowRegistration.error !== null ||
@@ -674,20 +884,26 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
                   ? 'Refreshing'
                   : rowHasError
                     ? 'Error'
+                    : rowIsDeregistered
+                      ? rowRegistration.registrationState === 'DeregistrationConfirmed'
+                        ? 'Deregistered'
+                        : 'Deregistering'
                     : rowIsRegistered
-                    ? 'Registered'
+                      ? 'Registered'
                     : rowIsPending
                       ? 'Pending'
-                        : 'Unregistered';
+                      : 'Unregistered';
                 const statusClass = rowRegistrationRefreshPending
                   ? 'bg-muted text-muted-foreground ring-border'
                   : rowHasError
                     ? 'bg-rose-500/10 text-rose-500 ring-rose-500/30'
+                    : rowIsDeregistered
+                      ? 'bg-slate-500/10 text-slate-500 ring-slate-500/30'
                     : rowIsRegistered
-                    ? 'bg-emerald-500/10 text-emerald-500 ring-emerald-500/30'
+                      ? 'bg-emerald-500/10 text-emerald-500 ring-emerald-500/30'
                     : rowIsPending
                       ? 'bg-sky-500/10 text-sky-500 ring-sky-500/30'
-                        : 'bg-amber-500/10 text-amber-500 ring-amber-500/30';
+                      : 'bg-amber-500/10 text-amber-500 ring-amber-500/30';
 
                 return (
                   <div
@@ -703,13 +919,20 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
                       <button
                         type="button"
                         onClick={() => {
+                          if (entry.deregistered) {
+                            return;
+                          }
                           void navigate({
                             to: '/$slug',
                             params: { slug: actor.slug },
                             search: buildWorkspaceSearch({}),
                           });
                         }}
-                        className="flex min-w-0 flex-1 items-start gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                        disabled={entry.deregistered}
+                        className={cn(
+                          'flex min-w-0 flex-1 items-start gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+                          entry.deregistered && 'cursor-not-allowed opacity-70'
+                        )}
                       >
                         <AgentAvatar
                           name={describeActor(actor)}
@@ -750,6 +973,8 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
                                     ? 'bg-muted-foreground'
                                     : rowHasError
                                       ? 'bg-rose-500'
+                                      : rowIsDeregistered
+                                        ? 'bg-slate-500'
                                       : rowIsRegistered
                                       ? 'bg-emerald-500'
                                       : 'bg-amber-500'
@@ -804,6 +1029,34 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
                           }
                           className="space-y-3"
                         >
+                          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border/60 bg-background/70 p-3">
+                            <div className="min-w-0">
+                              <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+                                Selected agent
+                              </p>
+                              <p className="mt-1 truncate text-sm font-medium text-foreground">
+                                /{selectedOwnedAgent.slug}
+                              </p>
+                            </div>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="destructive"
+                              className="gap-1.5"
+                              onClick={openDeregisterManagedAgentDialog}
+                              disabled={
+                                !canManageSelectedAgent ||
+                                inboxAgentBusy ||
+                                !canDeregisterManagedAgent
+                              }
+                            >
+                              <Trash className="h-3.5 w-3.5" />
+                              {inboxAgentAction === 'deregister'
+                                ? 'Deregistering...'
+                                : 'Deregister'}
+                            </Button>
+                          </div>
+
                           <TabsList className="h-8 w-auto justify-start gap-0.5 rounded-lg bg-muted/50 p-0.5">
                             <TabsTrigger
                               value="profile"
@@ -998,16 +1251,7 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
                               </p>
                               <div className="flex flex-wrap items-center gap-2">
                                 <Badge variant="secondary" className="text-[10px]">
-                                  {managedAgentRegistration.status === 'registered'
-                                    ? 'Registered'
-                                    : managedAgentRegistration.status === 'pending'
-                                      ? 'Pending'
-                                      : managedAgentRegistration.status === 'failed' ||
-                                          managedAgentRegistration.status ===
-                                            'service_unavailable' ||
-                                          managedAgentRegistration.status === 'scope_missing'
-                                        ? 'Error'
-                                        : 'Not registered'}
+                                  {getManagedRegistrationLabel(managedAgentRegistration)}
                                 </Badge>
                                 {managedAgentRegistration.creditsRemaining !== null &&
                                 managedAgentRegistration.creditsRemaining !== undefined ? (
@@ -1038,7 +1282,23 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
                                 </p>
                               ) : null}
 
-                              {managedAgentRegistration.status === 'skipped' ? (
+                              {isDeregisteringOrDeregisteredInboxAgentState(
+                                managedAgentRegistration.registrationState
+                              ) ? (
+                                <Alert>
+                                  <AlertTitle>Deregistration in progress</AlertTitle>
+                                  <AlertDescription>
+                                    This agent is deregistering or deregistered
+                                    on Masumi and cannot be used as an active
+                                    inbox agent.
+                                  </AlertDescription>
+                                </Alert>
+                              ) : null}
+
+                              {managedAgentRegistration.status === 'skipped' &&
+                              !isDeregisteringOrDeregisteredInboxAgentState(
+                                managedAgentRegistration.registrationState
+                              ) ? (
                                 <Alert>
                                   <AlertTitle>Not registered yet</AlertTitle>
                                   <AlertDescription>
@@ -1075,19 +1335,37 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
                                 </div>
                               ) : null}
 
-                              <Button
-                                size="sm"
-                                onClick={() => void handleRegisterManagedAgent()}
-                                disabled={
-                                  !canManageSelectedAgent ||
-                                  inboxAgentBusy ||
-                                  !canRegisterManagedAgent
-                                }
-                              >
-                                {inboxAgentBusy
-                                  ? 'Registering…'
-                                  : 'Register managed agent'}
-                              </Button>
+                              <div className="flex flex-wrap gap-2">
+                                <Button
+                                  size="sm"
+                                  onClick={() => void handleRegisterManagedAgent()}
+                                  disabled={
+                                    !canManageSelectedAgent ||
+                                    inboxAgentBusy ||
+                                    !canRegisterManagedAgent
+                                  }
+                                >
+                                  {inboxAgentAction === 'register'
+                                    ? 'Registering…'
+                                    : 'Register managed agent'}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="gap-1.5"
+                                  onClick={openDeregisterManagedAgentDialog}
+                                  disabled={
+                                    !canManageSelectedAgent ||
+                                    inboxAgentBusy ||
+                                    !canDeregisterManagedAgent
+                                  }
+                                >
+                                  <Trash className="h-3.5 w-3.5" />
+                                  {inboxAgentAction === 'deregister'
+                                    ? 'Deregistering…'
+                                    : 'Deregister'}
+                                </Button>
+                              </div>
                             </div>
                           </TabsContent>
                         </Tabs>

@@ -1,5 +1,8 @@
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
-import type { MasumiInboxAgentEntry } from '../../../shared/inbox-agent-registration';
+import type {
+  MasumiInboxAgentEntry,
+  MasumiInboxAgentState,
+} from '../../../shared/inbox-agent-registration';
 import type {
   PublishedAgentLookupRow,
   PublishedPublicRouteRow,
@@ -26,6 +29,7 @@ export type DiscoverSearchItem = {
   publicIdentity: string | null;
   isDefault: boolean | null;
   agentIdentifier: string | null;
+  registrationState: MasumiInboxAgentState;
   inboxPublished: boolean | null;
 };
 
@@ -74,6 +78,11 @@ export type DiscoverShowResult = {
       messagePreviewVisibleBeforeApproval: boolean;
     };
   };
+};
+
+type DiscoverEnrichment = {
+  actor: PublishedAgentLookupRow | null;
+  publicRoute: PublishedPublicRouteRow | null;
 };
 
 function normalizeQuery(query: string | undefined): string | null {
@@ -278,14 +287,20 @@ function dedupeMasumiAgentsBySlug(entries: MasumiInboxAgentEntry[]): MasumiInbox
 function toDiscoverSearchItem(params: {
   entry: MasumiInboxAgentEntry;
   actor?: PublishedAgentLookupRow | null;
+  publicRoute?: PublishedPublicRouteRow | null;
 }): DiscoverSearchItem {
   return {
     slug: normalizeInboxSlug(params.entry.agentSlug) ?? params.entry.agentSlug.trim(),
     displayName: params.actor?.displayName ?? params.entry.name ?? null,
-    description: params.entry.description ?? null,
+    description: params.publicRoute?.description ?? null,
     publicIdentity: params.actor?.publicIdentity ?? null,
     isDefault: params.actor?.isDefault ?? null,
-    agentIdentifier: params.actor?.agentIdentifier ?? params.entry.agentIdentifier ?? null,
+    agentIdentifier:
+      params.actor?.agentIdentifier ??
+      params.publicRoute?.agentIdentifier ??
+      params.entry.agentIdentifier ??
+      null,
+    registrationState: params.entry.state,
     inboxPublished: params.actor ? true : null,
   };
 }
@@ -300,8 +315,10 @@ async function loadDiscoverSearchItems(params: {
     return [];
   }
 
-  let conn: Awaited<ReturnType<typeof connectAuthenticated>>['conn'] | null = null;
-
+  // Connection failures are a real outage — surface them as a connectivity
+  // error so the user can distinguish "SpacetimeDB is unreachable" from
+  // "this agent simply has no published public route yet".
+  let conn: Awaited<ReturnType<typeof connectAuthenticated>>['conn'];
   try {
     conn = (
       await connectAuthenticated({
@@ -310,34 +327,55 @@ async function loadDiscoverSearchItems(params: {
         sessionToken: params.sessionToken,
       })
     ).conn;
+  } catch (error) {
+    throw connectivityError(
+      'Unable to reach SpacetimeDB to enrich Masumi discover results.',
+      {
+        code: 'DISCOVER_ENRICHMENT_UNAVAILABLE',
+        cause: error,
+      }
+    );
+  }
 
-    const actors = await Promise.all(
+  try {
+    // Per-slug enrichment already tolerates individual lookup misses via
+    // `.catch(() => null)` inside loadDiscoverEnrichment, so a missing
+    // public route does not fail the page.
+    const enrichedRows = await Promise.all(
       params.entries.map(async entry => {
         const normalizedSlug = normalizeInboxSlug(entry.agentSlug) ?? entry.agentSlug.trim();
-        return tryLookupPublishedActorBySlug(conn!, normalizedSlug);
+        return loadDiscoverEnrichment(conn, normalizedSlug);
       })
     );
 
     return params.entries.map((entry, index) =>
       toDiscoverSearchItem({
         entry,
-        actor: actors[index] ?? null,
+        actor: enrichedRows[index]?.actor ?? null,
+        publicRoute: enrichedRows[index]?.publicRoute ?? null,
       })
     );
-  } catch {
-    return params.entries.map(entry => toDiscoverSearchItem({ entry }));
   } finally {
-    if (conn) {
-      disconnectConnection(conn);
-    }
+    disconnectConnection(conn);
   }
 }
 
-async function tryLookupPublishedActorBySlug(
+async function loadDiscoverEnrichment(
   conn: Awaited<ReturnType<typeof connectAuthenticated>>['conn'],
   slug: string
-): Promise<PublishedAgentLookupRow | null> {
-  return (await conn.procedures.lookupPublishedAgentBySlug({ slug }))[0] ?? null;
+): Promise<DiscoverEnrichment> {
+  const [actor, publicRoute] = await Promise.all([
+    conn.procedures
+      .lookupPublishedAgentBySlug({ slug })
+      .then(rows => rows[0] ?? null)
+      .catch(() => null),
+    conn.procedures
+      .lookupPublishedPublicRouteBySlug({ slug })
+      .then(rows => rows[0] ?? null)
+      .catch(() => null),
+  ]);
+
+  return { actor, publicRoute };
 }
 
 function toPublicRoute(route: PublishedPublicRouteRow | null): DiscoverShowResult['publicRoute'] {
@@ -475,7 +513,6 @@ export async function showDiscoveredAgent(params: {
     );
   }
 
-  const matchedActors = remoteMatches.map(entry => toDiscoverSearchItem({ entry }));
   const selectedRemoteMatch =
     (inputKind === 'slug'
       ? remoteMatches.find(entry => {
@@ -499,57 +536,73 @@ export async function showDiscoveredAgent(params: {
   }
 
   let conn: Awaited<ReturnType<typeof connectAuthenticated>>['conn'] | null = null;
-  let selectedActor: PublishedAgentLookupRow | null = null;
+  const enrichmentBySlug = new Map<string, DiscoverEnrichment>();
 
   try {
-    if (inputKind === 'slug') {
-      conn = (
-        await connectAuthenticated({
-          host: profile.spacetimeHost,
-          databaseName: profile.spacetimeDbName,
-          sessionToken: session.idToken,
-        })
-      ).conn;
-      selectedActor = await tryLookupPublishedActorBySlug(conn, normalizedIdentifier);
-    }
+    conn = (
+      await connectAuthenticated({
+        host: profile.spacetimeHost,
+        databaseName: profile.spacetimeDbName,
+        sessionToken: session.idToken,
+      })
+    ).conn;
+    const activeConn = conn;
 
-    const selected = toDiscoverSearchItem({
-      entry: selectedRemoteMatch,
-      actor: selectedActor,
-    });
-    const route =
-      conn && selectedActor
-        ? (
-            await conn.procedures.lookupPublishedPublicRouteBySlug({
-              slug: selected.slug,
-            })
-          )[0] ?? null
-        : null;
-
-    return {
-      profile: profile.name,
-      agentSlug: agentSlug ?? null,
-      identifier: params.identifier,
-      detailScope: inputKind === 'slug' ? 'slug_enriched' : 'saas_only',
-      matchedActors,
-      selected: {
-        ...selected,
-        encryptionKeyVersion: selectedActor?.encryptionKeyVersion ?? null,
-        signingKeyVersion: selectedActor?.signingKeyVersion ?? null,
-      },
-      publicRoute: toPublicRoute(route),
-    };
+    await Promise.all(
+      remoteMatches.map(async entry => {
+        const slug = normalizeInboxSlug(entry.agentSlug) ?? entry.agentSlug.trim();
+        enrichmentBySlug.set(slug, await loadDiscoverEnrichment(activeConn, slug));
+      })
+    );
   } catch (error) {
     if (isCliError(error)) {
       throw error;
     }
-    throw connectivityError('Unable to load the public agent details.', {
-      code: 'DISCOVER_SHOW_FAILED',
-      cause: error,
-    });
+    throw connectivityError(
+      'Unable to load the public agent details from SpacetimeDB.',
+      {
+        code: 'DISCOVER_SHOW_FAILED',
+        cause: error,
+      }
+    );
   } finally {
     if (conn) {
       disconnectConnection(conn);
     }
   }
+
+  const selectedSlug =
+    normalizeInboxSlug(selectedRemoteMatch.agentSlug) ?? selectedRemoteMatch.agentSlug.trim();
+  const selectedEnrichment = enrichmentBySlug.get(selectedSlug);
+  const selectedActor = selectedEnrichment?.actor ?? null;
+  const route = selectedEnrichment?.publicRoute ?? null;
+
+  const selected = toDiscoverSearchItem({
+    entry: selectedRemoteMatch,
+    actor: selectedActor,
+    publicRoute: route,
+  });
+  const matchedActors = remoteMatches.map(entry => {
+    const slug = normalizeInboxSlug(entry.agentSlug) ?? entry.agentSlug.trim();
+    const enrichment = enrichmentBySlug.get(slug);
+    return toDiscoverSearchItem({
+      entry,
+      actor: enrichment?.actor ?? null,
+      publicRoute: enrichment?.publicRoute ?? null,
+    });
+  });
+
+  return {
+    profile: profile.name,
+    agentSlug: agentSlug ?? null,
+    identifier: params.identifier,
+    detailScope: selectedActor || route ? 'slug_enriched' : 'saas_only',
+    matchedActors,
+    selected: {
+      ...selected,
+      encryptionKeyVersion: selectedActor?.encryptionKeyVersion ?? null,
+      signingKeyVersion: selectedActor?.signingKeyVersion ?? null,
+    },
+    publicRoute: toPublicRoute(route),
+  };
 }

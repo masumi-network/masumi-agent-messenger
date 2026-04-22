@@ -9,6 +9,7 @@ function item(overrides: Partial<DiscoverSearchItem> & Pick<DiscoverSearchItem, 
     publicIdentity: overrides.publicIdentity ?? null,
     isDefault: overrides.isDefault ?? null,
     agentIdentifier: overrides.agentIdentifier ?? null,
+    registrationState: overrides.registrationState ?? 'RegistrationConfirmed',
     inboxPublished: overrides.inboxPublished ?? null,
   };
 }

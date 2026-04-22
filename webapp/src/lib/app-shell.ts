@@ -1,5 +1,6 @@
 import type { ActorLike } from '../../../shared/inbox-state';
 import {
+  isDeregisteringOrDeregisteredMasumiRegistrationMetadata,
   isMasumiInboxAgentState,
   registrationResultFromMetadata,
   type MasumiActorRegistrationMetadata,
@@ -124,6 +125,7 @@ export type OwnedInboxAgentEntry<Actor extends OwnedInboxActorLike> = {
   actor: Actor;
   managed: boolean;
   registered: boolean;
+  deregistered: boolean;
 };
 
 export type ContactRequestLike = {
@@ -318,6 +320,7 @@ export function buildOwnedInboxAgentEntries<Actor extends OwnedInboxActorLike>(p
         actor,
         managed: metadata !== null,
         registered: registration.status === 'registered',
+        deregistered: isDeregisteringOrDeregisteredMasumiRegistrationMetadata(metadata),
       };
     });
 }
@@ -342,11 +345,34 @@ export function resolveShellInboxSlug<Actor extends OwnedInboxActorLike>(
   ownedEntries: OwnedInboxAgentEntry<Actor>[],
   preferredSlug?: string | null
 ): string | null {
-  if (preferredSlug && ownedEntries.some(entry => entry.actor.slug === preferredSlug)) {
+  const usableEntries = ownedEntries.filter(entry => !entry.deregistered);
+  if (preferredSlug && usableEntries.some(entry => entry.actor.slug === preferredSlug)) {
     return preferredSlug;
   }
 
-  return ownedEntries[0]?.actor.slug ?? null;
+  return usableEntries[0]?.actor.slug ?? null;
+}
+
+function isUsableOwnedInboxAgent<Actor extends OwnedInboxActorLike>(
+  entry: OwnedInboxAgentEntry<Actor> | undefined
+): entry is OwnedInboxAgentEntry<Actor> {
+  return Boolean(entry && !entry.deregistered);
+}
+
+function findUsableDefaultActor<Actor extends OwnedInboxActorLike>(
+  ownedEntries: OwnedInboxAgentEntry<Actor>[],
+  existingDefaultActor: Actor | null
+): Actor | null {
+  if (
+    existingDefaultActor &&
+    !isDeregisteringOrDeregisteredMasumiRegistrationMetadata(
+      readActorRegistrationMetadata(existingDefaultActor)
+    )
+  ) {
+    return existingDefaultActor;
+  }
+
+  return ownedEntries.find(entry => !entry.deregistered)?.actor ?? null;
 }
 
 export function buildWorkspaceSearch(params: {
@@ -409,12 +435,12 @@ export function resolveWorkspaceSnapshot<
     ownInboxId: ownedInbox?.id ?? null,
     normalizedEmail,
   });
+  const selectedEntry = params.selectedSlug
+    ? ownedInboxAgents.find(entry => entry.actor.slug === params.selectedSlug)
+    : undefined;
   const selectedActor =
-    (params.selectedSlug
-      ? ownedInboxAgents.find(entry => entry.actor.slug === params.selectedSlug)?.actor
-      : null) ??
-    existingDefaultActor ??
-    null;
+    (isUsableOwnedInboxAgent(selectedEntry) ? selectedEntry.actor : null) ??
+    findUsableDefaultActor(ownedInboxAgents, existingDefaultActor);
   const shellInboxSlug = resolveShellInboxSlug(
     ownedInboxAgents,
     selectedActor?.slug ?? existingDefaultActor?.slug ?? null
@@ -423,7 +449,7 @@ export function resolveWorkspaceSnapshot<
     contactRequests: params.contactRequests,
     threadInvites: params.threadInvites ?? [],
     ownedActors: ownedInboxAgents.map(entry => entry.actor),
-    selectedSlug: params.selectedSlug ?? undefined,
+    selectedSlug: selectedActor?.slug,
   });
 
   return {

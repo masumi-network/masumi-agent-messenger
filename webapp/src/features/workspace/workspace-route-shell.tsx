@@ -136,12 +136,14 @@ export function WorkspaceRouteShell({
       pendingApprovals={workspace.approvalView.pendingIncomingCount}
       channelNavEntries={workspace.channelNavEntries}
       selectedChannelSlug={selectedChannelSlug}
-      ownedAgents={workspace.ownedInboxAgents.map(entry => ({
-        id: entry.actor.id,
-        slug: entry.actor.slug,
-        displayName: entry.actor.displayName,
-        publicIdentity: entry.actor.publicIdentity,
-      }))}
+      ownedAgents={workspace.ownedInboxAgents
+        .filter(entry => !entry.deregistered)
+        .map(entry => ({
+          id: entry.actor.id,
+          slug: entry.actor.slug,
+          displayName: entry.actor.displayName,
+          publicIdentity: entry.actor.publicIdentity,
+        }))}
     >
       {typeof children === 'function' ? children(workspace) : children}
     </InboxShell>

@@ -1,5 +1,6 @@
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import {
+  isDeregisteringOrDeregisteredMasumiRegistrationMetadata,
   isMasumiInboxAgentState,
   registrationResultFromMetadata,
   type MasumiActorRegistrationMetadata,
@@ -41,6 +42,7 @@ export type OwnedAgentSummary = {
   isActive: boolean;
   managed: boolean;
   registered: boolean;
+  deregistered: boolean;
 };
 
 export type OwnedAgentProfile = OwnedAgentSummary & {
@@ -61,7 +63,7 @@ export type OwnedAgentMessageCapabilities = {
 
 export type OwnedAgentListResult = {
   profile: string;
-  activeAgentSlug: string;
+  activeAgentSlug: string | null;
   agents: OwnedAgentSummary[];
 };
 
@@ -155,7 +157,27 @@ function toOwnedAgentSummary(
     isActive: actor.slug === activeAgentSlug,
     managed: metadata !== null,
     registered: registration.status === 'registered',
+    deregistered: isDeregisteredOwnedActor(actor),
   };
+}
+
+function isDeregisteredOwnedActor(actor: VisibleAgentRow): boolean {
+  return isDeregisteringOrDeregisteredMasumiRegistrationMetadata(
+    readActorRegistrationMetadata(actor)
+  );
+}
+
+function assertActorCanBeActive(actor: VisibleAgentRow): void {
+  if (!isDeregisteredOwnedActor(actor)) {
+    return;
+  }
+
+  throw userError(
+    `Agent \`${actor.slug}\` is deregistering or deregistered and cannot be selected as the active agent.`,
+    {
+      code: 'AGENT_DEREGISTERED',
+    }
+  );
 }
 
 function toOwnedAgentProfile(
@@ -301,11 +323,24 @@ export async function listOwnedAgents(params: {
           })
         );
       }
-      const agents = refreshedActors.map(actor => toOwnedAgentSummary(actor, selectedSlug));
+      const refreshedActiveSlug =
+        refreshedActors.find(
+          actor => actor.slug === selectedSlug && !isDeregisteredOwnedActor(actor)
+        )?.slug ??
+        refreshedActors.find(actor => actor.isDefault && !isDeregisteredOwnedActor(actor))?.slug ??
+        refreshedActors.find(actor => !isDeregisteredOwnedActor(actor))?.slug ??
+        null;
+      if (refreshedActiveSlug && refreshedActiveSlug !== activeAgentSlug) {
+        await saveActiveAgentSlug(profile.name, refreshedActiveSlug);
+      }
+      const agents = refreshedActors.map(actor => toOwnedAgentSummary(actor, refreshedActiveSlug));
 
+      // If every owned agent is deregistered, surface null rather than a
+      // stale deregistered slug — downstream callers treat null as
+      // "no selectable agent" (matches channel/send guard semantics).
       return {
         profile: profile.name,
-        activeAgentSlug: selectedSlug,
+        activeAgentSlug: refreshedActiveSlug,
         agents,
       };
     } finally {
@@ -404,7 +439,6 @@ export async function useOwnedAgent(params: {
         normalizedEmail,
         actorSlug: params.actorSlug,
       });
-      await saveActiveAgentSlug(profile.name, actor.slug);
       const refreshedActor = await refreshOwnedAgentRegistration({
         profile,
         session,
@@ -412,10 +446,12 @@ export async function useOwnedAgent(params: {
         actor,
         reporter: params.reporter,
       });
+      assertActorCanBeActive(refreshedActor);
+      await saveActiveAgentSlug(profile.name, refreshedActor.slug);
       return {
         profile: profile.name,
-        activeAgentSlug: actor.slug,
-        agent: toOwnedAgentProfile(refreshedActor, actor.slug),
+        activeAgentSlug: refreshedActor.slug,
+        agent: toOwnedAgentProfile(refreshedActor, refreshedActor.slug),
       };
     } finally {
       subscription.unsubscribe();

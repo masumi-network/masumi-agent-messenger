@@ -13,6 +13,10 @@ import {
   summarizeThread,
 } from '../../../shared/inbox-state';
 import {
+  isDeregisteringOrDeregisteredInboxAgentState,
+  isFailedRegistrationInboxAgentState,
+} from '../../../shared/inbox-agent-registration';
+import {
   findUnsupportedMessageReasons,
   isJsonContentType,
   normalizeContentType,
@@ -51,6 +55,7 @@ import {
   readMessageRows,
   subscribeMessageTables,
 } from './spacetimedb';
+import { lookupMasumiInboxAgentBySlug } from './masumi-inbox-agent';
 
 type SendTargetSummary = {
   slug: string;
@@ -356,6 +361,14 @@ function requireOwnedActor(params: {
 }): VisibleAgentRow {
   const defaultActor = requireDefaultActor(params.actors, params.normalizedEmail);
   if (!params.actorSlug) {
+    if (isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState)) {
+      throw userError(
+        `Agent \`${defaultActor.slug}\` is deregistering or deregistered and cannot send chats.`,
+        {
+          code: 'AGENT_DEREGISTERED',
+        }
+      );
+    }
     return defaultActor;
   }
 
@@ -373,6 +386,15 @@ function requireOwnedActor(params: {
     throw userError(`No owned inbox actor found for slug \`${normalizedSlug}\`.`, {
       code: 'OWNED_ACTOR_NOT_FOUND',
     });
+  }
+
+  if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)) {
+    throw userError(
+      `Agent \`${actor.slug}\` is deregistering or deregistered and cannot send chats.`,
+      {
+        code: 'AGENT_DEREGISTERED',
+      }
+    );
   }
 
   return actor;
@@ -689,6 +711,40 @@ export async function sendMessageToSlug(params: {
         fallbackMessage: 'No published inbox actor found for that slug or email.',
       });
       const target = targetLookup.selected;
+      let networkTarget: Awaited<ReturnType<typeof lookupMasumiInboxAgentBySlug>> = null;
+      try {
+        networkTarget = await lookupMasumiInboxAgentBySlug({
+          issuer: profile.issuer,
+          session,
+          slug: target.slug,
+        });
+      } catch (lookupError) {
+        // Masumi registry lookup is advisory — failures must not block the
+        // send, but they also must not be silent. Surface at info level so
+        // operators see the degraded check even without --verbose.
+        const detail =
+          lookupError instanceof Error ? lookupError.message : String(lookupError);
+        params.reporter.info(
+          `Masumi registration state for ${target.slug} could not be verified (${detail}); continuing with the published inbox route.`
+        );
+      }
+      if (
+        isDeregisteringOrDeregisteredInboxAgentState(networkTarget?.state) ||
+        isFailedRegistrationInboxAgentState(networkTarget?.state)
+      ) {
+        const invalidRegistration = isFailedRegistrationInboxAgentState(networkTarget?.state);
+        const reason = invalidRegistration
+          ? 'has an invalid Masumi registration'
+          : 'is deregistering or deregistered';
+        throw userError(
+          `Agent \`${target.slug}\` ${reason} and cannot be used for chats.`,
+          {
+            code: invalidRegistration
+              ? 'AGENT_REGISTRATION_INVALID'
+              : 'AGENT_DEREGISTERED',
+          }
+        );
+      }
 
       if (target.publicIdentity === ownActor.publicIdentity) {
         throw userError('Use a different inbox slug or email for a direct thread.', {

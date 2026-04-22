@@ -269,6 +269,7 @@ describe('app shell helpers', () => {
     expect(ownedEntries.map(entry => entry.actor.slug)).toEqual(['default', 'custom']);
     expect(ownedEntries[0]?.managed).toBe(true);
     expect(ownedEntries[0]?.registered).toBe(true);
+    expect(ownedEntries[0]?.deregistered).toBe(false);
     expect(resolveShellInboxSlug(ownedEntries, 'custom')).toBe('custom');
     expect(resolveShellInboxSlug(ownedEntries, 'missing')).toBe('default');
   });
@@ -294,6 +295,97 @@ describe('app shell helpers', () => {
 
     expect(ownedEntries[0]?.managed).toBe(true);
     expect(ownedEntries[0]?.registered).toBe(false);
+    expect(ownedEntries[0]?.deregistered).toBe(false);
+  });
+
+  it('keeps deregistered owned agents visible but out of active selection', () => {
+    const ownedEntries = buildOwnedInboxAgentEntries({
+      actors: [
+        {
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'owner@example.com',
+          slug: 'old-agent',
+          isDefault: true,
+          publicIdentity: 'did:old',
+          masumiInboxAgentId: 'agent-old',
+          masumiAgentIdentifier: 'did:masumi:old',
+          masumiRegistrationState: 'DeregistrationConfirmed',
+        },
+        {
+          id: 2n,
+          inboxId: 10n,
+          normalizedEmail: 'owner@example.com',
+          slug: 'current-agent',
+          isDefault: false,
+          publicIdentity: 'did:current',
+        },
+      ],
+      ownInboxId: 10n,
+      normalizedEmail: 'owner@example.com',
+    });
+
+    expect(ownedEntries.map(entry => entry.actor.slug)).toEqual([
+      'old-agent',
+      'current-agent',
+    ]);
+    expect(ownedEntries[0]?.deregistered).toBe(true);
+    expect(resolveShellInboxSlug(ownedEntries, 'old-agent')).toBe('current-agent');
+
+    const snapshot = resolveWorkspaceSnapshot({
+      inboxes: [
+        {
+          id: 10n,
+          normalizedEmail: 'owner@example.com',
+          authIssuer: 'https://issuer.example',
+          authSubject: 'current-subject',
+        },
+      ],
+      actors: ownedEntries.map(entry => entry.actor),
+      contactRequests: [],
+      session: {
+        user: {
+          email: 'owner@example.com',
+          issuer: 'https://issuer.example',
+          subject: 'current-subject',
+        },
+      },
+      selectedSlug: 'old-agent',
+    });
+
+    expect(snapshot.selectedActor?.slug).toBe('current-agent');
+    expect(snapshot.shellInboxSlug).toBe('current-agent');
+  });
+
+  it('keeps agents with pending deregistration out of active selection', () => {
+    const ownedEntries = buildOwnedInboxAgentEntries({
+      actors: [
+        {
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'owner@example.com',
+          slug: 'leaving-agent',
+          isDefault: true,
+          publicIdentity: 'did:leaving',
+          masumiInboxAgentId: 'agent-leaving',
+          masumiAgentIdentifier: 'did:masumi:leaving',
+          masumiRegistrationState: 'DeregistrationRequested',
+        },
+        {
+          id: 2n,
+          inboxId: 10n,
+          normalizedEmail: 'owner@example.com',
+          slug: 'current-agent',
+          isDefault: false,
+          publicIdentity: 'did:current',
+        },
+      ],
+      ownInboxId: 10n,
+      normalizedEmail: 'owner@example.com',
+    });
+
+    expect(ownedEntries[0]?.deregistered).toBe(true);
+    expect(resolveShellInboxSlug(ownedEntries, 'leaving-agent')).toBe('current-agent');
   });
 
   it('parses optional route search helpers and canonical workspace tabs', () => {

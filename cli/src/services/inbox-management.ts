@@ -1,4 +1,7 @@
-import type { MasumiRegistrationResult } from '../../../shared/inbox-agent-registration';
+import {
+  isDeregisteringOrDeregisteredInboxAgentState,
+  type MasumiRegistrationResult,
+} from '../../../shared/inbox-agent-registration';
 import {
   buildDeviceShareContext,
   countSharedActors,
@@ -21,6 +24,7 @@ import {
 } from './device-keys';
 import {
   applyRegistrationMetadataToActor,
+  deregisterMasumiInboxAgentRegistration,
   syncMasumiInboxAgentRegistration,
   type ConfirmLinkedEmailPrompt,
   type ConfirmPublicDescriptionPrompt,
@@ -38,6 +42,18 @@ import {
   subscribeInboxTables,
 } from './spacetimedb';
 import type { VisibleAgentRow } from '../../../webapp/src/module_bindings/types';
+
+function describeUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message.trim();
+  }
+
+  if (typeof error === 'string') {
+    return error.trim();
+  }
+
+  return String(error).trim();
+}
 
 type CreatedInboxIdentity = {
   id: string;
@@ -64,6 +80,18 @@ export type RegisterInboxAgentResult = {
     publicIdentity: string;
   };
   registration: Awaited<ReturnType<typeof syncMasumiInboxAgentRegistration>>['registration'];
+};
+
+export type DeregisterInboxAgentResult = {
+  profile: string;
+  actor: {
+    id: string;
+    slug: string;
+    publicIdentity: string;
+  };
+  registration: Awaited<
+    ReturnType<typeof deregisterMasumiInboxAgentRegistration>
+  >['registration'];
 };
 
 export type RotateInboxKeysResult = {
@@ -338,6 +366,78 @@ export async function registerInboxAgent(params: {
   }
 }
 
+export async function deregisterInboxAgent(params: {
+  profileName: string;
+  actorSlug?: string;
+  reporter: TaskReporter;
+}): Promise<DeregisterInboxAgentResult> {
+  const { profile, session, claims } = await ensureAuthenticatedSession(params);
+  const normalizedEmail = normalizeEmail(claims.email ?? '');
+  if (!normalizedEmail) {
+    throw userError('Current OIDC session is missing an email claim.', {
+      code: 'OIDC_EMAIL_MISSING',
+    });
+  }
+
+  params.reporter.verbose?.('Connecting to SpacetimeDB');
+  const { conn } = await connectAuthenticated({
+    host: profile.spacetimeHost,
+    databaseName: profile.spacetimeDbName,
+    sessionToken: session.idToken,
+  });
+  params.reporter.verbose?.('Connected to SpacetimeDB');
+
+  try {
+    params.reporter.verbose?.('Subscribing to inbox state');
+    const subscription = await subscribeInboxTables(conn);
+
+    try {
+      const { actors } = readInboxRows(conn);
+      const actor = requireOwnedActor({
+        actors,
+        normalizedEmail,
+        actorSlug: params.actorSlug,
+      });
+      const registration = await deregisterMasumiInboxAgentRegistration({
+        profile,
+        session,
+        conn,
+        actor,
+        reporter: params.reporter,
+      });
+      const resolvedActor = applyRegistrationMetadataToActor(actor, registration.metadata);
+
+      return {
+        profile: profile.name,
+        actor: {
+          id: resolvedActor.id.toString(),
+          slug: resolvedActor.slug,
+          publicIdentity: resolvedActor.publicIdentity,
+        },
+        registration: registration.registration,
+      };
+    } finally {
+      subscription.unsubscribe();
+    }
+  } catch (error) {
+    if (isCliError(error)) {
+      throw error;
+    }
+    const detail = describeUnknownError(error);
+    throw connectivityError(
+      detail
+        ? `Unable to deregister the managed inbox-agent: ${detail}`
+        : 'Unable to deregister the managed inbox-agent.',
+      {
+        code: 'INBOX_AGENT_DEREGISTER_FAILED',
+        cause: error,
+      }
+    );
+  } finally {
+    disconnectConnection(conn);
+  }
+}
+
 export async function listRotationDeviceCandidates(params: {
   profileName: string;
   reporter: TaskReporter;
@@ -426,6 +526,14 @@ export async function rotateInboxKeys(params: {
         normalizedEmail,
         actorSlug: params.actorSlug,
       });
+      if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)) {
+        throw userError(
+          `Agent \`${actor.slug}\` is deregistering or deregistered and cannot rotate inbox keys.`,
+          {
+            code: 'AGENT_DEREGISTERED',
+          }
+        );
+      }
       const rotationPlan = await previewStoredActorKeyRotation({
         profile,
         secretStore,

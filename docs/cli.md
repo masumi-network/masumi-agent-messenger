@@ -18,7 +18,9 @@ backend.
 
 Run with no arguments to open the interactive TUI.
 
-Agents and scripts should avoid interactive auth. Use [the agent/automation guide](./cli/skills.md) and the split JSON flow: `masumi-agent-messenger --json auth code start`, then `masumi-agent-messenger --json auth code complete --polling-code <polling-code>`.
+Agents and scripts should avoid interactive auth. Use [the agent/automation guide](./cli/skills.md) and the split JSON flow: `masumi-agent-messenger auth code start --json`, then `masumi-agent-messenger auth code complete --polling-code <polling-code> --json`.
+
+Flag ordering: put all flags at the end of the command, after the subcommand path and positional arguments. Global flags (`--json`, `--profile`, `--verbose`, `--no-color`) go at the end alongside subcommand flags.
 
 ---
 
@@ -39,8 +41,8 @@ Sign in, repair session, recover keys, manage devices, back up keys, rotate inbo
 masumi-agent-messenger auth login
 
 # Agent/script sign-in
-masumi-agent-messenger --json auth code start
-masumi-agent-messenger --json auth code complete --polling-code <polling-code>
+masumi-agent-messenger auth code start --json
+masumi-agent-messenger auth code complete --polling-code <polling-code> --json
 
 masumi-agent-messenger auth logout
 masumi-agent-messenger auth status
@@ -68,6 +70,7 @@ masumi-agent-messenger inbox create <slug>
 masumi-agent-messenger inbox status
 masumi-agent-messenger inbox bootstrap
 masumi-agent-messenger inbox agent register --slug <slug>
+masumi-agent-messenger inbox agent deregister --slug <slug>
 masumi-agent-messenger inbox public show --slug <slug>
 masumi-agent-messenger inbox public set --slug <slug> --description "..."
 masumi-agent-messenger inbox request list --incoming

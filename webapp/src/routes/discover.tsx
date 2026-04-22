@@ -10,6 +10,7 @@ import {
 import { AgentAvatar } from '@/components/inbox/agent-avatar';
 import { EmptyState } from '@/components/inbox/empty-state';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -20,6 +21,12 @@ import {
 } from '@/lib/published-actor-search';
 import { useWorkspaceShell } from '@/features/workspace/use-workspace-shell';
 import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell';
+import type { DbConnection } from '@/module_bindings';
+import {
+  isDeregisteringOrDeregisteredInboxAgentState,
+  isFailedRegistrationInboxAgentState,
+  isPendingMasumiInboxAgentState,
+} from '../../../shared/inbox-agent-registration';
 
 export const Route = createFileRoute('/discover')({
   head: () =>
@@ -40,6 +47,28 @@ function discoveredAgentKey(actor: DiscoveredNetworkAgent): string {
   return actor.slug;
 }
 
+function getDiscoveredAgentBadge(actor: DiscoveredNetworkAgent): {
+  label: string;
+  variant: 'secondary' | 'outline' | 'soft-warning' | 'soft-danger';
+} | null {
+  if (isFailedRegistrationInboxAgentState(actor.registrationState)) {
+    return { label: 'Invalid', variant: 'soft-danger' };
+  }
+  if (isDeregisteringOrDeregisteredInboxAgentState(actor.registrationState)) {
+    return {
+      label:
+        actor.registrationState === 'DeregistrationConfirmed'
+          ? 'Deregistered'
+          : 'Deregistering',
+      variant: 'outline',
+    };
+  }
+  if (isPendingMasumiInboxAgentState(actor.registrationState)) {
+    return { label: 'Pending', variant: 'soft-warning' };
+  }
+  return actor.agentIdentifier ? { label: 'Registered', variant: 'secondary' } : null;
+}
+
 type DiscoveryResultState = {
   requestKey: string | null;
   agents: DiscoveredNetworkAgent[];
@@ -51,6 +80,10 @@ function DiscoverPage() {
   const navigate = useNavigate();
   const workspace = useWorkspaceShell();
   const session = workspace.status === 'ready' ? workspace.session : null;
+  const liveConnection =
+    workspace.status === 'ready'
+      ? (workspace.conn.getConnection?.() as DbConnection | null)
+      : null;
 
   const [searchQuery, setSearchQuery] = useState('');
   const [discoveryPage, setDiscoveryPage] = useState(1);
@@ -65,7 +98,9 @@ function DiscoverPage() {
     ? `${session.user.issuer}|${session.user.subject}`
     : null;
   const discoveryRequestKey = sessionKey
-    ? `${sessionKey}\u0000${deferredQuery}\u0000${discoveryPage}`
+    ? `${sessionKey}\u0000${deferredQuery}\u0000${discoveryPage}\u0000${
+        liveConnection ? 'live' : 'pending'
+      }`
     : null;
   const discoveryMatchesRequest =
     discoveryRequestKey !== null && discoveryState.requestKey === discoveryRequestKey;
@@ -105,6 +140,7 @@ function DiscoverPage() {
       session,
       take: 20,
       page: discoveryPage,
+      liveConnection,
     })
       .then(result => {
         if (cancelled) return;
@@ -141,7 +177,7 @@ function DiscoverPage() {
     return () => {
       cancelled = true;
     };
-  }, [deferredQuery, discoveryPage, discoveryRequestKey, session]);
+  }, [deferredQuery, discoveryPage, discoveryRequestKey, liveConnection, session]);
 
   return (
     <WorkspaceRouteShell
@@ -203,6 +239,7 @@ function DiscoverPage() {
                 const displayName = describeDiscoveredAgent(actor);
                 const description = actor.description?.trim();
                 const email = actor.linkedEmail?.trim();
+                const badge = getDiscoveredAgentBadge(actor);
 
                 return (
                   <Link
@@ -222,6 +259,11 @@ function DiscoverPage() {
                         <span className="truncate font-mono text-[11px] text-muted-foreground">
                           /{actor.slug}
                         </span>
+                        {badge ? (
+                          <Badge variant={badge.variant} className="text-[10px]">
+                            {badge.label}
+                          </Badge>
+                        ) : null}
                       </div>
                       {email ? (
                         <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">

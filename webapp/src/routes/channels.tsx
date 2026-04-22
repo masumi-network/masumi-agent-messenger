@@ -31,6 +31,7 @@ import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell'
 import { reducers, tables } from '@/module_bindings';
 import type { Agent, PublicChannel } from '@/module_bindings/types';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
+import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 
 export const Route = createFileRoute('/channels')({
   head: () =>
@@ -158,7 +159,17 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
   );
   const activeActor = useMemo(
     () =>
-      actors.find(actor => actor.isDefault && actor.normalizedEmail === normalizedSessionEmail) ??
+      actors.find(
+        actor =>
+          actor.isDefault &&
+          actor.normalizedEmail === normalizedSessionEmail &&
+          !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+      ) ??
+      actors.find(
+        actor =>
+          actor.normalizedEmail === normalizedSessionEmail &&
+          !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+      ) ??
       null,
     [actors, normalizedSessionEmail]
   );

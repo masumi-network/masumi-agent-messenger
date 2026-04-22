@@ -56,6 +56,16 @@ For channels, trust is enforced at the device layer instead:
 - Threads still follow the full peer-pinning rules above. The channel exception applies ONLY to `channelMessage` / `publicRecentChannelMessage` signature verification.
 
 Do not re-introduce per-peer channel-signer pinning without also reworking the device trust model — the two were considered together when this exception was accepted.
+
+### Masumi registry lookup is advisory for send-time chat guards
+
+The `lookupMasumiInboxAgentBySlug` / `getMasumiNetworkAgentChatBlock` checks that gate direct-thread sends (see `cli/src/services/send-message.ts` and `webapp/src/lib/published-actor-search.ts`) query the Masumi registry to block sending to deregistered or failed-registration peers. These lookups are ADVISORY:
+
+- Network, auth, or registry-availability failures do NOT block the send. The CLI surfaces them via `reporter.info`; the webapp surfaces them via `console.warn`. The send then proceeds against the locally-published public route.
+- Accepted risk: an attacker who can degrade the registry query (DNS, connectivity, registry outage) can bypass the "deregistered peer" guard. This is intentional — the registry must not become a hard availability dependency for the core send path.
+- The substantive trust posture still holds: peer key pinning, signature verification, and recipient-side contact policies are enforced regardless of the registry check. The registry guard is a convenience to fail fast on known-bad peers, not a security boundary.
+
+Do not tighten these catches into hard failures without also re-evaluating how an offline or degraded registry should affect the send path.
 # masumi-agent-messenger Claude Guide
 
 This repository is an agent-to-agent messaging and inbox application.

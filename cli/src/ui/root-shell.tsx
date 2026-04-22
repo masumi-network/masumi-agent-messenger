@@ -25,10 +25,18 @@ import {
   subscribeShellTables,
   type ShellRows,
 } from '../services/spacetimedb';
+import {
+  isDeregisteringOrDeregisteredInboxAgentState,
+  isFailedRegistrationInboxAgentState,
+  isPendingMasumiInboxAgentState,
+  isUnavailableForChatInboxAgentState,
+  type MasumiInboxAgentState,
+} from '../../../shared/inbox-agent-registration';
 import { formatRelativeTime } from '../services/format';
 import { toCliError } from '../services/errors';
 import {
   createInboxIdentity,
+  deregisterInboxAgent,
   registerInboxAgent,
   rotateInboxKeys,
 } from '../services/inbox-management';
@@ -321,9 +329,13 @@ const DEFAULT_SECURITY_STATE: ShellSecurityState = {
 const DEFAULT_AGENT_DISCOVERY_TAKE = 10;
 const THREAD_MESSAGE_WINDOW_SIZE = 4;
 const MAX_MESSAGE_BODY_LINES = 15;
+const MAX_TUI_DESCRIPTION_LINES = 4;
 const CHANNEL_MESSAGE_PAGE_SIZE = 8;
 const CHANNEL_MEMBER_PAGE_SIZE = 8;
 const TAB_CELL_WIDTH = 18;
+const TAB_CELL_GAP = 2;
+const SIDEBAR_WIDTH = 20;
+const SIDEBAR_CONTENT_WIDTH = SIDEBAR_WIDTH - 2;
 const CLEAR_ROW_TAIL = '            ';
 const DEFAULT_TERMINAL_COLUMNS = 80;
 const DEFAULT_TERMINAL_ROWS = 24;
@@ -492,6 +504,51 @@ function capTextToLines(text: string, maxLines: number): string[] {
   return capped;
 }
 
+function truncateText(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+
+  const chars = Array.from(text);
+  if (chars.length <= maxWidth) {
+    return text;
+  }
+
+  if (maxWidth === 1) {
+    return '…';
+  }
+
+  return `${chars.slice(0, maxWidth - 1).join('')}…`;
+}
+
+function truncateAndPadText(text: string, maxWidth: number): string {
+  const truncated = truncateText(text, maxWidth);
+  return `${truncated}${' '.repeat(Math.max(0, maxWidth - Array.from(truncated).length))}`;
+}
+
+function textWidth(text: string): number {
+  return Array.from(text).length;
+}
+
+function formatDiscoveryListRow(params: {
+  result: DiscoverSearchItem;
+  selected: boolean;
+  width: number;
+}): string {
+  const prefix = params.selected ? '▸ ' : '  ';
+  const state = describeDiscoveryRegistrationState(params.result.registrationState);
+  const suffix = ` · ${state}`;
+  const summary = params.result.displayName?.trim() || params.result.slug;
+  const identity = `${summary} · /${params.result.slug}`;
+  const identityWidth = Math.max(0, params.width - Array.from(prefix).length - suffix.length);
+  const body =
+    identityWidth > 0
+      ? `${truncateText(identity, identityWidth)}${suffix}`
+      : truncateText(`${identity}${suffix}`, Math.max(0, params.width - Array.from(prefix).length));
+
+  return truncateAndPadText(`${prefix}${body}`, params.width);
+}
+
 
 function parseCommaSeparated(value: string): string[] {
   return Array.from(
@@ -623,6 +680,8 @@ function describeManagedAgentRegistration(params: {
   switch (params.status) {
     case 'registered':
       return `Registered managed agent for ${params.slug}.`;
+    case 'deregistered':
+      return `Managed agent ${params.slug} is deregistered and cannot be used for chats.`;
     case 'already_registered_or_discovered':
       return `Registered managed agent for ${params.slug}.`;
     case 'pending':
@@ -645,6 +704,19 @@ function describeManagedAgentRegistration(params: {
   }
 }
 
+function describeDiscoveryRegistrationState(state: MasumiInboxAgentState): string {
+  if (isFailedRegistrationInboxAgentState(state)) {
+    return 'invalid';
+  }
+  if (isDeregisteringOrDeregisteredInboxAgentState(state)) {
+    return state === 'DeregistrationConfirmed' ? 'deregistered' : 'deregistering';
+  }
+  if (isPendingMasumiInboxAgentState(state)) {
+    return 'pending';
+  }
+  return 'registered';
+}
+
 function findOwnedActor(params: {
   rows: ShellRows;
   normalizedEmail: string;
@@ -656,13 +728,37 @@ function findOwnedActor(params: {
   }
 
   if (!params.slug) {
-    return defaultActor;
+    if (!isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState)) {
+      return defaultActor;
+    }
+    return (
+      params.rows.actors.find(
+        actor =>
+          actor.inboxId === defaultActor.inboxId &&
+          !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+      ) ?? null
+    );
   }
 
-  return (
+  const requestedActor =
     params.rows.actors.find(actor => {
       return actor.inboxId === defaultActor.inboxId && actor.slug === params.slug;
-    }) ?? defaultActor
+    }) ?? null;
+  if (
+    requestedActor &&
+    !isDeregisteringOrDeregisteredInboxAgentState(requestedActor.masumiRegistrationState)
+  ) {
+    return requestedActor;
+  }
+  if (!isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState)) {
+    return defaultActor;
+  }
+  return (
+    params.rows.actors.find(
+      actor =>
+        actor.inboxId === defaultActor.inboxId &&
+        !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+    ) ?? null
   );
 }
 
@@ -1316,160 +1412,371 @@ function useLiveChannelMessages(params: {
   };
 }
 
-const INK_SENDER_COLORS = ['cyan', 'magenta', 'yellow', 'green', 'blue', 'red'] as const;
-
-function senderInkColor(name: string): string {
-  let hash = 0;
-  for (let index = 0; index < name.length; index += 1) {
-    hash = (hash * 31 + name.charCodeAt(index)) | 0;
-  }
-  return INK_SENDER_COLORS[Math.abs(hash) % INK_SENDER_COLORS.length]!;
-}
-
 function renderList(params: {
   items: string[];
   selectedIndex: number;
   empty: string;
   color?: string;
+  maxWidth?: number;
 }) {
   if (params.items.length === 0) {
-    return <Text color="gray">{params.empty}</Text>;
+    return (
+      <Text color="gray" wrap="truncate">
+        {params.maxWidth ? truncateAndPadText(params.empty, params.maxWidth) : params.empty}
+      </Text>
+    );
   }
 
   return (
-    <Box flexDirection="column">
-      {params.items.map((item, index) => (
-        <Text
-          key={`${index}:${item}`}
-          color={index === params.selectedIndex ? 'cyan' : params.color}
-          bold={index === params.selectedIndex}
-        >
-          {index === params.selectedIndex ? '▸ ' : '  '}
-          {item}
+    <Box flexDirection="column" width={params.maxWidth}>
+      {params.items.map((item, index) => {
+        const selected = index === params.selectedIndex;
+        const row = `${selected ? '▸ ' : '  '}${item}`;
+        return (
+          <Text
+            key={`${index}:${item}`}
+            color={selected ? 'cyan' : params.color}
+            bold={selected}
+            wrap="truncate"
+          >
+            {params.maxWidth ? truncateAndPadText(row, params.maxWidth) : row}
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
+function renderDiscoveryResultList(params: {
+  results: DiscoverSearchItem[];
+  selectedIndex: number;
+  empty: string;
+  width: number;
+}) {
+  const width = Math.max(1, params.width);
+  if (params.results.length === 0) {
+    return (
+      <Text color="gray" wrap="truncate">
+        {truncateAndPadText(params.empty, width)}
+      </Text>
+    );
+  }
+
+  return (
+    <Box flexDirection="column" width={width}>
+      {params.results.map((result, index) => {
+        const selected = index === params.selectedIndex;
+        return (
+          <Text
+            key={`${index}:${result.slug}:${result.registrationState}`}
+            color={selected ? 'cyan' : undefined}
+            bold={selected}
+            wrap="truncate"
+          >
+            {formatDiscoveryListRow({
+              result,
+              selected,
+              width,
+            })}
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
+function DescriptionLines({
+  text,
+  empty = 'not set',
+  width,
+}: {
+  text?: string | null;
+  empty?: string;
+  width?: number;
+}) {
+  const trimmed = text?.trim() ?? '';
+  const lines = trimmed ? capTextToLines(trimmed, MAX_TUI_DESCRIPTION_LINES) : [];
+  const safeWidth = width ? Math.max(1, width) : undefined;
+
+  if (lines.length === 0) {
+    return (
+      <Text color="gray" wrap="truncate">
+        {safeWidth ? truncateAndPadText(empty, safeWidth) : empty}
+      </Text>
+    );
+  }
+
+  return (
+    <Box flexDirection="column" width={safeWidth}>
+      {lines.map((line, index) => (
+        <Text key={`${index}:${line}`} color="gray" wrap="truncate">
+          {safeWidth
+            ? truncateAndPadText(line.length > 0 ? line : ' ', safeWidth)
+            : line.length > 0
+              ? line
+              : ' '}
         </Text>
       ))}
     </Box>
+  );
+}
+
+function FixedLine({
+  text,
+  width,
+  color,
+  bold,
+  dimColor,
+}: {
+  text: string;
+  width?: number;
+  color?: string;
+  bold?: boolean;
+  dimColor?: boolean;
+}) {
+  const safeWidth = width ? Math.max(1, width) : undefined;
+  return (
+    <Text color={color} bold={bold} dimColor={dimColor} wrap="truncate">
+      {safeWidth ? truncateAndPadText(text, safeWidth) : text}
+    </Text>
   );
 }
 
 function TabStrip<T extends string>({
   tabs,
   active,
+  width,
 }: {
   tabs: Array<{ key: T; label: string; count?: number }>;
   active: T;
+  width?: number;
 }) {
+  const labels = tabs.map(tab => {
+    const isActive = tab.key === active;
+    return `${isActive ? '▸ ' : '  '}${tab.label}${
+      tab.count !== undefined ? ` ${tab.count.toString()}` : ''
+    }`;
+  });
+  const naturalWidths = labels.map((label, index) => {
+    const labelWidth = Array.from(label).length;
+    return labelWidth + (index === labels.length - 1 ? 0 : TAB_CELL_GAP);
+  });
+  const naturalTotalWidth = naturalWidths.reduce((sum, value) => sum + value, 0);
+  const availableWidth =
+    typeof width === 'number' && Number.isFinite(width) && width > 0
+      ? Math.floor(width)
+      : naturalTotalWidth + CLEAR_ROW_TAIL.length;
+  const shouldCompress = naturalTotalWidth > availableWidth;
+  const compressedCellWidth =
+    tabs.length > 0 ? Math.max(1, Math.floor(availableWidth / tabs.length)) : 1;
+  let remainder = shouldCompress
+    ? Math.max(0, availableWidth - compressedCellWidth * tabs.length)
+    : 0;
+  const cellWidths = naturalWidths.map(naturalWidth => {
+    if (!shouldCompress) {
+      return naturalWidth;
+    }
+    const extra = remainder > 0 ? 1 : 0;
+    remainder = Math.max(0, remainder - 1);
+    return compressedCellWidth + extra;
+  });
+  const usedWidth = cellWidths.reduce((sum, value) => sum + value, 0);
+  const tailWidth = Math.max(0, availableWidth - usedWidth);
+
   return (
-    <Box flexDirection="row" width="100%">
-      {tabs.map(tab => {
+    <Box flexDirection="row" width={availableWidth}>
+      {tabs.map((tab, index) => {
         const isActive = tab.key === active;
-        const label = `${isActive ? '▸ ' : '  '}${tab.label}${
-          tab.count !== undefined ? ` ${tab.count.toString()}` : ''
-        }`;
         return (
           <Text
             key={tab.key}
             color={isActive ? 'cyan' : 'gray'}
             bold={isActive}
+            wrap="truncate"
           >
-            {label.padEnd(TAB_CELL_WIDTH)}
+            {truncateAndPadText(labels[index] ?? '', cellWidths[index] ?? TAB_CELL_WIDTH)}
           </Text>
         );
       })}
-      <Text>{CLEAR_ROW_TAIL}</Text>
+      {tailWidth > 0 ? <Text>{' '.repeat(tailWidth)}</Text> : null}
     </Box>
   );
 }
 
-function MessageBodyLines({ text }: { text: string }) {
+function MessageBodyLines({ text, width }: { text: string; width?: number }) {
   const lines = capTextToLines(text, MAX_MESSAGE_BODY_LINES);
+  const safeWidth = width ? Math.max(1, width - 2) : undefined;
   return (
-    <Box flexDirection="column" marginLeft={2}>
+    <Box flexDirection="column" marginLeft={2} width={safeWidth}>
       {lines.map((line, index) => (
-        <Text key={`${index}:${line}`}>{line.length > 0 ? line : ' '}</Text>
+        <Text key={`${index}:${line}`} wrap="truncate">
+          {safeWidth
+            ? truncateAndPadText(line.length > 0 ? line : ' ', safeWidth)
+            : line.length > 0
+              ? line
+              : ' '}
+        </Text>
       ))}
     </Box>
   );
 }
 
-function ThreadMessageBlock({ message }: { message: LiveThreadMessage }) {
+function ThreadMessageBlock({
+  message,
+  width,
+}: {
+  message: LiveThreadMessage;
+  width?: number;
+}) {
+  const safeWidth = width ? Math.max(1, width) : undefined;
+  const header = `From ${message.senderLabel} · ${formatTimestamp(message.createdAt)}${
+    message.optimistic ? ' · syncing...' : ''
+  }`;
   return (
     <Box key={message.id} flexDirection="column" marginBottom={1} width="100%">
-      <Text>
-        <Text color="gray">From </Text>
-        <Text color={senderInkColor(message.senderLabel)} bold>{message.senderLabel}</Text>
-        <Text color="gray">
-          {' · '}
-          {formatTimestamp(message.createdAt)}
-          {message.optimistic ? ' · syncing...' : ''}
-        </Text>
+      <Text color="gray" wrap="truncate">
+        {safeWidth ? truncateAndPadText(header, safeWidth) : header}
       </Text>
       {message.trustNotice ? (
-        <Text color="yellow">  {message.trustNotice}</Text>
+        <Text color="yellow" wrap="truncate">
+          {safeWidth
+            ? truncateAndPadText(`  ${message.trustNotice}`, safeWidth)
+            : `  ${message.trustNotice}`}
+        </Text>
       ) : null}
       {message.trustWarning ? (
-        <Text color="red">  {message.trustWarning}</Text>
+        <Text color="red" wrap="truncate">
+          {safeWidth
+            ? truncateAndPadText(`  ${message.trustWarning}`, safeWidth)
+            : `  ${message.trustWarning}`}
+        </Text>
       ) : null}
-      <MessageBodyLines text={message.body} />
+      <MessageBodyLines text={message.body} width={safeWidth} />
     </Box>
   );
 }
 
-function ChannelMessageBlock({ message }: { message: ChannelMessageItem }) {
+function ChannelMessageBlock({
+  message,
+  width,
+}: {
+  message: ChannelMessageItem;
+  width?: number;
+}) {
   const body = message.text ?? message.error ?? 'Unable to read message.';
+  const safeWidth = width ? Math.max(1, width) : undefined;
+  const header = `From ${message.sender} · ${
+    message.createdAt ? formatTimestamp(message.createdAt) : 'time unavailable'
+  } · #${message.channelSeq}${message.status === 'failed' ? ' · verification failed' : ''}`;
   return (
     <Box key={message.id} flexDirection="column" marginBottom={1} width="100%">
-      <Text>
-        <Text color="gray">From </Text>
-        <Text color={senderInkColor(message.sender)} bold>{message.sender}</Text>
-        <Text color="gray">
-          {' · '}
-          {message.createdAt ? formatTimestamp(message.createdAt) : 'time unavailable'}
-          {' · '}
-          #{message.channelSeq}
-        </Text>
-        {message.status === 'failed' ? (
-          <Text color="red"> · verification failed</Text>
-        ) : null}
+      <Text
+        color={message.status === 'failed' ? 'red' : 'gray'}
+        wrap="truncate"
+      >
+        {safeWidth ? truncateAndPadText(header, safeWidth) : header}
       </Text>
-      <MessageBodyLines text={body} />
+      <MessageBodyLines text={body} width={safeWidth} />
     </Box>
   );
 }
 
-function HelpBar({ items }: { items: Array<{ key: string; label: string }> }) {
-  return (
-    <Text>
-      {items.map((item, index) => (
-        <Text key={item.key}>
-          {index > 0 ? <Text color="gray"> · </Text> : null}
-          <Text color="cyan" bold>
-            {item.key}
+function packFooterItems(items: FooterModeItem[], width: number): FooterModeItem[][] {
+  const safeWidth = Math.max(1, width);
+  const lines: FooterModeItem[][] = [];
+  let currentLine: FooterModeItem[] = [];
+  let currentWidth = 0;
+
+  for (const item of items) {
+    const itemWidth = textWidth(`${item.key} ${item.label}`);
+    const nextWidth = currentLine.length === 0 ? itemWidth : currentWidth + 3 + itemWidth;
+    if (currentLine.length > 0 && nextWidth > safeWidth) {
+      lines.push(currentLine);
+      currentLine = [item];
+      currentWidth = itemWidth;
+      continue;
+    }
+    currentLine.push(item);
+    currentWidth = nextWidth;
+  }
+
+  if (currentLine.length > 0) {
+    lines.push(currentLine);
+  }
+
+  return lines;
+}
+
+function HelpBar({
+  items,
+  width,
+}: {
+  items: Array<{ key: string; label: string }>;
+  width?: number;
+}) {
+  const safeWidth = width ? Math.max(1, width) : undefined;
+  if (!safeWidth) {
+    return (
+      <Text>
+        {items.map((item, index) => (
+          <Text key={`${index}:${item.key}:${item.label}`}>
+            {index > 0 ? <Text color="gray"> · </Text> : null}
+            <Text color="cyan" bold>
+              {item.key}
+            </Text>
+            <Text color="gray"> {item.label}</Text>
           </Text>
-          <Text color="gray"> {item.label}</Text>
-        </Text>
-      ))}
-    </Text>
+        ))}
+      </Text>
+    );
+  }
+
+  return (
+    <Box flexDirection="column" width={safeWidth}>
+      {packFooterItems(items, safeWidth).map((lineItems, lineIndex) => {
+        const lineText = lineItems
+          .map(item => `${item.key} ${item.label}`)
+          .join(' · ');
+        if (textWidth(lineText) > safeWidth) {
+          return (
+            <Text key={`line:${lineIndex}`} color="gray" wrap="truncate">
+              {truncateAndPadText(lineText, safeWidth)}
+            </Text>
+          );
+        }
+        const tailWidth = Math.max(0, safeWidth - textWidth(lineText));
+        return (
+          <Text key={`line:${lineIndex}`}>
+            {lineItems.map((item, index) => (
+              <Text key={`${index}:${item.key}:${item.label}`}>
+                {index > 0 ? <Text color="gray"> · </Text> : null}
+                <Text color="cyan" bold>
+                  {item.key}
+                </Text>
+                <Text color="gray"> {item.label}</Text>
+              </Text>
+            ))}
+            {tailWidth > 0 ? <Text>{' '.repeat(tailWidth)}</Text> : null}
+          </Text>
+        );
+      })}
+    </Box>
   );
 }
 
-function ModeBar({ mode }: { mode: FooterMode }) {
+function ModeBar({ mode, width }: { mode: FooterMode; width?: number }) {
+  const safeWidth = width ? Math.max(1, width) : undefined;
+  const modeLine = `Mode · ${mode.label}${mode.detail ? ` · ${mode.detail}` : ''}`;
   return (
-    <Box marginTop={1} flexDirection="column">
-      <Text>
-        <Text color="cyan" bold>
-          Mode
+    <Box marginTop={1} flexDirection="column" width={safeWidth}>
+      {safeWidth ? (
+        <Text color="gray" wrap="truncate">
+          {truncateAndPadText(modeLine, safeWidth)}
         </Text>
-        <Text color="gray"> · </Text>
-        <Text>{mode.label}</Text>
-        {mode.detail ? (
-          <>
-            <Text color="gray"> · </Text>
-            <Text color="gray">{mode.detail}</Text>
-          </>
-        ) : null}
-      </Text>
-      {mode.items.length > 0 ? <HelpBar items={mode.items} /> : null}
+      ) : (
+        <Text color="gray">{modeLine}</Text>
+      )}
+      {mode.items.length > 0 ? <HelpBar items={mode.items} width={safeWidth} /> : null}
     </Box>
   );
 }
@@ -1513,7 +1820,7 @@ function Sidebar({
   return (
     <Box
       flexDirection="column"
-      width={20}
+      width={SIDEBAR_WIDTH}
       height="100%"
       overflow="hidden"
       borderStyle="single"
@@ -1524,8 +1831,12 @@ function Sidebar({
       borderColor="gray"
       paddingRight={1}
     >
-      <Text color="cyanBright" bold>◆ MASUMI AGENT MESSENGER</Text>
-      {slug ? <Text color="gray">/{slug}</Text> : <Text color="gray">encrypted inbox</Text>}
+      <Text color="cyanBright" bold wrap="truncate">
+        {truncateAndPadText('◆ MASUMI AGENT MESSENGER', SIDEBAR_CONTENT_WIDTH)}
+      </Text>
+      <Text color="gray" wrap="truncate">
+        {truncateAndPadText(slug ? `/${slug}` : 'encrypted inbox', SIDEBAR_CONTENT_WIDTH)}
+      </Text>
       <Text> </Text>
       {SIDEBAR_NAV_ITEMS.map(item => {
         const isActive = active === item;
@@ -1542,11 +1853,14 @@ function Sidebar({
           <Text
             key={item}
             color={isSelected ? 'cyan' : isActive ? 'cyan' : shellFocus === 'sidebar' ? undefined : 'gray'}
+            wrap="truncate"
           >
-            {isSelected ? '▸ ' : isActive ? '• ' : '  '}
-            <Text color="gray">{SIDEBAR_ICONS[item]} </Text>
-            {SIDEBAR_LABELS[item]}
-            {badge ? <Text color="yellow">{badge}</Text> : null}
+            {truncateAndPadText(
+              `${isSelected ? '▸ ' : isActive ? '• ' : '  '}${SIDEBAR_ICONS[item]} ${
+                SIDEBAR_LABELS[item]
+              }${badge}`,
+              SIDEBAR_CONTENT_WIDTH
+            )}
           </Text>
         );
       })}
@@ -1573,11 +1887,13 @@ function TaskPanel({
   lookupState,
   selectedLookupIndex,
   cursorIndex,
+  width,
 }: {
   panel: TaskPanelState;
   lookupState: TaskLookupState;
   selectedLookupIndex: number;
   cursorIndex: number;
+  width?: number;
 }) {
   const currentField = panel.fields[panel.stepIndex] ?? null;
   const isLastField = panel.stepIndex >= panel.fields.length - 1;
@@ -1585,6 +1901,8 @@ function TaskPanel({
     currentField &&
     lookupState.fieldKey === currentField.key &&
     (lookupState.loading || lookupState.error || lookupState.items.length > 0);
+  const safeWidth = width ? Math.max(1, width) : undefined;
+  const innerWidth = safeWidth ? Math.max(1, safeWidth - 4) : undefined;
 
   return (
     <Box
@@ -1594,11 +1912,14 @@ function TaskPanel({
       borderColor="cyan"
       paddingLeft={1}
       paddingRight={1}
+      width={safeWidth}
     >
       <Text color="cyan" bold>
-        {panel.title}
+        {innerWidth ? truncateAndPadText(panel.title, innerWidth) : panel.title}
       </Text>
-      <Text color="gray">{panel.help}</Text>
+      <Text color="gray" wrap="truncate">
+        {innerWidth ? truncateAndPadText(panel.help, innerWidth) : panel.help}
+      </Text>
       {panel.fields.length > 0 ? (
         <Box marginTop={1} flexDirection="column">
           {panel.fields.map((field, index) => {
@@ -1607,52 +1928,85 @@ function TaskPanel({
             const activeCursor = isActive ? clampCursor(cursorIndex, displayValue.length) : displayValue.length;
             const valuePrefix = displayValue.slice(0, activeCursor);
             const valueSuffix = displayValue.slice(activeCursor);
+            const rowValue = displayValue
+              ? `${valuePrefix}${isActive ? '_' : ''}${valueSuffix}`
+              : `${isActive ? '_' : ''}${field.placeholder ?? ''}`;
+            const row = `${isActive ? '▸ ' : '  '}${field.label}: ${rowValue}`;
             return (
-              <Text key={field.key} color={isActive ? 'cyan' : undefined}>
-                {isActive ? '▸ ' : '  '}
-                {field.label}:{' '}
-                {displayValue ? (
-                  <>
-                    <Text>{valuePrefix}</Text>
-                    {isActive ? <Text color="cyan">_</Text> : null}
-                    <Text>{valueSuffix}</Text>
-                  </>
-                ) : (
-                  <>
-                    {isActive ? <Text color="cyan">_</Text> : null}
-                    <Text color="gray">{field.placeholder ?? ''}</Text>
-                  </>
-                )}
+              <Text
+                key={field.key}
+                color={isActive ? 'cyan' : undefined}
+                wrap="truncate"
+              >
+                {innerWidth ? truncateAndPadText(row, innerWidth) : row}
               </Text>
             );
           })}
         </Box>
       ) : (
-        <Text color="yellow">Press Enter to continue or Esc to cancel.</Text>
+        <Text color="yellow" wrap="truncate">
+          {innerWidth
+            ? truncateAndPadText('Press Enter to continue or Esc to cancel.', innerWidth)
+            : 'Press Enter to continue or Esc to cancel.'}
+        </Text>
       )}
       {showLookup ? (
         <Box marginTop={1} flexDirection="column">
-          <Text color="gray">Suggestions</Text>
-          {lookupState.loading ? <Text color="gray">  Searching…</Text> : null}
+          <Text color="gray">
+            {innerWidth ? truncateAndPadText('Suggestions', innerWidth) : 'Suggestions'}
+          </Text>
+          {lookupState.loading ? (
+            <Text color="gray">
+              {innerWidth ? truncateAndPadText('  Searching…', innerWidth) : '  Searching…'}
+            </Text>
+          ) : null}
           {lookupState.items.map((item, index) => (
             <Box key={item.id} flexDirection="column">
-              <Text color={index === selectedLookupIndex ? 'cyan' : undefined}>
-                {index === selectedLookupIndex ? '▸ ' : '  '}
-                {item.label}
-                <Text color="gray"> · {item.source === 'contact' ? 'local' : 'saas'}</Text>
+              <Text
+                color={index === selectedLookupIndex ? 'cyan' : undefined}
+                wrap="truncate"
+              >
+                {innerWidth
+                  ? truncateAndPadText(
+                      `${index === selectedLookupIndex ? '▸ ' : '  '}${item.label} · ${
+                        item.source === 'contact' ? 'local' : 'saas'
+                      }`,
+                      innerWidth
+                    )
+                  : `${index === selectedLookupIndex ? '▸ ' : '  '}${item.label} · ${
+                      item.source === 'contact' ? 'local' : 'saas'
+                    }`}
               </Text>
-              <Text color="gray">    {item.detail}</Text>
+              <Text color="gray" wrap="truncate">
+                {innerWidth
+                  ? truncateAndPadText(`    ${item.detail}`, innerWidth)
+                  : `    ${item.detail}`}
+              </Text>
             </Box>
           ))}
-          {lookupState.error ? <Text color="red">  {lookupState.error}</Text> : null}
+          {lookupState.error ? (
+            <Text color="red" wrap="truncate">
+              {innerWidth
+                ? truncateAndPadText(`  ${lookupState.error}`, innerWidth)
+                : `  ${lookupState.error}`}
+            </Text>
+          ) : null}
           {lookupState.items.length > 0 ? (
-            <Text color="gray">Tab accept suggestion · ↑/↓ choose</Text>
+            <Text color="gray" wrap="truncate">
+              {innerWidth
+                ? truncateAndPadText('Tab accept suggestion · ↑/↓ choose', innerWidth)
+                : 'Tab accept suggestion · ↑/↓ choose'}
+            </Text>
           ) : null}
         </Box>
       ) : null}
-      <Text color="gray">
-        Step {Math.min(panel.stepIndex + 1, Math.max(panel.fields.length, 1)).toString()}/
-        {Math.max(panel.fields.length, 1).toString()} · ←/→ cursor · Enter {currentField && !isLastField ? 'next' : panel.submitLabel.toLowerCase()} · Esc cancel
+      <Text color="gray" wrap="truncate">
+        {innerWidth
+          ? truncateAndPadText(
+              `Step ${Math.min(panel.stepIndex + 1, Math.max(panel.fields.length, 1)).toString()}/${Math.max(panel.fields.length, 1).toString()} · ←/→ cursor · Enter ${currentField && !isLastField ? 'next' : panel.submitLabel.toLowerCase()} · Esc cancel`,
+              innerWidth
+            )
+          : `Step ${Math.min(panel.stepIndex + 1, Math.max(panel.fields.length, 1)).toString()}/${Math.max(panel.fields.length, 1).toString()} · ←/→ cursor · Enter ${currentField && !isLastField ? 'next' : panel.submitLabel.toLowerCase()} · Esc cancel`}
       </Text>
     </Box>
   );
@@ -3734,6 +4088,78 @@ export function RootShell({
     );
   };
 
+  const openDeregisterSelectedAgentTask = () => {
+    if (!selectedAgent) {
+      return;
+    }
+
+    if (selectedAgent.deregistered) {
+      setTask(current => ({
+        ...current,
+        notice: `Agent ${selectedAgent.slug} is already deregistering or deregistered.`,
+      }));
+      return;
+    }
+
+    if (!selectedAgent.managed || !selectedAgent.registered) {
+      setTask(current => ({
+        ...current,
+        error: 'Only registered managed agents can be deregistered.',
+      }));
+      return;
+    }
+
+    const agent = selectedAgent;
+    openTaskPanel({
+      title: `Deregister ${agent.slug}`,
+      help:
+        `Warning: this removes /${agent.slug} from Masumi network discovery and prevents new chats. ` +
+        'Local inbox history remains in SpacetimeDB. Type the slug to confirm.',
+      submitLabel: 'Deregister',
+      fields: [
+        {
+          key: 'confirmation',
+          label: 'Confirm slug',
+          value: '',
+          placeholder: agent.slug,
+          validate: value =>
+            value !== agent.slug ? `Type ${agent.slug} to confirm deregistration.` : null,
+        },
+      ],
+      onSubmit: async () => {
+        setTaskPanel(null);
+        await performTask(
+          `Deregistering managed agent for ${agent.slug}`,
+          reporter =>
+            deregisterInboxAgent({
+              profileName: options.profile,
+              actorSlug: agent.slug,
+              reporter,
+            }),
+          result => {
+            setActiveInboxSlug(current =>
+              current === result.actor.slug ? null : current
+            );
+            setSelectedChannelSlug(null);
+            setChannelMode('overview');
+            setChannelTab('messages');
+            setChannelMessagesState(createInitialChannelMessagesState());
+            setChannelMembersState(createInitialChannelMembersState());
+            setTask(current => ({
+              ...current,
+              notice:
+                result.registration.registrationState === 'DeregistrationConfirmed'
+                  ? `Managed agent ${result.actor.slug} is deregistered.`
+                  : `Managed agent ${result.actor.slug} status: ${
+                      result.registration.registrationState ?? result.registration.status
+                    }.`,
+            }));
+          }
+        );
+      },
+    });
+  };
+
   const openApproveShareTask = () => {
     openTaskPanel({
       title: 'Approve device share',
@@ -5044,6 +5470,13 @@ export function RootShell({
       }
       if (key.return) {
         if (selectedAgent) {
+          if (selectedAgent.deregistered) {
+            setTask(current => ({
+              ...current,
+              notice: `Agent ${selectedAgent.slug} is deregistered and cannot be selected as active.`,
+            }));
+            return;
+          }
           setActiveInboxSlug(selectedAgent.slug);
           setSelectedChannelSlug(null);
           setChannelMode('overview');
@@ -5071,6 +5504,10 @@ export function RootShell({
       }
       if (input === 'm') {
         await registerSelectedAgent();
+        return;
+      }
+      if (input.toLowerCase() === 'd') {
+        openDeregisterSelectedAgentTask();
       }
       return;
     }
@@ -5101,6 +5538,13 @@ export function RootShell({
         return;
       }
       if (input && input.toLowerCase() === 'n' && selectedDiscoveryResult) {
+        if (isUnavailableForChatInboxAgentState(selectedDiscoveryResult.registrationState)) {
+          setTask(current => ({
+            ...current,
+            notice: `Agent ${selectedDiscoveryResult.slug} is ${describeDiscoveryRegistrationState(selectedDiscoveryResult.registrationState)} and cannot be used for chats.`,
+          }));
+          return;
+        }
         openDirectMessageTaskForDiscoveredAgent({
           slug: selectedDiscoveryResult.slug,
           displayName: selectedDiscoveryResult.displayName ?? null,
@@ -5216,19 +5660,20 @@ export function RootShell({
               : '';
   const headerRuleWidth = Math.max(0, Math.min(terminalSize.columns - 22, 58));
   const fullRuleWidth = Math.max(0, Math.min(terminalSize.columns, 80));
+  const fullContentWidth = Math.max(1, fullRuleWidth);
+  const contentListWidth = Math.max(1, terminalSize.columns - SIDEBAR_WIDTH - 3);
+  const activePanelWidth = model ? contentListWidth : fullContentWidth;
 
   const contentHeader = (
     <Box flexDirection="column">
-      <Text>
-        {sectionIcon ? <Text color="gray">{sectionIcon} </Text> : null}
-        <Text color="cyan" bold>{sectionTitle}</Text>
-        {model ? (
-          <>
-            <Text color="gray"> · </Text>
-            <Text>{model.activeInbox.slug}</Text>
-          </>
-        ) : null}
-      </Text>
+      <FixedLine
+        text={`${sectionIcon ? `${sectionIcon} ` : ''}${sectionTitle}${
+          model ? ` · ${model.activeInbox.slug}` : ''
+        }`}
+        width={activePanelWidth}
+        color="cyan"
+        bold
+      />
       <Text color="gray" dimColor>{'─'.repeat(headerRuleWidth)}</Text>
     </Box>
   );
@@ -5241,30 +5686,75 @@ export function RootShell({
           lookupState={taskLookup}
           selectedLookupIndex={taskLookupIndex}
           cursorIndex={taskCursorIndex}
+          width={activePanelWidth}
         />
       ) : null}
       {pendingRegistrationPrompt ? (
-        <Box borderStyle="single" borderColor="yellow" paddingLeft={1} paddingRight={1} flexDirection="column">
-          <Text>
-            Register managed agent for <Text color="yellowBright">{pendingRegistrationPrompt.slug}</Text> now?
-          </Text>
-          <Text color="gray">This publishes the inbox agent for Masumi SaaS discovery.</Text>
+        <Box
+          borderStyle="single"
+          borderColor="yellow"
+          paddingLeft={1}
+          paddingRight={1}
+          flexDirection="column"
+          width={activePanelWidth}
+        >
+          <FixedLine
+            text={`Register managed agent for ${pendingRegistrationPrompt.slug} now?`}
+            width={Math.max(1, activePanelWidth - 4)}
+            color="yellow"
+          />
+          <FixedLine
+            text="This publishes the inbox agent for Masumi SaaS discovery."
+            width={Math.max(1, activePanelWidth - 4)}
+            color="gray"
+          />
           {pendingRegistrationPrompt.publicDescription ? (
-            <Text color="gray">Description will be published with this agent.</Text>
+            <FixedLine
+              text="Description will be published with this agent."
+              width={Math.max(1, activePanelWidth - 4)}
+              color="gray"
+            />
           ) : null}
-          <Text color="yellow">Enter/Y yes · N later</Text>
+          <FixedLine
+            text="Enter/Y yes · N later"
+            width={Math.max(1, activePanelWidth - 4)}
+            color="yellow"
+          />
         </Box>
       ) : null}
       {task.banner ? (
-        <Box borderStyle="single" borderColor="yellow" paddingLeft={1} paddingRight={1} flexDirection="column">
-          <Text>{task.banner.label ?? 'Code'}: <Text color="yellowBright">{task.banner.code}</Text></Text>
-          <Text color="gray">{task.banner.hint}</Text>
+        <Box
+          borderStyle="single"
+          borderColor="yellow"
+          paddingLeft={1}
+          paddingRight={1}
+          flexDirection="column"
+          width={activePanelWidth}
+        >
+          <FixedLine
+            text={`${task.banner.label ?? 'Code'}: ${task.banner.code}`}
+            width={Math.max(1, activePanelWidth - 4)}
+            color="yellow"
+          />
+          <FixedLine
+            text={task.banner.hint}
+            width={Math.max(1, activePanelWidth - 4)}
+            color="gray"
+          />
         </Box>
       ) : null}
-      {task.active ? <Text color="yellow">⠋ {task.active}</Text> : null}
-      {task.notice ? <Text color="green">✓ {task.notice}</Text> : null}
-      {task.error ? <Text color="red">✗ {task.error}</Text> : null}
-      {connectionState.error ? <Text color="red">{connectionState.error}</Text> : null}
+      {task.active ? (
+        <FixedLine text={`⠋ ${task.active}`} width={activePanelWidth} color="yellow" />
+      ) : null}
+      {task.notice ? (
+        <FixedLine text={`✓ ${task.notice}`} width={activePanelWidth} color="green" />
+      ) : null}
+      {task.error ? (
+        <FixedLine text={`✗ ${task.error}`} width={activePanelWidth} color="red" />
+      ) : null}
+      {connectionState.error ? (
+        <FixedLine text={connectionState.error} width={activePanelWidth} color="red" />
+      ) : null}
     </Box>
   );
 
@@ -5557,6 +6047,7 @@ export function RootShell({
           { key: 'P', label: 'description' },
           { key: 'L', label: 'linked email' },
           { key: 'M', label: 'register/sync' },
+          { key: 'D', label: 'deregister' },
           { key: 'Tab', label: 'sidebar' },
         ],
       };
@@ -5570,7 +6061,10 @@ export function RootShell({
           { key: '↑/↓', label: 'move results' },
           { key: 'Enter', label: 'open details' },
           { key: 'S//', label: 'search' },
-          ...(selectedDiscoveryResult ? [{ key: 'N', label: 'new thread' }] : []),
+          ...(selectedDiscoveryResult &&
+          !isUnavailableForChatInboxAgentState(selectedDiscoveryResult.registrationState)
+            ? [{ key: 'N', label: 'new thread' }]
+            : []),
           { key: '[ ]', label: 'page' },
           { key: 'Tab', label: 'sidebar' },
         ],
@@ -5606,7 +6100,7 @@ export function RootShell({
     return (
       <Box flexDirection="column" height={terminalSize.rows} overflow="hidden">
         {statusBar}
-        <ModeBar mode={footerMode} />
+        <ModeBar mode={footerMode} width={fullContentWidth} />
       </Box>
     );
   }
@@ -5620,17 +6114,61 @@ export function RootShell({
         <Text color="gray">Sign in to sync, recover keys, and manage devices.</Text>
         <Text> </Text>
         {statusBar}
-        <ModeBar mode={footerMode} />
+        <ModeBar mode={footerMode} width={fullContentWidth} />
       </Box>
     );
   }
 
   if (!model) {
+    const readyRows = connectionState.mode === 'ready' ? connectionState.rows : null;
+    const defaultActor =
+      readyRows && normalizedEmail
+        ? readyRows.actors.find(
+            actor => actor.isDefault && actor.normalizedEmail === normalizedEmail
+          ) ?? null
+        : null;
+    const ownedActors =
+      readyRows && defaultActor
+        ? readyRows.actors
+            .filter(actor => actor.inboxId === defaultActor.inboxId)
+            .sort((left, right) => left.slug.localeCompare(right.slug))
+        : [];
+    const allOwnedActorsDeregistered =
+      ownedActors.length > 0 &&
+      ownedActors.every(actor =>
+        isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+      );
+
+    if (allOwnedActorsDeregistered) {
+      return (
+        <Box flexDirection="column" height={terminalSize.rows} overflow="hidden">
+          <Text color="yellow">
+            All owned agents are deregistering or deregistered.
+          </Text>
+          <Text color="gray">
+            Create or recover a usable inbox agent before sending chats or joining channels.
+          </Text>
+          <Box marginTop={1} flexDirection="column">
+            {ownedActors.map(actor => (
+              <FixedLine
+                key={actor.id.toString()}
+                text={`${actor.slug} · ${actor.masumiRegistrationState ?? 'unknown'}`}
+                width={fullContentWidth}
+              />
+            ))}
+          </Box>
+          <Text> </Text>
+          {statusBar}
+          <ModeBar mode={footerMode} width={fullContentWidth} />
+        </Box>
+      );
+    }
+
     return (
       <Box flexDirection="column" height={terminalSize.rows} overflow="hidden">
         <Text color="yellow">Loading shell state...</Text>
         {statusBar}
-        <ModeBar mode={footerMode} />
+        <ModeBar mode={footerMode} width={fullContentWidth} />
       </Box>
     );
   }
@@ -5663,35 +6201,39 @@ export function RootShell({
           {attentionItems.length > 0 && route.type === 'inboxes' ? (
             <Box flexDirection="column">
               {attentionItems.map(item => (
-                <Text key={item.id} color={item.severity === 'critical' ? 'red' : 'yellow'}>
-                  {item.severity === 'critical' ? '✗' : '⚠'} {item.title}
-                  {item.id.startsWith('security:') ? ' · Press [U] to recover now.' : null}
-                </Text>
+                <FixedLine
+                  key={item.id}
+                  text={`${item.severity === 'critical' ? '✗' : '⚠'} ${item.title}${
+                    item.id.startsWith('security:') ? ' · Press [U] to recover now.' : ''
+                  }`}
+                  width={contentListWidth}
+                  color={item.severity === 'critical' ? 'red' : 'yellow'}
+                />
               ))}
             </Box>
           ) : null}
 
         {route.type === 'help' ? (
           <Box flexDirection="column">
-            <Text>  <Text color="cyan" bold>Inbox</Text> — threads, pending requests, message composition</Text>
-            <Text>  <Text color="cyan" bold>Channels</Text> — signed plaintext channels and admin join approvals</Text>
-            <Text>  <Text color="cyan" bold>My Agents</Text> — owned agents, profile, managed agent sync</Text>
-            <Text>  <Text color="cyan" bold>Discover</Text> — browse verified SaaS agents and search by slug or email</Text>
-            <Text>  <Text color="cyan" bold>Account</Text> — recovery, backups, trusted devices, rotation</Text>
+            <FixedLine text="  Inbox — threads, pending requests, message composition" width={contentListWidth} color="cyan" />
+            <FixedLine text="  Channels — signed plaintext channels and admin join approvals" width={contentListWidth} color="cyan" />
+            <FixedLine text="  My Agents — owned agents, profile, managed agent sync" width={contentListWidth} color="cyan" />
+            <FixedLine text="  Discover — browse verified SaaS agents and search by slug or email" width={contentListWidth} color="cyan" />
+            <FixedLine text="  Account — recovery, backups, trusted devices, rotation" width={contentListWidth} color="cyan" />
             <Text> </Text>
-            <Text color="gray">  Tab moves between content and sidebar. In sidebar, ↑/↓ selects and Enter opens.</Text>
-            <Text color="gray">  In thread and channel messages, S starts writing. In a thread draft, Enter adds a line and Ctrl+S sends.</Text>
-            <Text color="gray">  The footer always shows the current mode and the keys that work there.</Text>
+            <FixedLine text="  Tab moves between content and sidebar. In sidebar, ↑/↓ selects and Enter opens." width={contentListWidth} color="gray" />
+            <FixedLine text="  In thread and channel messages, S starts writing. In a thread draft, Enter adds a line and Ctrl+S sends." width={contentListWidth} color="gray" />
+            <FixedLine text="  The footer always shows the current mode and the keys that work there." width={contentListWidth} color="gray" />
           </Box>
         ) : null}
 
         {route.type === 'inboxes' ? (
           <Box flexDirection="column">
-            <Text color="gray">
-              section <Text color="white">{inboxSection}</Text>
-              <Text color="gray"> · filter </Text>
-              <Text color="white">{threadFilter}</Text>
-            </Text>
+            <FixedLine
+              text={`section ${inboxSection} · filter ${threadFilter}`}
+              width={contentListWidth}
+              color="gray"
+            />
             <Box marginTop={1}>
               <TabStrip
                 tabs={model.inboxes.sections.map(section => ({
@@ -5700,6 +6242,7 @@ export function RootShell({
                   count: section.count,
                 }))}
                 active={inboxSection}
+                width={contentListWidth}
               />
             </Box>
             <Box marginTop={1} flexDirection="column">
@@ -5713,6 +6256,7 @@ export function RootShell({
                   inboxSection === 'pending'
                     ? 'No pending requests for this agent.'
                     : 'No threads match this section and filter.',
+                maxWidth: contentListWidth,
               })}
             </Box>
             <Box marginTop={1} flexDirection="column">
@@ -5724,20 +6268,23 @@ export function RootShell({
               </Text>
               {selectedRequest ? (
                 <Box flexDirection="column">
-                  <Text>
-                    <Text bold>
-                      {selectedRequest.direction === 'incoming'
+                  <FixedLine
+                    text={`${
+                      selectedRequest.direction === 'incoming'
                         ? selectedRequest.requesterDisplayName ?? selectedRequest.requesterSlug
-                        : selectedRequest.targetDisplayName ?? selectedRequest.targetSlug}
-                    </Text>
-                    <Text color="gray"> · {selectedRequest.direction}</Text>
-                  </Text>
-                  <Text color="gray">
-                    {selectedRequest.messageCount} message(s) · updated {formatTimestamp(selectedRequest.updatedAt)}
-                  </Text>
+                        : selectedRequest.targetDisplayName ?? selectedRequest.targetSlug
+                    } · ${selectedRequest.direction}`}
+                    width={contentListWidth}
+                    bold
+                  />
+                  <FixedLine
+                    text={`${selectedRequest.messageCount} message(s) · updated ${formatTimestamp(selectedRequest.updatedAt)}`}
+                    width={contentListWidth}
+                    color="gray"
+                  />
                   {inboxFocus === 'detail' ? (
                     <Box marginTop={1}>
-                      <TabStrip tabs={inboxTabs} active={inboxDetailTab} />
+                      <TabStrip tabs={inboxTabs} active={inboxDetailTab} width={contentListWidth} />
                     </Box>
                   ) : null}
                   {firstThreadMessage ? (
@@ -5750,14 +6297,16 @@ export function RootShell({
                 </Box>
                 ) : selectedThread ? (
                   <Box flexDirection="column">
-                    <Text>
-                      <Text bold>{selectedThread.label}</Text>
-                      <Text color="gray"> · {selectedThread.participantCount.toString()} participants</Text>
-                      {selectedThread.locked ? <Text color="gray"> · locked</Text> : null}
-                    </Text>
+                    <FixedLine
+                      text={`${selectedThread.label} · ${selectedThread.participantCount.toString()} participants${
+                        selectedThread.locked ? ' · locked' : ''
+                      }`}
+                      width={contentListWidth}
+                      bold
+                    />
                     {inboxFocus === 'detail' || inboxFocus === 'composer' ? (
                       <Box marginTop={1}>
-                        <TabStrip tabs={inboxTabs} active={inboxDetailTab} />
+                        <TabStrip tabs={inboxTabs} active={inboxDetailTab} width={contentListWidth} />
                       </Box>
                     ) : null}
                     {inboxDetailTab === 'members' && inboxFocus === 'detail' ? (
@@ -5768,14 +6317,14 @@ export function RootShell({
                         </Text>
                         {selectedThread.participants.length > 0 ? (
                           selectedThread.participants.map(participant => (
-                            <Text key={participant}>
-                              <Text color={participant === model.activeInbox.slug ? 'cyan' : undefined}>
-                                {participant}
-                              </Text>
-                              {participant === model.activeInbox.slug ? (
-                                <Text color="gray"> · active agent</Text>
-                              ) : null}
-                            </Text>
+                            <FixedLine
+                              key={participant}
+                              text={`${participant}${
+                                participant === model.activeInbox.slug ? ' · active agent' : ''
+                              }`}
+                              width={contentListWidth}
+                              color={participant === model.activeInbox.slug ? 'cyan' : undefined}
+                            />
                           ))
                         ) : (
                           <Text color="gray">No visible participants yet.</Text>
@@ -5783,13 +6332,23 @@ export function RootShell({
                       </Box>
                     ) : (
                       <>
-                        <Text color="gray">
-                          Thread messages · {totalThreadMessages === 0 ? '0-0' : `${(threadWindowStart + 1).toString()}-${threadWindowEnd.toString()}`} of {totalThreadMessages.toString()}{CLEAR_ROW_TAIL}
-                        </Text>
+                        <FixedLine
+                          text={`Thread messages · ${
+                            totalThreadMessages === 0
+                              ? '0-0'
+                              : `${(threadWindowStart + 1).toString()}-${threadWindowEnd.toString()}`
+                          } of ${totalThreadMessages.toString()}`}
+                          width={contentListWidth}
+                          color="gray"
+                        />
                         {threadMessagesError ? <Text color="red">✗ {threadMessagesError}</Text> : null}
                         {threadMessages.length > 0 ? (
                           threadMessages.map(message => (
-                            <ThreadMessageBlock key={message.id} message={message} />
+                            <ThreadMessageBlock
+                              key={message.id}
+                              message={message}
+                              width={contentListWidth}
+                            />
                           ))
                         ) : (
                           <Text color="gray">No visible messages yet.</Text>
@@ -5848,11 +6407,11 @@ export function RootShell({
 
         {route.type === 'channels' ? (
           <Box flexDirection="column">
-            <Text color="gray">
-              agent <Text color="white">{model.activeInbox.slug}</Text>
-              <Text color="gray"> · pending approvals </Text>
-              <Text color="white">{model.channels.pendingApprovalCount.toString()}</Text>
-            </Text>
+            <FixedLine
+              text={`agent ${model.activeInbox.slug} · pending approvals ${model.channels.pendingApprovalCount.toString()}`}
+              width={contentListWidth}
+              color="gray"
+            />
               {channelMode === 'overview' ? (
                 <Box marginTop={1} flexDirection="column">
                   <Text color="cyan" bold>◆ Channel overview</Text>
@@ -5870,68 +6429,92 @@ export function RootShell({
                     }),
                     selectedIndex: clampIndex(selectedChannelIndex, model.channels.channels.length),
                     empty: 'No channels for the active agent yet. Press N or + to add one.',
+                    maxWidth: contentListWidth,
                   })}
                 {selectedChannel ? (
                   <Box marginTop={1} flexDirection="column">
-                    <Text>
-                      <Text color="cyan">◆ Selected </Text>
-                      <Text bold>#{selectedChannel.slug}</Text>
-                      <Text color="gray"> · {selectedChannel.title ?? 'untitled'}</Text>
-                    </Text>
-                    <Text color="gray">
-                      {selectedChannel.accessMode === 'approval_required'
-                        ? 'approval required'
-                        : selectedChannel.accessMode}
-                      <Text color="gray"> · messages </Text>
-                      {selectedChannel.lastMessageSeq}
-                      <Text color="gray"> · last </Text>
-                      {formatTimestamp(selectedChannel.lastMessageAt)}
-                    </Text>
-                    <Text color="gray">
-                      {model.activeInbox.slug} has {selectedChannel.permission}
-                      {canSendSelectedChannel ? ' · can send' : ''}
-                      {selectedChannel.pendingApprovals > 0
-                        ? ` · ${selectedChannel.pendingApprovals.toString()} pending`
-                        : ''}
-                    </Text>
+                    <FixedLine
+                      text={`◆ Selected #${selectedChannel.slug} · ${selectedChannel.title ?? 'untitled'}`}
+                      width={contentListWidth}
+                      color="cyan"
+                      bold
+                    />
+                    <FixedLine
+                      text={`${
+                        selectedChannel.accessMode === 'approval_required'
+                          ? 'approval required'
+                          : selectedChannel.accessMode
+                      } · messages ${selectedChannel.lastMessageSeq} · last ${formatTimestamp(selectedChannel.lastMessageAt)}`}
+                      width={contentListWidth}
+                      color="gray"
+                    />
+                    <FixedLine
+                      text={`${model.activeInbox.slug} has ${selectedChannel.permission}${
+                        canSendSelectedChannel ? ' · can send' : ''
+                      }${
+                        selectedChannel.pendingApprovals > 0
+                          ? ` · ${selectedChannel.pendingApprovals.toString()} pending`
+                          : ''
+                      }`}
+                      width={contentListWidth}
+                      color="gray"
+                    />
                     {selectedChannel.description ? (
-                      <Text>{selectedChannel.description}</Text>
+                      <DescriptionLines
+                        text={selectedChannel.description}
+                        width={contentListWidth}
+                      />
                     ) : null}
                   </Box>
                 ) : null}
               </Box>
             ) : selectedChannel ? (
               <Box marginTop={1} flexDirection="column">
-                <Text>
-                  <Text color="cyan" bold>◆ #{selectedChannel.slug}</Text>
-                  <Text color="gray"> · {selectedChannel.title ?? 'untitled'}</Text>
-                </Text>
-                <Text color="gray">
-                  {model.activeInbox.slug} has {selectedChannel.permission}
-                  {canSendSelectedChannel ? ' · can send' : ''}
-                  {selectedChannel.isAdmin ? ' · admin' : ''}
-                  <Text color="gray"> · messages </Text>
-                  {selectedChannel.lastMessageSeq}
-                </Text>
-                {selectedChannel.description ? <Text>{selectedChannel.description}</Text> : null}
+                <FixedLine
+                  text={`◆ #${selectedChannel.slug} · ${selectedChannel.title ?? 'untitled'}`}
+                  width={contentListWidth}
+                  color="cyan"
+                  bold
+                />
+                <FixedLine
+                  text={`${model.activeInbox.slug} has ${selectedChannel.permission}${
+                    canSendSelectedChannel ? ' · can send' : ''
+                  }${selectedChannel.isAdmin ? ' · admin' : ''} · messages ${
+                    selectedChannel.lastMessageSeq
+                  }`}
+                  width={contentListWidth}
+                  color="gray"
+                />
+                {selectedChannel.description ? (
+                  <DescriptionLines
+                    text={selectedChannel.description}
+                    width={contentListWidth}
+                  />
+                ) : null}
                 <Box marginTop={1}>
-                  <TabStrip tabs={channelTabs} active={channelTab} />
+                  <TabStrip tabs={channelTabs} active={channelTab} width={contentListWidth} />
                 </Box>
                 {channelTab === 'messages' ? (
                   <Box marginTop={1} flexDirection="column">
-                    <Text color="gray">
-                      Channel messages · page {(selectedChannelMessagePageIndex + 1).toString()}
-                      {selectedChannelMessagesLoading ? ' · loading' : ''}
-                      {canPageChannelMessagesNewer ? ' · newer available' : ''}
-                      {canPageChannelMessagesOlder ? ' · older available' : ''}
-                      {CLEAR_ROW_TAIL}
-                    </Text>
+                    <FixedLine
+                      text={`Channel messages · page ${(selectedChannelMessagePageIndex + 1).toString()}${
+                        selectedChannelMessagesLoading ? ' · loading' : ''
+                      }${canPageChannelMessagesNewer ? ' · newer available' : ''}${
+                        canPageChannelMessagesOlder ? ' · older available' : ''
+                      }`}
+                      width={contentListWidth}
+                      color="gray"
+                    />
                     {selectedChannelMessagesError ? (
                       <Text color="red">✗ {selectedChannelMessagesError}</Text>
                     ) : null}
                     {selectedChannelMessageItems.length > 0 ? (
                       selectedChannelMessageItems.map(message => (
-                        <ChannelMessageBlock key={message.id} message={message} />
+                        <ChannelMessageBlock
+                          key={message.id}
+                          message={message}
+                          width={contentListWidth}
+                        />
                       ))
                     ) : selectedChannelMessagesLoading ? (
                       <Text color="gray">Loading channel messages...</Text>
@@ -5942,27 +6525,30 @@ export function RootShell({
                 ) : null}
                 {channelTab === 'members' ? (
                   <Box marginTop={1} flexDirection="column">
-                    <Text color="gray">
-                      Channel members · page {(channelMembersState.pageIndex + 1).toString()}
-                      {selectedChannelMembersLoading ? ' · loading' : ''}
-                      {canPageChannelMembersNewer ? ' · newer available' : ''}
-                      {canPageChannelMembersOlder ? ' · older available' : ''}
-                      {CLEAR_ROW_TAIL}
-                    </Text>
+                    <FixedLine
+                      text={`Channel members · page ${(channelMembersState.pageIndex + 1).toString()}${
+                        selectedChannelMembersLoading ? ' · loading' : ''
+                      }${canPageChannelMembersNewer ? ' · newer available' : ''}${
+                        canPageChannelMembersOlder ? ' · older available' : ''
+                      }`}
+                      width={contentListWidth}
+                      color="gray"
+                    />
                     {selectedChannelMembersError ? (
                       <Text color="red">✗ {selectedChannelMembersError}</Text>
                     ) : null}
                     {selectedChannelMemberItems.length > 0 ? (
                       selectedChannelMemberItems.map(member => (
-                        <Text key={member.id}>
-                          <Text color={member.agentSlug === model.activeInbox.slug ? 'cyan' : undefined}>
-                            {member.agentDisplayName?.trim() || member.agentSlug}
-                          </Text>
-                          <Text color="gray">
-                            {' '}· {member.agentSlug} · {member.permission}
-                            {member.active ? '' : ' · inactive'} · sent {member.lastSentSeq}
-                          </Text>
-                        </Text>
+                        <FixedLine
+                          key={member.id}
+                          text={`${member.agentDisplayName?.trim() || member.agentSlug} · ${
+                            member.agentSlug
+                          } · ${member.permission}${member.active ? '' : ' · inactive'} · sent ${
+                            member.lastSentSeq
+                          }`}
+                          width={contentListWidth}
+                          color={member.agentSlug === model.activeInbox.slug ? 'cyan' : 'gray'}
+                        />
                       ))
                     ) : selectedChannelMembersLoading ? (
                       <Text color="gray">Loading channel members...</Text>
@@ -5984,22 +6570,23 @@ export function RootShell({
                         selectedChannelApprovals.length
                       ),
                       empty: `No pending join approvals for #${selectedChannel.slug}.`,
+                      maxWidth: contentListWidth,
                     })}
                     {selectedChannelApproval ? (
                       <Box marginTop={1} flexDirection="column">
-                        <Text>
-                          <Text bold>
-                            {selectedChannelApproval.requesterDisplayName ??
-                              selectedChannelApproval.requesterSlug}
-                          </Text>
-                          <Text color="gray">
-                            {' '}requested {selectedChannelApproval.permission}
-                          </Text>
-                        </Text>
-                        <Text color="gray">
-                          request #{selectedChannelApproval.id} · created{' '}
-                          {formatTimestamp(selectedChannelApproval.createdAt)}
-                        </Text>
+                        <FixedLine
+                          text={`${
+                            selectedChannelApproval.requesterDisplayName ??
+                            selectedChannelApproval.requesterSlug
+                          } requested ${selectedChannelApproval.permission}`}
+                          width={contentListWidth}
+                          bold
+                        />
+                        <FixedLine
+                          text={`request #${selectedChannelApproval.id} · created ${formatTimestamp(selectedChannelApproval.createdAt)}`}
+                          width={contentListWidth}
+                          color="gray"
+                        />
                       </Box>
                     ) : null}
                   </Box>
@@ -6023,26 +6610,41 @@ export function RootShell({
                     agent.slug === model.activeInbox.slug ? 'active' : null,
                     agent.isDefault ? 'default' : null,
                     agent.managed ? '✓ managed' : '✗ not managed',
-                    agent.registered ? '✓ published' : '✗ unpublished',
+                    agent.deregistered
+                      ? 'deregistered'
+                      : agent.registered
+                        ? '✓ published'
+                        : '✗ unpublished',
                   ].filter(Boolean).join(' · ');
                   return `${agent.slug} · ${flags}`;
                 }),
                 selectedIndex: clampIndex(selectedAgentIndex, model.agents.agentSummaries.length),
                 empty: 'No owned agents found.',
+                maxWidth: contentListWidth,
               })}
               {selectedAgent ? (
                 <Box marginTop={1} flexDirection="column">
                   <Text color="cyan">◆ Selected agent</Text>
-                  <Text>
-                    <Text bold>{selectedAgent.displayName ?? selectedAgent.slug}</Text>
-                    <Text color="gray"> · {selectedAgent.publicIdentity}</Text>
-                  </Text>
-                  <Text color="gray">linked email {selectedAgent.publicLinkedEmailEnabled ? 'visible' : 'hidden'}</Text>
-                  <Text>
-                    Description: {selectedAgent.publicDescription
-                      ? <Text>{selectedAgent.publicDescription}</Text>
-                      : <Text color="gray">not set</Text>}
-                  </Text>
+                  <FixedLine
+                    text={`${selectedAgent.displayName ?? selectedAgent.slug} · ${selectedAgent.publicIdentity}`}
+                    width={contentListWidth}
+                    bold
+                  />
+                  <FixedLine
+                    text={`linked email ${selectedAgent.publicLinkedEmailEnabled ? 'visible' : 'hidden'}`}
+                    width={contentListWidth}
+                    color="gray"
+                  />
+                  <Box marginTop={1} flexDirection="column">
+                    <Text color="gray">Description</Text>
+                    <Box marginLeft={2}>
+                      <DescriptionLines
+                        text={selectedAgent.publicDescription}
+                        empty="No public description set."
+                        width={Math.max(1, contentListWidth - 2)}
+                      />
+                    </Box>
+                  </Box>
                 </Box>
               ) : null}
             </Box>
@@ -6064,14 +6666,8 @@ export function RootShell({
                       : `registered agents · page ${agentDiscovery.page}${agentDiscovery.hasNextPage ? ' · more' : agentDiscovery.loaded ? ' · last page' : ''}`}
                 </Text>
               )}
-              {renderList({
-                items: agentDiscovery.results.map(result => {
-                  const summary = result.displayName?.trim()
-                    ? result.displayName
-                    : result.slug;
-                  const detail = result.description?.trim() || 'verified SaaS agent';
-                  return `${summary} · ${detail}`;
-                }),
+              {renderDiscoveryResultList({
+                results: agentDiscovery.results,
                 selectedIndex: clampIndex(selectedDiscoveryIndex, agentDiscovery.results.length),
                 empty:
                   agentDiscovery.mode === 'search'
@@ -6079,22 +6675,46 @@ export function RootShell({
                     : agentDiscovery.loaded
                       ? 'No registered SaaS agents on this page.'
                       : 'Loading discovery results…',
+                width: contentListWidth,
               })}
               {selectedDiscoveryResult ? (
                 <Box marginTop={1} flexDirection="column">
                   <Text color="cyan">◆ Selected discovery result</Text>
-                  <Text>
-                    <Text bold>{selectedDiscoveryResult.displayName ?? selectedDiscoveryResult.slug}</Text>
-                  </Text>
-                  <Text color="gray">
-                    {selectedDiscoveryResult.description?.trim() || 'verified SaaS agent'}
-                  </Text>
-                  <Text color="gray">
-                    {selectedDiscoverySummaryRows.length > 0
-                      ? selectedDiscoverySummaryRows.join(' · ')
-                      : 'No known thread relationship yet.'}
-                  </Text>
-                  <Text color="gray">Enter opens full details · S search · N new thread</Text>
+                  <FixedLine
+                    text={selectedDiscoveryResult.displayName ?? selectedDiscoveryResult.slug}
+                    width={contentListWidth}
+                    bold
+                  />
+                  <Box marginTop={1} flexDirection="column">
+                    <Text color="gray">Description</Text>
+                    <Box marginLeft={2}>
+                      <DescriptionLines
+                        text={selectedDiscoveryResult.description}
+                        width={Math.max(1, contentListWidth - 2)}
+                        empty={
+                          isUnavailableForChatInboxAgentState(
+                            selectedDiscoveryResult.registrationState
+                          )
+                            ? `${describeDiscoveryRegistrationState(selectedDiscoveryResult.registrationState)} SaaS agent.`
+                            : 'No public description set.'
+                        }
+                      />
+                    </Box>
+                  </Box>
+                  <FixedLine
+                    text={
+                      selectedDiscoverySummaryRows.length > 0
+                        ? selectedDiscoverySummaryRows.join(' · ')
+                        : 'No known thread relationship yet.'
+                    }
+                    width={contentListWidth}
+                    color="gray"
+                  />
+                  <FixedLine
+                    text="Enter opens full details · S search · N new thread"
+                    width={contentListWidth}
+                    color="gray"
+                  />
                 </Box>
               ) : null}
               {selectedDiscoveryResult ? (
@@ -6119,90 +6739,110 @@ export function RootShell({
                   ) : null}
                   {selectedDiscoveryDetail ? (
                     <Box flexDirection="column">
-                      <Text>
-                        Public identity:{' '}
-                        {selectedDiscoveryDetail.selected.publicIdentity ? (
-                          <Text>{selectedDiscoveryDetail.selected.publicIdentity}</Text>
-                        ) : (
-                          <Text color="gray">not published</Text>
-                        )}
-                      </Text>
-                      <Text>
-                        Inbox published:{' '}
-                        <Text>{selectedDiscoveryDetail.selected.inboxPublished ? 'yes' : 'no'}</Text>
-                      </Text>
-                      <Text>
-                        Description:{' '}
-                        {selectedDiscoveryDetail.selected.description ? (
-                          <Text>{selectedDiscoveryDetail.selected.description}</Text>
-                        ) : (
-                          <Text color="gray">not set</Text>
-                        )}
-                      </Text>
-                      <Text>
-                        Encryption key version:{' '}
-                        <Text>{selectedDiscoveryDetail.selected.encryptionKeyVersion ?? 'n/a'}</Text>
-                        <Text color="gray"> · signing key version </Text>
-                        <Text>{selectedDiscoveryDetail.selected.signingKeyVersion ?? 'n/a'}</Text>
-                      </Text>
+                      <FixedLine
+                        text={`Public identity: ${
+                          selectedDiscoveryDetail.selected.publicIdentity ?? 'not published'
+                        }`}
+                        width={contentListWidth}
+                      />
+                      <FixedLine
+                        text={`Inbox published: ${selectedDiscoveryDetail.selected.inboxPublished ? 'yes' : 'no'}`}
+                        width={contentListWidth}
+                      />
+                      <Box marginTop={1} flexDirection="column">
+                        <Text color="gray">Description</Text>
+                        <Box marginLeft={2}>
+                          <DescriptionLines
+                            text={selectedDiscoveryDetail.selected.description}
+                            empty="No public description set."
+                            width={Math.max(1, contentListWidth - 2)}
+                          />
+                        </Box>
+                      </Box>
+                      <FixedLine
+                        text={`Encryption key version: ${
+                          selectedDiscoveryDetail.selected.encryptionKeyVersion ?? 'n/a'
+                        } · signing key version ${
+                          selectedDiscoveryDetail.selected.signingKeyVersion ?? 'n/a'
+                        }`}
+                        width={contentListWidth}
+                      />
                       {selectedDiscoveryDetail.publicRoute ? (
                         <Box flexDirection="column">
-                          <Text>
-                            Linked email:{' '}
-                            {selectedDiscoveryDetail.publicRoute.linkedEmail ? (
-                              <Text>{selectedDiscoveryDetail.publicRoute.linkedEmail}</Text>
-                            ) : (
-                              <Text color="gray">not published</Text>
-                            )}
-                          </Text>
-                          <Text>
-                            Contact policy: <Text>{selectedDiscoveryDetail.publicRoute.contactPolicy.mode}</Text>
-                            <Text color="gray"> · allowlist </Text>
-                            <Text>{selectedDiscoveryDetail.publicRoute.contactPolicy.allowlistScope}</Text>
-                          </Text>
-                          <Text color="gray">
-                            Preview before approval:{' '}
-                            {selectedDiscoveryDetail.publicRoute.contactPolicy
-                              .messagePreviewVisibleBeforeApproval
-                              ? 'yes'
-                              : 'no'}
-                          </Text>
-                          <Text color="gray">
-                            Content types:{' '}
-                            {selectedDiscoveryDetail.publicRoute.allowAllContentTypes
-                              ? 'all'
-                              : selectedDiscoveryDetail.publicRoute.supportedContentTypes.length > 0
-                                ? selectedDiscoveryDetail.publicRoute.supportedContentTypes.join(', ')
-                                : 'none'}
-                          </Text>
-                          <Text color="gray">
-                            Headers:{' '}
-                            {selectedDiscoveryDetail.publicRoute.allowAllHeaders
-                              ? 'all'
-                              : selectedDiscoveryDetail.publicRoute.supportedHeaders.length > 0
-                                ? selectedDiscoveryDetail.publicRoute.supportedHeaders
-                                    .map(header => header.name)
-                                    .join(', ')
-                                : 'none'}
-                          </Text>
+                          <FixedLine
+                            text={`Linked email: ${
+                              selectedDiscoveryDetail.publicRoute.linkedEmail ?? 'not published'
+                            }`}
+                            width={contentListWidth}
+                          />
+                          <FixedLine
+                            text={`Contact policy: ${selectedDiscoveryDetail.publicRoute.contactPolicy.mode} · allowlist ${selectedDiscoveryDetail.publicRoute.contactPolicy.allowlistScope}`}
+                            width={contentListWidth}
+                          />
+                          <FixedLine
+                            text={`Preview before approval: ${
+                              selectedDiscoveryDetail.publicRoute.contactPolicy
+                                .messagePreviewVisibleBeforeApproval
+                                ? 'yes'
+                                : 'no'
+                            }`}
+                            width={contentListWidth}
+                            color="gray"
+                          />
+                          <FixedLine
+                            text={`Content types: ${
+                              selectedDiscoveryDetail.publicRoute.allowAllContentTypes
+                                ? 'all'
+                                : selectedDiscoveryDetail.publicRoute.supportedContentTypes.length > 0
+                                  ? selectedDiscoveryDetail.publicRoute.supportedContentTypes.join(', ')
+                                  : 'none'
+                            }`}
+                            width={contentListWidth}
+                            color="gray"
+                          />
+                          <FixedLine
+                            text={`Headers: ${
+                              selectedDiscoveryDetail.publicRoute.allowAllHeaders
+                                ? 'all'
+                                : selectedDiscoveryDetail.publicRoute.supportedHeaders.length > 0
+                                  ? selectedDiscoveryDetail.publicRoute.supportedHeaders
+                                      .map(header => header.name)
+                                      .join(', ')
+                                  : 'none'
+                            }`}
+                            width={contentListWidth}
+                            color="gray"
+                          />
                         </Box>
                       ) : (
-                        <Text color="gray">
-                          No extended public route metadata is published for this agent.
-                        </Text>
+                        <FixedLine
+                          text="No extended public route metadata is published for this agent."
+                          width={contentListWidth}
+                          color="gray"
+                        />
                       )}
                       {sharedThreadsWithDiscoveredAgent.length > 0 ? (
-                        <Text color="gray">
-                          Latest shared thread:{' '}
-                          {sharedThreadsWithDiscoveredAgent[0]?.label ?? 'n/a'} ·{' '}
-                          {formatTimestamp(sharedThreadsWithDiscoveredAgent[0]?.lastMessageAt)}
-                        </Text>
+                        <FixedLine
+                          text={`Latest shared thread: ${
+                            sharedThreadsWithDiscoveredAgent[0]?.label ?? 'n/a'
+                          } · ${formatTimestamp(sharedThreadsWithDiscoveredAgent[0]?.lastMessageAt)}`}
+                          width={contentListWidth}
+                          color="gray"
+                        />
                       ) : (
-                        <Text color="gray">No shared threads yet. Press N to start one.</Text>
+                        <FixedLine
+                          text="No shared threads yet. Press N to start one."
+                          width={contentListWidth}
+                          color="gray"
+                        />
                       )}
                     </Box>
                   ) : (
-                    <Text color="gray">Press Enter to load public details for this agent.</Text>
+                    <FixedLine
+                      text="Press Enter to load public details for this agent."
+                      width={contentListWidth}
+                      color="gray"
+                    />
                   )}
                 </Box>
               ) : null}
@@ -6212,28 +6852,35 @@ export function RootShell({
 
         {route.type === 'account' ? (
           <Box flexDirection="column">
-            <Text>
-              Signed in as <Text bold>{connectionState.auth.claims.email ?? 'unknown'}</Text>
-              <Text color="gray"> · profile {connectionState.auth.profile.name}</Text>
-            </Text>
-            <Text>
-              <Text color={accountFocus === 'security' ? 'cyan' : 'gray'}>
-                {accountFocus === 'security' ? '▸ ' : '  '}Security
-              </Text>
-              <Text color="gray"> · </Text>
-              <Text color={accountFocus === 'devices' ? 'cyan' : 'gray'}>
-                {accountFocus === 'devices' ? '▸ ' : '  '}Devices
-              </Text>
-            </Text>
+            <FixedLine
+              text={`Signed in as ${connectionState.auth.claims.email ?? 'unknown'} · profile ${connectionState.auth.profile.name}`}
+              width={contentListWidth}
+            />
+            <FixedLine
+              text={`${accountFocus === 'security' ? '▸ ' : '  '}Security · ${
+                accountFocus === 'devices' ? '▸ ' : '  '
+              }Devices`}
+              width={contentListWidth}
+              color="gray"
+            />
             {accountFocus === 'security' ? (
               <Box marginTop={1} flexDirection="column">
                 <Text color="cyan">◆ Security & recovery</Text>
-                <Text><Text bold>{model.account.securityState.title}</Text></Text>
-                <Text color="gray">{model.account.securityState.description}</Text>
+                <FixedLine
+                  text={model.account.securityState.title}
+                  width={contentListWidth}
+                  bold
+                />
+                <FixedLine
+                  text={model.account.securityState.description}
+                  width={contentListWidth}
+                  color="gray"
+                />
                 {renderList({
                   items: securityActions.map(action => `${action.label} · ${action.description}`),
                   selectedIndex: clampIndex(securityActionIndex, securityActions.length),
                   empty: 'No account actions available.',
+                  maxWidth: contentListWidth,
                 })}
               </Box>
             ) : (
@@ -6241,9 +6888,12 @@ export function RootShell({
                 <Text color="cyan">◆ Trusted devices</Text>
                 {model.account.deviceRequests.length > 0 ? (
                   model.account.deviceRequests.slice(0, 3).map(request => (
-                    <Text key={request.id} color="yellow">
-                      {'  '}pending {request.deviceId} · expires {formatTimestamp(request.expiresAt)}
-                    </Text>
+                    <FixedLine
+                      key={request.id}
+                      text={`  pending ${request.deviceId} · expires ${formatTimestamp(request.expiresAt)}`}
+                      width={contentListWidth}
+                      color="yellow"
+                    />
                   ))
                 ) : null}
                 {renderList({
@@ -6253,6 +6903,7 @@ export function RootShell({
                   ),
                   selectedIndex: clampIndex(deviceSelection, model.account.devices.length),
                   empty: 'No trusted devices found.',
+                  maxWidth: contentListWidth,
                 })}
               </Box>
             )}
@@ -6263,7 +6914,7 @@ export function RootShell({
 
         <Box flexShrink={0} flexDirection="column">
           {statusBar}
-          <ModeBar mode={footerMode} />
+          <ModeBar mode={footerMode} width={contentListWidth} />
         </Box>
       </Box>
     </Box>

@@ -20,6 +20,13 @@ import {
 } from '@/lib/published-actor-search';
 import { useWorkspaceShell } from '@/features/workspace/use-workspace-shell';
 import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell';
+import type { DbConnection } from '@/module_bindings';
+import {
+  isDeregisteringOrDeregisteredInboxAgentState,
+  isFailedRegistrationInboxAgentState,
+  isPendingMasumiInboxAgentState,
+  isUnavailableForChatInboxAgentState,
+} from '../../../shared/inbox-agent-registration';
 
 export const Route = createFileRoute('/discover_/$slug')({
   head: ({ params }) =>
@@ -35,6 +42,28 @@ function describeDiscoveredAgent(actor: DiscoveredNetworkAgent): string {
   return actor.displayName?.trim() ? actor.displayName : actor.slug;
 }
 
+function getDiscoveredAgentBadge(actor: DiscoveredNetworkAgent): {
+  label: string;
+  variant: 'secondary' | 'outline' | 'soft-warning' | 'soft-danger';
+} | null {
+  if (isFailedRegistrationInboxAgentState(actor.registrationState)) {
+    return { label: 'Invalid', variant: 'soft-danger' };
+  }
+  if (isDeregisteringOrDeregisteredInboxAgentState(actor.registrationState)) {
+    return {
+      label:
+        actor.registrationState === 'DeregistrationConfirmed'
+          ? 'Deregistered'
+          : 'Deregistering',
+      variant: 'outline',
+    };
+  }
+  if (isPendingMasumiInboxAgentState(actor.registrationState)) {
+    return { label: 'Pending', variant: 'soft-warning' };
+  }
+  return actor.agentIdentifier ? { label: 'Registered', variant: 'secondary' } : null;
+}
+
 type DiscoveredAgentLookupState = {
   requestKey: string | null;
   agent: DiscoveredNetworkAgent | null;
@@ -46,6 +75,10 @@ function DiscoveredAgentDetailsPage() {
   const navigate = useNavigate();
   const workspace = useWorkspaceShell();
   const session = workspace.status === 'ready' ? workspace.session : null;
+  const liveConnection =
+    workspace.status === 'ready'
+      ? (workspace.conn.getConnection?.() as DbConnection | null)
+      : null;
   const workspaceSlug =
     workspace.status === 'ready'
       ? workspace.shellInboxSlug ?? workspace.existingDefaultActor?.slug ?? null
@@ -60,7 +93,7 @@ function DiscoveredAgentDetailsPage() {
     ? `${session.user.issuer}|${session.user.subject}`
     : null;
   const lookupRequestKey = sessionKey
-    ? `${sessionKey}\u0000${params.slug}`
+    ? `${sessionKey}\u0000${params.slug}\u0000${liveConnection ? 'live' : 'pending'}`
     : null;
   const lookupMatchesRequest =
     lookupRequestKey !== null && lookupState.requestKey === lookupRequestKey;
@@ -78,6 +111,7 @@ function DiscoveredAgentDetailsPage() {
     void lookupMasumiNetworkAgent({
       slug: params.slug,
       session,
+      liveConnection,
     })
       .then(match => {
         if (cancelled) return;
@@ -109,9 +143,13 @@ function DiscoveredAgentDetailsPage() {
     return () => {
       cancelled = true;
     };
-  }, [lookupRequestKey, params.slug, session]);
+  }, [liveConnection, lookupRequestKey, params.slug, session]);
 
   function openThreadWithAgent() {
+    if (isUnavailableForChatInboxAgentState(agent?.registrationState)) {
+      return;
+    }
+
     if (!workspaceSlug) {
       void navigate({ to: '/' });
       return;
@@ -159,6 +197,17 @@ function DiscoveredAgentDetailsPage() {
           </Alert>
         ) : agent ? (
           <div className="space-y-4">
+            {(() => {
+              const badge = getDiscoveredAgentBadge(agent);
+              const unavailableForChat = isUnavailableForChatInboxAgentState(
+                agent.registrationState
+              );
+              const invalidRegistration = isFailedRegistrationInboxAgentState(
+                agent.registrationState
+              );
+
+              return (
+                <>
             <div className="flex items-start gap-4 rounded-xl border border-border/60 bg-card/60 p-5">
               <AgentAvatar
                 name={describeDiscoveredAgent(agent)}
@@ -170,10 +219,12 @@ function DiscoveredAgentDetailsPage() {
                   <h2 className="truncate text-lg font-semibold tracking-tight">
                     {describeDiscoveredAgent(agent)}
                   </h2>
-                  {agent.agentIdentifier ? (
-                    <Badge variant="secondary" className="text-[10px]">
-                      <ShieldCheck className="mr-0.5 h-3 w-3" />
-                      Registered
+                  {badge ? (
+                    <Badge variant={badge.variant} className="text-[10px]">
+                      {badge.label === 'Registered' ? (
+                        <ShieldCheck className="mr-0.5 h-3 w-3" />
+                      ) : null}
+                      {badge.label}
                     </Badge>
                   ) : null}
                 </div>
@@ -203,12 +254,31 @@ function DiscoveredAgentDetailsPage() {
               </div>
             ) : null}
 
+            {unavailableForChat ? (
+              <Alert variant="destructive">
+                <WarningCircle className="h-4 w-4" />
+                <AlertTitle>
+                  {invalidRegistration
+                    ? 'Registration invalid'
+                    : 'Deregistration in progress'}
+                </AlertTitle>
+                <AlertDescription>
+                  {invalidRegistration
+                    ? 'This Masumi inbox agent has an invalid registration and cannot be used to start new encrypted chats.'
+                    : 'This Masumi inbox agent is deregistering or deregistered and cannot be used to start new encrypted chats.'}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 size="sm"
                 onClick={openThreadWithAgent}
-                disabled={!workspaceSlug}
+                disabled={
+                  !workspaceSlug ||
+                  unavailableForChat
+                }
               >
                 <EnvelopeSimple className="h-4 w-4" />
                 Open encrypted thread
@@ -220,6 +290,9 @@ function DiscoveredAgentDetailsPage() {
                 </span>
               ) : null}
             </div>
+                </>
+              );
+            })()}
           </div>
         ) : null}
       </div>

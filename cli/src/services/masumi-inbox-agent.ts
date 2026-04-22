@@ -14,10 +14,12 @@ import {
   createRegistrationRequestedMetadata,
   createEmptyMasumiRegistrationResult,
   parseMasumiRegistryInboxAgentCollection,
+  parseMasumiPayInboxAgentCollection,
   parseMasumiPayInboxAgentEntry,
   isMasumiInboxAgentState,
   isNonDeregisteredInboxAgentState,
   isPendingMasumiInboxAgentState,
+  isAnyDeregistrationInboxAgentState,
   isMissingRequiredScopeMessage,
   getMasumiInboxAgentNetwork,
   type MasumiInboxAgentNetwork,
@@ -36,6 +38,7 @@ import {
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import type { TaskReporter } from './command-runtime';
 import type { ResolvedProfile } from './config-store';
+import { userError } from './errors';
 import type { StoredOidcSession } from './oidc';
 
 export type RegistrationMode = 'auto' | 'prompt' | 'skip';
@@ -64,6 +67,34 @@ type SyncResult = {
   metadata: MasumiActorRegistrationMetadata | null;
 };
 
+class MasumiNetworkError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'MasumiNetworkError';
+  }
+}
+
+function isNetworkLikeError(error: unknown): boolean {
+  if (error instanceof MasumiNetworkError) return true;
+  if (error instanceof TypeError) return true; // undici/fetch network failures
+  if (error instanceof Error && error.name === 'AbortError') return true;
+  return false;
+}
+
+async function fetchWithNetworkErrorTag(
+  url: URL | string,
+  init?: RequestInit
+): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    throw new MasumiNetworkError(
+      error instanceof Error ? error.message : 'Network request failed',
+      { cause: error }
+    );
+  }
+}
+
 type ErrorBody = {
   error?: string;
   creditsRemaining?: number;
@@ -78,6 +109,7 @@ type PaginatedInboxAgentParams = {
   page?: number;
   filterStatuses?: MasumiRegistryInboxAgentStatus[];
   agentSlug?: string;
+  includeDeregistered?: boolean;
 };
 
 function discoveryStatuses(params: {
@@ -233,7 +265,9 @@ async function fetchMasumiInboxAgentRegistrationsRaw(
     }
 
     const parsed = parseMasumiRegistryInboxAgentCollection(await response.json());
-    agents = parsed.agents.filter(entry => isNonDeregisteredInboxAgentState(entry.state));
+    agents = params.includeDeregistered
+      ? parsed.agents
+      : parsed.agents.filter(entry => isNonDeregisteredInboxAgentState(entry.state));
     hasNextPage = agents.length >= take && parsed.nextCursor !== null;
 
     if (currentPage === page) {
@@ -444,11 +478,13 @@ export async function lookupMasumiInboxAgentBySlug(params: {
     agentSlug: normalizedSlug,
     take: 20,
     page: 1,
-    filterStatuses: ['Pending', 'Verified'],
+    filterStatuses: ['Pending', 'Verified', 'Deregistered', 'Invalid'],
+    includeDeregistered: true,
   });
   return pickNewestExactInboxAgentMatch({
     entries: entries.agents,
     slug: normalizedSlug,
+    includeDeregistered: true,
   });
 }
 
@@ -545,18 +581,24 @@ async function discoverInboxAgentBySlug(params: {
   issuer: string;
   session: StoredOidcSession;
   slug: string;
+  includeDeregistered?: boolean;
 }): Promise<MasumiInboxAgentEntry | null> {
+  const includeDeregistered = params.includeDeregistered ?? false;
   const entries = await fetchMasumiInboxAgentRegistrations({
     issuer: params.issuer,
     session: params.session,
     agentSlug: params.slug,
     take: 20,
     page: 1,
-    filterStatuses: ['Pending', 'Verified'],
+    filterStatuses: includeDeregistered
+      ? ['Pending', 'Verified', 'Deregistered', 'Invalid']
+      : ['Pending', 'Verified'],
+    includeDeregistered,
   });
   return pickNewestExactInboxAgentMatch({
     entries: entries.agents,
     slug: params.slug,
+    includeDeregistered,
   });
 }
 
@@ -573,7 +615,7 @@ async function registerInboxAgent(params: {
   const url = buildMasumiPayApiUrl(params.issuer, 'inbox-agents');
   url.searchParams.set('network', getMasumiInboxAgentNetwork());
 
-  const response = await fetch(url, {
+  const response = await fetchWithNetworkErrorTag(url, {
     method: 'POST',
     headers: (() => {
       const headers = buildHeaders(params.accessToken);
@@ -609,6 +651,100 @@ async function registerInboxAgent(params: {
     kind: 'success',
     entry: parseMasumiPayInboxAgentEntry(payload),
   };
+}
+
+async function discoverOwnedPayInboxAgentBySlug(params: {
+  issuer: string;
+  accessToken: string;
+  slug: string;
+}): Promise<MasumiInboxAgentEntry | null> {
+  const normalizedSlug = normalizeInboxSlug(params.slug);
+  if (!normalizedSlug) {
+    return null;
+  }
+
+  const url = buildMasumiPayApiUrl(params.issuer, 'inbox-agents');
+  url.searchParams.set('network', getMasumiInboxAgentNetwork());
+  url.searchParams.set('take', '20');
+  url.searchParams.set('search', normalizedSlug);
+  url.searchParams.set('filterStatus', 'Registered');
+
+  const response = await fetchWithNetworkErrorTag(url, {
+    headers: buildHeaders(params.accessToken),
+  });
+
+  if (!response.ok) {
+    const body = await readErrorBody(response);
+    throw userError(body.error ?? `Unable to list inbox agents (${response.status})`, {
+      code: 'INBOX_AGENT_LOOKUP_FAILED',
+    });
+  }
+
+  const parsed = parseMasumiPayInboxAgentCollection(await response.json());
+  return pickNewestExactInboxAgentMatch({
+    entries: parsed.agents,
+    slug: normalizedSlug,
+  });
+}
+
+function isDeregisterableRegistrationMetadata(
+  metadata: MasumiActorRegistrationMetadata | null | undefined
+): metadata is MasumiActorRegistrationMetadata & { masumiInboxAgentId: string } {
+  return Boolean(
+    metadata?.masumiInboxAgentId?.trim() &&
+      metadata.masumiRegistrationState === 'RegistrationConfirmed'
+  );
+}
+
+const INBOX_AGENT_DEREGISTER_TIMEOUT_MS = 15_000;
+
+class DeregisterTimeoutError extends Error {
+  constructor() {
+    super('Deregister request timed out');
+    this.name = 'DeregisterTimeoutError';
+  }
+}
+
+async function requestInboxAgentDeregistration(params: {
+  issuer: string;
+  accessToken: string;
+  inboxAgentId: string;
+  timeoutMs?: number;
+}): Promise<MasumiInboxAgentEntry> {
+  const url = buildMasumiPayApiUrl(
+    params.issuer,
+    `inbox-agents/${encodeURIComponent(params.inboxAgentId)}/deregister`
+  );
+  url.searchParams.set('network', getMasumiInboxAgentNetwork());
+
+  const controller = new AbortController();
+  const timeoutMs = params.timeoutMs ?? INBOX_AGENT_DEREGISTER_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetchWithNetworkErrorTag(url, {
+      method: 'POST',
+      headers: buildHeaders(params.accessToken),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const body = await readErrorBody(response);
+      throw userError(body.error ?? `Unable to deregister inbox agent (${response.status})`, {
+        code: 'INBOX_AGENT_DEREGISTER_REJECTED',
+      });
+    }
+
+    const payload = await response.json();
+    return parseMasumiPayInboxAgentEntry(payload);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new DeregisterTimeoutError();
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function persistRegistrationMetadata(params: {
@@ -728,6 +864,9 @@ export async function syncMasumiInboxAgentRegistration(params: {
       issuer: params.profile.issuer,
       session: params.session,
       slug: params.actor.slug,
+      includeDeregistered:
+        Boolean(currentMetadata?.masumiInboxAgentId) ||
+        isAnyDeregistrationInboxAgentState(currentMetadata?.masumiRegistrationState),
     });
 
     if (discovered) {
@@ -916,6 +1055,28 @@ export async function syncMasumiInboxAgentRegistration(params: {
     };
     return { registration: result, metadata: currentMetadata };
   } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Unable to register inbox agent';
+    // Network/connectivity errors are transient — don't overwrite a prior
+    // RegistrationConfirmed state as RegistrationFailed. Revert to pre-attempt
+    // metadata and surface a service_unavailable status so the next sync retries.
+    if (isNetworkLikeError(error)) {
+      currentMetadata = preAttemptMetadata;
+      await persistRegistrationMetadata({
+        conn: params.conn,
+        actor: params.actor,
+        metadata: currentMetadata,
+      });
+      result = {
+        ...registrationResultFromMetadata(currentMetadata),
+        attempted: true,
+        creditsRemaining,
+        status: preAttemptMetadata ? result.status : 'service_unavailable',
+        error: message,
+      };
+      return { registration: result, metadata: currentMetadata };
+    }
+
     currentMetadata = createRegistrationFailedMetadata({
       current: preAttemptMetadata,
     });
@@ -924,8 +1085,6 @@ export async function syncMasumiInboxAgentRegistration(params: {
       actor: params.actor,
       metadata: currentMetadata,
     });
-    const message =
-      error instanceof Error ? error.message : 'Unable to register inbox agent';
     if (isMissingRequiredScopeMessage(message)) {
       result.status = 'scope_missing';
       result.error = toScopeMessage(message, params.session);
@@ -939,4 +1098,102 @@ export async function syncMasumiInboxAgentRegistration(params: {
     };
     return { registration: result, metadata: currentMetadata };
   }
+}
+
+export async function deregisterMasumiInboxAgentRegistration(params: {
+  profile: ResolvedProfile;
+  session: StoredOidcSession;
+  conn: DbConnection;
+  actor: VisibleAgentRow;
+  reporter: TaskReporter;
+}): Promise<SyncResult> {
+  const accessToken = hasMasumiAccessToken(params.session)
+    ? params.session.accessToken.trim()
+    : null;
+  let currentMetadata = readActorRegistrationMetadata(params.actor);
+
+  if (!accessToken) {
+    throw userError(
+      toScopeMessage(
+        'Masumi access_token is unavailable for inbox-agent deregistration.',
+        params.session
+      ),
+      {
+        code: 'MASUMI_SCOPE_MISSING',
+      }
+    );
+  }
+
+  params.reporter.info('Phase: lookup');
+  const discovered = await discoverOwnedPayInboxAgentBySlug({
+    issuer: params.profile.issuer,
+    accessToken,
+    slug: params.actor.slug,
+  });
+  currentMetadata = discovered ? registrationMetadataFromEntry(discovered) : null;
+
+  if (!isDeregisterableRegistrationMetadata(currentMetadata)) {
+    const state = currentMetadata?.masumiRegistrationState ?? 'not registered';
+    throw userError(
+      `Inbox agent ${params.actor.slug} cannot be deregistered while its state is ${state}.`,
+      {
+        code: 'INBOX_AGENT_NOT_DEREGISTERABLE',
+        hint: `masumi-agent-messenger agent network sync ${params.actor.slug}`,
+      }
+    );
+  }
+
+  params.reporter.success('Phase: lookup complete');
+  params.reporter.info(`Deregistering inbox agent for ${params.actor.slug}`);
+
+  const deregistered = await requestInboxAgentDeregistration({
+    issuer: params.profile.issuer,
+    accessToken,
+    inboxAgentId: currentMetadata.masumiInboxAgentId,
+  }).catch(async error => {
+    // Masumi processes deregistration asynchronously. On timeout, skip the
+    // direct response and re-discover the current state so the local actor
+    // row is updated to whatever Masumi committed.
+    if (!(error instanceof DeregisterTimeoutError)) {
+      throw error;
+    }
+    params.reporter.info('Deregister request timed out; syncing state');
+    return discoverInboxAgentBySlug({
+      issuer: params.profile.issuer,
+      session: params.session,
+      slug: params.actor.slug,
+      includeDeregistered: true,
+    });
+  });
+
+  if (!deregistered) {
+    // No state visible from Masumi after timeout — leave local metadata as-is
+    // so a later sync can reconcile.
+    return {
+      registration: {
+        ...registrationResultFromMetadata(currentMetadata),
+        attempted: true,
+        status: 'service_unavailable',
+        error: 'Deregister request is still in flight; re-run sync to update state.',
+      },
+      metadata: currentMetadata,
+    };
+  }
+
+  currentMetadata = registrationMetadataFromEntry(deregistered);
+  await persistRegistrationMetadata({
+    conn: params.conn,
+    actor: params.actor,
+    metadata: currentMetadata,
+  });
+  params.reporter.success('Phase: deregister complete');
+
+  return {
+    registration: {
+      ...registrationResultFromMetadata(currentMetadata),
+      attempted: true,
+      error: null,
+    },
+    metadata: currentMetadata,
+  };
 }

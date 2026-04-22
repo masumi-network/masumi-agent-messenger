@@ -17,7 +17,12 @@ import {
   removeContactAllowlist,
 } from '../../services/contact-management';
 import { userError } from '../../services/errors';
-import { createInboxIdentity, registerInboxAgent, rotateInboxKeys } from '../../services/inbox-management';
+import {
+  createInboxIdentity,
+  deregisterInboxAgent,
+  registerInboxAgent,
+  rotateInboxKeys,
+} from '../../services/inbox-management';
 import { resolveRotationDeviceSelection } from '../../services/key-rotation-device-selection';
 import { maybeOfferBackupAfterKeyCreation } from '../../services/key-backup-prompt';
 import { resolvePublicDescriptionOption } from '../../services/public-description';
@@ -72,6 +77,10 @@ type AgentNetworkOptions = AgentContextOptions & {
   disableLinkedEmail?: boolean;
   publicDescription?: string;
   publicDescriptionFile?: string;
+};
+
+type AgentNetworkDeregisterOptions = AgentContextOptions & {
+  yes?: boolean;
 };
 
 type AgentAllowlistMutateOptions = AgentContextOptions & {
@@ -225,7 +234,13 @@ export function registerAgentCommands(program: Command): void {
             if (agentItem.isActive) flags.push('active');
             if (agentItem.isDefault) flags.push('default');
             flags.push(agentItem.managed ? 'managed' : 'unmanaged');
-            flags.push(agentItem.registered ? 'published' : 'unpublished');
+            flags.push(
+              agentItem.deregistered
+                ? 'deregistered'
+                : agentItem.registered
+                  ? 'published'
+                  : 'unpublished'
+            );
 
             rows.push({
               slug: agentItem.slug,
@@ -288,6 +303,7 @@ export function registerAgentCommands(program: Command): void {
             managed: green,
             unmanaged: yellow,
             published: green,
+            deregistered: yellow,
             unpublished: yellow,
           };
           const renderFlags = (flags: readonly string[]): string =>
@@ -499,6 +515,10 @@ export function registerAgentCommands(program: Command): void {
               {
                 key: 'Registered',
                 value: result.agent.registered ? green('yes') : yellow('no'),
+              },
+              {
+                key: 'Deregistered',
+                value: result.agent.deregistered ? yellow('yes') : green('no'),
               },
             ]),
           ],
@@ -886,6 +906,56 @@ export function registerAgentCommands(program: Command): void {
             ...(result.registration.creditsRemaining !== null &&
             result.registration.creditsRemaining !== undefined
               ? [{ key: 'Credits', value: String(result.registration.creditsRemaining) }]
+              : []),
+          ]),
+        }),
+      });
+    });
+
+  network
+    .command('deregister')
+    .description('Deregister a managed agent from the Masumi network')
+    .argument('[slug]', 'Owned agent slug (defaults to the active agent)')
+    .option('--agent <slug>', 'Owned agent slug to deregister')
+    .option('-y, --yes', 'Skip the confirmation prompt')
+    .action(async function (this: Command, slugArg: string | undefined) {
+      const options = this.optsWithGlobals() as AgentNetworkDeregisterOptions;
+      const selectedAgentSlug =
+        (slugArg ?? options.agent) ?? (await resolvePreferredAgentSlug(options.profile));
+      await runCommandAction({
+        title: 'Masumi agent network deregister',
+        options,
+        run: async ({ reporter }) => {
+          if (!options.json && !options.yes) {
+            const confirmed = await confirmYesNo({
+              question: `Deregister ${selectedAgentSlug} on ${getMasumiInboxAgentNetwork()}?`,
+              defaultValue: false,
+            });
+            if (!confirmed) {
+              throw userError('Deregistration cancelled.', {
+                code: 'DEREGISTRATION_CANCELLED',
+              });
+            }
+          }
+
+          return deregisterInboxAgent({
+            profileName: options.profile,
+            actorSlug: selectedAgentSlug,
+            reporter,
+          });
+        },
+        toHuman: result => ({
+          summary:
+            result.registration.registrationState === 'DeregistrationConfirmed'
+              ? green('Managed agent is deregistered.')
+              : yellow(`Managed agent status: ${result.registration.status}.`),
+          details: renderKeyValue([
+            { key: 'Agent', value: result.actor.slug, color: cyan },
+            ...(result.registration.inboxAgentId
+              ? [{ key: 'Inbox agent', value: result.registration.inboxAgentId, color: dim }]
+              : []),
+            ...(result.registration.registrationState
+              ? [{ key: 'State', value: result.registration.registrationState, color: dim }]
               : []),
           ]),
         }),

@@ -5,6 +5,7 @@ import {
   summarizeThread,
 } from '../../../shared/inbox-state';
 import {
+  isDeregisteringOrDeregisteredMasumiRegistrationMetadata,
   isMasumiInboxAgentState,
   registrationResultFromMetadata,
   type MasumiActorRegistrationMetadata,
@@ -28,6 +29,7 @@ export type OwnedInboxSummary = {
   isDefault: boolean;
   managed: boolean;
   registered: boolean;
+  deregistered: boolean;
   publicDescription: string | null;
   publicLinkedEmailEnabled: boolean;
 };
@@ -264,9 +266,16 @@ function toOwnedInboxSummary(actor: VisibleAgentRow): OwnedInboxSummary {
     isDefault: actor.isDefault,
     managed: metadata !== null,
     registered: registration.status === 'registered',
+    deregistered: isDeregisteredOwnedActor(actor),
     publicDescription: actor.publicDescription ?? null,
     publicLinkedEmailEnabled: actor.publicLinkedEmailEnabled,
   };
+}
+
+function isDeregisteredOwnedActor(actor: VisibleAgentRow): boolean {
+  return isDeregisteringOrDeregisteredMasumiRegistrationMetadata(
+    readActorRegistrationMetadata(actor)
+  );
 }
 
 function readActorRegistrationMetadata(
@@ -579,8 +588,14 @@ export function buildRootShellViewModel(params: {
   const ownedActors = params.rows.actors
     .filter(actor => actor.inboxId === defaultActor.inboxId)
     .sort(sortOwnedActors);
+  const usableOwnedActors = ownedActors.filter(actor => !isDeregisteredOwnedActor(actor));
   const activeActor =
-    ownedActors.find(actor => actor.slug === params.activeInboxSlug) ?? ownedActors[0] ?? defaultActor;
+    usableOwnedActors.find(actor => actor.slug === params.activeInboxSlug) ??
+    usableOwnedActors[0] ??
+    null;
+  if (!activeActor) {
+    return null;
+  }
 
   const ownActorIds = buildOwnActorIds(params.rows.actors, activeActor.inboxId);
   const unreadMessages = buildUnreadMessagesForActor({

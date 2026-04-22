@@ -110,7 +110,10 @@ import {
   markImportedRotationSnapshotKeysPending,
   type ImportedRotationKeyConfirmationStatus,
 } from '@/lib/imported-rotation-key-confirmation';
-import { resolvePublishedActorsForIdentifier } from '@/lib/published-actor-search';
+import {
+  assertMasumiNetworkAgentCanReceiveChats,
+  resolvePublishedActorsForIdentifier,
+} from '@/lib/published-actor-search';
 import { useLiveTable } from '@/lib/spacetime-live-table';
 import {
   cacheSenderSecret,
@@ -158,6 +161,11 @@ import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { isTimestampInFuture } from '../../../shared/spacetime-time';
 import type { DeviceKeyShareSnapshot } from '../../../shared/device-sharing';
 import { importedRotationActorKey } from '../../../shared/imported-rotation-key-confirmation';
+import {
+  isDeregisteringOrDeregisteredInboxAgentState,
+  isFailedRegistrationInboxAgentState,
+  isUnavailableForChatInboxAgentState,
+} from '../../../shared/inbox-agent-registration';
 import type {
   PublishedActorLookupLike,
   ResolvedPublishedActor,
@@ -1305,6 +1313,9 @@ function AuthenticatedInboxPage() {
     () => actors.find(row => row.slug === normalizedRouteSlug),
     [actors, normalizedRouteSlug]
   );
+  const activeActorDeregistered = isDeregisteringOrDeregisteredInboxAgentState(
+    activeActor?.masumiRegistrationState
+  );
   const activeActorContactRequests = useMemo(() => {
     if (!activeActor) {
       return [];
@@ -1460,7 +1471,11 @@ function AuthenticatedInboxPage() {
         channels: visibleChannels,
         memberships: visibleChannelMemberships,
         joinRequests: visibleChannelJoinRequests,
-        ownedActorIds: new Set(shellOwnedInboxes.map(entry => entry.actor.id)),
+        ownedActorIds: new Set(
+          shellOwnedInboxes
+            .filter(entry => !entry.deregistered)
+            .map(entry => entry.actor.id)
+        ),
       }),
     [
       shellOwnedInboxes,
@@ -1518,7 +1533,7 @@ function AuthenticatedInboxPage() {
     connectionIdentity: conn.identity ?? null,
     hasActor: Boolean(activeActor),
   });
-  const canWriteToActiveInbox = writeAccess.canWrite;
+  const canWriteToActiveInbox = writeAccess.canWrite && !activeActorDeregistered;
   useEffect(() => {
     if (!displayInbox || !activeActor) {
       return;
@@ -1533,10 +1548,15 @@ function AuthenticatedInboxPage() {
     }
 
   }, [activeActor, displayInbox]);
-  const writeAuthorizationError = writeAccess.reason;
+  const writeAuthorizationError = activeActorDeregistered
+    ? 'This inbox agent is deregistering or deregistered and can no longer send chats or mutate inbox data.'
+    : writeAccess.reason;
   const activeActorIdentity = useMemo(
-    () => (activeActor ? toActorIdentity(activeActor) : null),
-    [activeActor]
+    () =>
+      activeActor && !activeActorDeregistered
+        ? toActorIdentity(activeActor)
+        : null,
+    [activeActor, activeActorDeregistered]
   );
   const ownedDevices = useMemo(() => {
     if (!displayInbox) {
@@ -2117,11 +2137,11 @@ function AuthenticatedInboxPage() {
   }, [activeActor, threadReadStates]);
 
   useEffect(() => {
-    if (!activeActor) return;
+    if (!activeActor || activeActorDeregistered) return;
     return deferEffectStateUpdate(() => {
       setActiveActorIdentity(toActorIdentity(activeActor));
     });
-  }, [activeActor]);
+  }, [activeActor, activeActorDeregistered]);
 
   useEffect(() => {
     return deferEffectStateUpdate(() => {
@@ -2811,6 +2831,7 @@ function AuthenticatedInboxPage() {
     return resolvePublishedActorsForIdentifier({
       identifier,
       liveConnection,
+      session: authenticatedSession,
     });
   }, [authenticatedSession, liveConnection]);
 
@@ -3009,20 +3030,24 @@ function AuthenticatedInboxPage() {
   }, [threadTimelinePage, latestTimelineItemSignature, selectedThread]);
 
   useEffect(() => {
-    setTimelineUnseenCount(0);
+    return deferEffectStateUpdate(() => {
+      setTimelineUnseenCount(0);
+    });
   }, [selectedThread?.id]);
 
   useEffect(() => {
     const currentId = selectedThread?.id ?? null;
-    if (currentId !== anchoredThreadIdRef.current) {
-      anchoredThreadIdRef.current = currentId;
-      if (currentId === null) {
-        setUnreadAnchorSeq(null);
-        return;
-      }
-      const readState = readStateByThreadId.get(currentId);
-      setUnreadAnchorSeq(readState?.lastReadThreadSeq ?? null);
+    if (currentId === anchoredThreadIdRef.current) {
+      return;
     }
+    anchoredThreadIdRef.current = currentId;
+    const nextUnreadAnchorSeq =
+      currentId === null
+        ? null
+        : readStateByThreadId.get(currentId)?.lastReadThreadSeq ?? null;
+    return deferEffectStateUpdate(() => {
+      setUnreadAnchorSeq(nextUnreadAnchorSeq);
+    });
   }, [selectedThread?.id, readStateByThreadId]);
 
   const latestSelectedThreadSenderMessage = useMemo(
@@ -3065,7 +3090,11 @@ function AuthenticatedInboxPage() {
 
   const composeOptions = useMemo(() => {
     const options: Array<Agent | ResolvedPublishedActor> = actors
-      .filter(actor => !activeActor || actor.id !== activeActor.id)
+      .filter(
+        actor =>
+          (!activeActor || actor.id !== activeActor.id) &&
+          !isUnavailableForChatInboxAgentState(actor.masumiRegistrationState)
+      )
       .sort((left, right) => describeActor(left).localeCompare(describeActor(right)));
     for (const actor of composeResolvedTargets) {
       if (
@@ -3090,7 +3119,8 @@ function AuthenticatedInboxPage() {
       .filter(actor => {
         return (
           !activeIds.has(actor.id.toString()) &&
-          !pendingInviteIdentities.has(actor.publicIdentity)
+          !pendingInviteIdentities.has(actor.publicIdentity) &&
+          !isUnavailableForChatInboxAgentState(actor.masumiRegistrationState)
         );
       })
       .sort((left, right) => describeActor(left).localeCompare(describeActor(right)));
@@ -3740,10 +3770,48 @@ function AuthenticatedInboxPage() {
     }
   }
 
+  function assertLocalRecipientCanReceiveChats(target: Agent): void {
+    if (!isUnavailableForChatInboxAgentState(target.masumiRegistrationState)) {
+      return;
+    }
+
+    const reason = isFailedRegistrationInboxAgentState(target.masumiRegistrationState)
+      ? 'has an invalid Masumi registration'
+      : 'is deregistered';
+    throw new Error(
+      `Agent \`${target.slug}\` ${reason} and cannot be used for chats.`
+    );
+  }
+
+  async function assertRecipientCanReceiveChats(
+    target: Agent | ResolvedPublishedActor
+  ): Promise<void> {
+    if ('normalizedEmail' in target) {
+      assertLocalRecipientCanReceiveChats(target);
+      return;
+    }
+    if (!liveConnection) {
+      throw new Error('Sign in and connect to SpacetimeDB before sending messages.');
+    }
+
+    await assertMasumiNetworkAgentCanReceiveChats({
+      slug: target.slug,
+      session: authenticatedSession,
+      liveConnection,
+    });
+  }
+
+  async function assertRecipientsCanReceiveChats(
+    targets: Array<Agent | ResolvedPublishedActor>
+  ): Promise<void> {
+    await Promise.all(targets.map(target => assertRecipientCanReceiveChats(target)));
+  }
+
   async function resolveRecipientPublicKeys(
     target: Agent | ResolvedPublishedActor
   ): Promise<ActorPublicKeys> {
     if ('normalizedEmail' in target) {
+      assertLocalRecipientCanReceiveChats(target);
       return toActorPublicKeys(target);
     }
     if (!liveConnection) {
@@ -3761,7 +3829,6 @@ function AuthenticatedInboxPage() {
 
     return toPublishedActorPublicKeys(publishedActor);
   }
-
 
   async function handleResolveAddParticipant() {
     setActorActionError(null);
@@ -3859,9 +3926,17 @@ function AuthenticatedInboxPage() {
       setActorActionError('Some selected recipients are unavailable. Search again and select again.');
       return;
     }
+    try {
+      await assertRecipientsCanReceiveChats(recipients);
+    } catch (error) {
+      setActorActionError(
+        error instanceof Error ? error.message : 'Some selected recipients are unavailable.'
+      );
+      return;
+    }
 
     const isDirect = composeSelectedActorIds.length === 1;
-      if (!isDirect && composeSelectedActorIds.length < 2) {
+    if (!isDirect && composeSelectedActorIds.length < 2) {
       setActorActionError('Choose at least one more recipient for a group thread.');
       return;
     }
@@ -4225,8 +4300,16 @@ function AuthenticatedInboxPage() {
     if (!ensureAuthorizedWriteAccess()) return;
     setActorActionError(null);
     setActorFeedback(null);
+    const pendingParticipant = addParticipantOptions.find(
+      actor => actorOptionId(actor) === pendingParticipantId
+    );
+    if (!pendingParticipant) {
+      setActorActionError('Selected participant is unavailable. Search again and select again.');
+      return;
+    }
 
     try {
+      await assertRecipientCanReceiveChats(pendingParticipant);
       await Promise.resolve(
         addThreadParticipantReducer({
           agentDbId: activeActor.id,
@@ -4670,19 +4753,21 @@ function AuthenticatedInboxPage() {
         section="inbox"
         title="Inbox"
         sessionEmail={authenticatedSession?.user.email ?? ''}
-        currentInboxSlug={activeActor?.slug ?? null}
+        currentInboxSlug={activeActorDeregistered ? null : activeActor?.slug ?? null}
         connected={connected}
         connectionError={conn.connectionError?.message ?? null}
         pendingApprovals={pendingIncomingCount}
         channelNavEntries={channelNavEntries}
         avatarName={activeActor?.displayName ?? activeActor?.slug ?? authenticatedSession?.user.email ?? undefined}
         avatarIdentity={activeActor?.publicIdentity ?? activeActor?.slug ?? authenticatedSession?.user.email ?? undefined}
-        ownedAgents={shellOwnedInboxes.map(entry => ({
-          id: entry.actor.id,
-          slug: entry.actor.slug,
-          displayName: entry.actor.displayName,
-          publicIdentity: entry.actor.publicIdentity,
-        }))}
+        ownedAgents={shellOwnedInboxes
+          .filter(entry => !entry.deregistered)
+          .map(entry => ({
+            id: entry.actor.id,
+            slug: entry.actor.slug,
+            displayName: entry.actor.displayName,
+            publicIdentity: entry.actor.publicIdentity,
+          }))}
       >
       {displayInbox ? (
         <KeysRecoveryDialog
@@ -4766,7 +4851,11 @@ function AuthenticatedInboxPage() {
         </div>
       ) : null}
 
-      {(sessionError || (!sessionError && liveTableError) || actorActionError || actorFeedback) ? (
+      {(sessionError ||
+        (!sessionError && liveTableError) ||
+        activeActorDeregistered ||
+        actorActionError ||
+        actorFeedback) ? (
         <div className="space-y-2">
           {sessionError ? (
             <Alert variant="destructive" onDismiss={() => setSessionError(null)}>
@@ -4776,6 +4865,16 @@ function AuthenticatedInboxPage() {
           {!sessionError && liveTableError ? (
             <Alert variant="destructive">
               <AlertDescription>{liveTableError}</AlertDescription>
+            </Alert>
+          ) : null}
+          {activeActorDeregistered ? (
+            <Alert variant="destructive">
+              <AlertTitle>Deregistration in progress</AlertTitle>
+              <AlertDescription>
+                This inbox agent is deregistering or deregistered on Masumi. It
+                is visible for history only and cannot send chats or be selected
+                as the active agent.
+              </AlertDescription>
             </Alert>
           ) : null}
           {actorActionError ? (

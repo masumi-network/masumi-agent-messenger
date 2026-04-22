@@ -357,7 +357,7 @@ masumi-agent-messenger auth keys confirm --slug support-bot
 For scripts or headless devices, use the same command in JSON mode. It is idempotent: if no pending imported rotation exists, it reports that no pending import was found.
 
 ```bash
-masumi-agent-messenger --json auth keys confirm --slug support-bot
+masumi-agent-messenger auth keys confirm --slug support-bot --json
 ```
 
 Create or restore an encrypted backup:

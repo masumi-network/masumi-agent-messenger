@@ -86,6 +86,10 @@ export function canAttemptManagedAgentRegistration(
     'status' | 'inboxAgentId' | 'agentIdentifier' | 'registrationState'
   >
 ): boolean {
+  if (registration.registrationState === 'DeregistrationConfirmed') {
+    return false;
+  }
+
   if (registration.inboxAgentId?.trim() || registration.agentIdentifier?.trim()) {
     return false;
   }
@@ -109,6 +113,19 @@ export function canAttemptManagedAgentRegistration(
   }
 
   return registration.status === 'skipped';
+}
+
+export function canAttemptManagedAgentDeregistration(
+  registration: Pick<
+    MasumiRegistrationResult,
+    'inboxAgentId' | 'agentIdentifier' | 'registrationState'
+  >
+): boolean {
+  return Boolean(
+    registration.inboxAgentId?.trim() &&
+      (registration.registrationState === 'RegistrationConfirmed' ||
+        (!registration.registrationState && registration.agentIdentifier?.trim()))
+  );
 }
 
 export function toggleSelection(values: string[], value: string): string[] {

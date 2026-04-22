@@ -397,3 +397,56 @@ export async function registerBrowserInboxAgent(params: {
     throw error;
   }
 }
+
+export async function deregisterBrowserInboxAgent(params: {
+  session: AuthenticatedBrowserSession;
+  actor: Agent;
+  persistRegistration: PersistRegistration;
+}): Promise<{
+  actor: Agent;
+  registration: MasumiRegistrationResult;
+}> {
+  const response = await fetchBrowserRegistrationApiResponse(
+    '/api/masumi/inbox-agent/deregister',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(buildSerializedSubject(params.actor)),
+    }
+  );
+  let payload: SerializedMasumiRegistrationResponse;
+  try {
+    payload = parseRegistrationResponse(response.payload);
+  } catch (parseError) {
+    if (
+      !response.ok &&
+      typeof response.payload === 'object' &&
+      response.payload !== null &&
+      'error' in response.payload &&
+      typeof response.payload.error === 'string'
+    ) {
+      const serverError = new Error(response.payload.error);
+      (serverError as unknown as Record<string, unknown>).cause = parseError;
+      throw serverError;
+    }
+    throw parseError;
+  }
+
+  if (!response.ok) {
+    throw new Error(payload.registration.error ?? 'Unable to deregister inbox agent');
+  }
+
+  const metadata = deserializeMasumiRegistrationMetadata(payload.metadata);
+  await persistRegistrationMetadata({
+    actor: params.actor,
+    persistRegistration: params.persistRegistration,
+    metadata,
+  });
+
+  return {
+    actor: applyRegistrationMetadataToActor(params.actor, metadata),
+    registration: payload.registration,
+  };
+}

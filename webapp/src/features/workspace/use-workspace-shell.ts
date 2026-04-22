@@ -198,7 +198,11 @@ export function useWorkspaceShell(params?: {
         channels: visibleChannels,
         memberships: visibleChannelMemberships,
         joinRequests: visibleChannelJoinRequests,
-        ownedActorIds: new Set(snapshot.ownedInboxAgents.map(entry => entry.actor.id)),
+        ownedActorIds: new Set(
+          snapshot.ownedInboxAgents
+            .filter(entry => !entry.deregistered)
+            .map(entry => entry.actor.id)
+        ),
       }),
     [
       snapshot.ownedInboxAgents,

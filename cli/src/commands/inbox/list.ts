@@ -145,6 +145,7 @@ export function registerInboxListCommand(command: Command): void {
               .join(' ');
           const renderRegistrationStatus = (status: string): string => {
             if (status === 'registered') return badge('registered', green);
+            if (status === 'deregistered') return badge('deregistered', yellow);
             if (status === 'pending') return badge('pending', yellow);
             if (
               status === 'failed' ||

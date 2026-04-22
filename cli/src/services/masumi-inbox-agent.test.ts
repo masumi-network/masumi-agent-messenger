@@ -9,6 +9,7 @@ import {
 import type { VisibleAgentRow } from '../../../webapp/src/module_bindings/types';
 import {
   applyRegistrationMetadataToActor,
+  deregisterMasumiInboxAgentRegistration,
   findMasumiInboxAgents,
   listMasumiInboxAgents,
   lookupMasumiInboxAgentBySlug,
@@ -207,6 +208,11 @@ describe('applyRegistrationMetadataToActor', () => {
         masumiRegistrationState: 'DeregistrationFailed',
       }).status
     ).toBe('failed');
+    expect(
+      registrationResultFromMetadata({
+        masumiRegistrationState: 'DeregistrationConfirmed',
+      }).status
+    ).toBe('deregistered');
     expect(registrationResultFromMetadata(null).status).toBe('skipped');
   });
 
@@ -877,5 +883,388 @@ describe('syncMasumiInboxAgentRegistration', () => {
     expect(result.registration.agentIdentifier).toBe('did:masumi:agent');
     expect(result.registration.registrationState).toBe('RegistrationRequested');
     expect(result.registration.error).toBe('registry offline');
+  });
+
+  it('refreshes pending deregistration state from the registry', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      jsonResponse(200, {
+        status: 'success',
+        data: {
+          registrations: [
+            {
+              id: 'agent-789',
+              name: 'Deregistered Agent',
+              description: null,
+              agentSlug: 'deregistered-agent',
+              linkedEmail: null,
+              status: 'Deregistered',
+              createdAt: '2026-04-15T00:00:00.000Z',
+              updatedAt: '2026-04-15T00:15:00.000Z',
+              statusUpdatedAt: '2026-04-15T00:15:00.000Z',
+              agentIdentifier: 'did:masumi:deregistered-agent',
+            },
+          ],
+        },
+      })
+    ) as typeof fetch;
+
+    const result = await syncMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'deregistered-agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'deregistered-agent',
+          displayName: 'Deregistered Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'agent-789',
+        masumiAgentIdentifier: 'did:masumi:deregistered-agent',
+        masumiRegistrationState: 'DeregistrationRequested',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+      mode: 'auto',
+    });
+
+    expect(result.registration.status).toBe('deregistered');
+    expect(result.registration.registrationState).toBe('DeregistrationConfirmed');
+    expect(upsertMasumiInboxAgentRegistration).toHaveBeenCalledWith({
+      agentDbId: 1n,
+      masumiRegistrationNetwork: configuredNetwork,
+      masumiInboxAgentId: 'agent-789',
+      masumiAgentIdentifier: 'did:masumi:deregistered-agent',
+      masumiRegistrationState: 'DeregistrationConfirmed',
+    });
+  });
+
+  it('uses verified registry state over cached pending deregistration', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      jsonResponse(200, {
+        status: 'success',
+        data: {
+          registrations: [
+            {
+              id: 'agent-789',
+              name: 'Registered Agent',
+              description: null,
+              agentSlug: 'registered-agent',
+              linkedEmail: null,
+              status: 'Verified',
+              createdAt: '2026-04-15T00:00:00.000Z',
+              updatedAt: '2026-04-15T00:15:00.000Z',
+              statusUpdatedAt: '2026-04-15T00:15:00.000Z',
+              agentIdentifier: 'did:masumi:registered-agent',
+            },
+          ],
+        },
+      })
+    ) as typeof fetch;
+
+    const result = await syncMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'registered-agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'registered-agent',
+          displayName: 'Registered Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'agent-789',
+        masumiAgentIdentifier: 'did:masumi:registered-agent',
+        masumiRegistrationState: 'DeregistrationRequested',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+      mode: 'auto',
+    });
+
+    expect(result.registration.status).toBe('registered');
+    expect(result.registration.registrationState).toBe('RegistrationConfirmed');
+    expect(upsertMasumiInboxAgentRegistration).toHaveBeenCalledWith({
+      agentDbId: 1n,
+      masumiRegistrationNetwork: configuredNetwork,
+      masumiInboxAgentId: 'agent-789',
+      masumiAgentIdentifier: 'did:masumi:registered-agent',
+      masumiRegistrationState: 'RegistrationConfirmed',
+    });
+  });
+
+  it('refreshes invalid registry state over cached pending deregistration', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      jsonResponse(200, {
+        status: 'success',
+        data: {
+          registrations: [
+            {
+              id: 'agent-789',
+              name: 'Deregistered Agent',
+              description: null,
+              agentSlug: 'deregistered-agent',
+              linkedEmail: null,
+              status: 'Invalid',
+              createdAt: '2026-04-15T00:00:00.000Z',
+              updatedAt: '2026-04-15T00:15:00.000Z',
+              statusUpdatedAt: '2026-04-15T00:15:00.000Z',
+              agentIdentifier: 'did:masumi:deregistered-agent',
+            },
+          ],
+        },
+      })
+    ) as typeof fetch;
+
+    const result = await syncMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'deregistered-agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'deregistered-agent',
+          displayName: 'Deregistered Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'agent-789',
+        masumiAgentIdentifier: 'did:masumi:deregistered-agent',
+        masumiRegistrationState: 'DeregistrationRequested',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+      mode: 'auto',
+    });
+
+    expect(result.registration.status).toBe('failed');
+    expect(result.registration.registrationState).toBe('RegistrationFailed');
+    expect(upsertMasumiInboxAgentRegistration).toHaveBeenCalledWith({
+      agentDbId: 1n,
+      masumiRegistrationNetwork: configuredNetwork,
+      masumiInboxAgentId: 'agent-789',
+      masumiAgentIdentifier: 'did:masumi:deregistered-agent',
+      masumiRegistrationState: 'RegistrationFailed',
+    });
+  });
+});
+
+describe('deregisterMasumiInboxAgentRegistration', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('resolves the authoritative SaaS registration id before deregistering', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [
+            {
+              id: 'agent-123',
+              name: 'Agent',
+              description: 'Registered agent',
+              agentSlug: 'agent',
+              state: 'RegistrationConfirmed',
+              createdAt: '2026-04-15T00:00:00.000Z',
+              updatedAt: '2026-04-15T00:00:00.000Z',
+              lastCheckedAt: null,
+              agentIdentifier: 'did:masumi:agent',
+              metadataVersion: 1,
+              sendFundingLovelace: null,
+              SmartContractWallet: {
+                walletVkey: 'vkey',
+                walletAddress: 'addr',
+              },
+              RecipientWallet: null,
+              CurrentTransaction: null,
+            },
+          ],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            id: 'agent-123',
+            name: 'Agent',
+            description: 'Registered agent',
+            agentSlug: 'agent',
+            state: 'DeregistrationRequested',
+            createdAt: '2026-04-15T00:00:00.000Z',
+            updatedAt: '2026-04-15T00:10:00.000Z',
+            lastCheckedAt: null,
+            agentIdentifier: 'did:masumi:agent',
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await deregisterMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'agent',
+          displayName: 'Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'stale-local-id',
+        masumiAgentIdentifier: 'did:masumi:agent',
+        masumiRegistrationState: 'RegistrationConfirmed',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.registrationState).toBe('DeregistrationRequested');
+    expect(upsertMasumiInboxAgentRegistration).toHaveBeenCalledWith({
+      agentDbId: 1n,
+      masumiRegistrationNetwork: configuredNetwork,
+      masumiInboxAgentId: 'agent-123',
+      masumiAgentIdentifier: 'did:masumi:agent',
+      masumiRegistrationState: 'DeregistrationRequested',
+    });
+
+    const calls = vi.mocked(global.fetch).mock.calls;
+    expect(String(calls[0]?.[0])).toBe(
+      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=agent&filterStatus=Registered`
+    );
+    expect(String(calls[1]?.[0])).toBe(
+      `https://issuer.example.com/pay/api/v1/inbox-agents/agent-123/deregister?network=${configuredNetwork}`
+    );
+    expect(calls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.any(Headers),
+      })
+    );
+    expect(calls).toHaveLength(2);
   });
 });

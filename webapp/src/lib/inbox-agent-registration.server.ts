@@ -11,12 +11,15 @@ import {
   getMasumiInboxAgentNetwork as getGeneratedMasumiInboxAgentNetwork,
   isNonDeregisteredInboxAgentState,
   isPendingMasumiInboxAgentState,
+  isAnyDeregistrationInboxAgentState,
   isMissingRequiredScopeMessage,
   type MasumiInboxAgentNetwork,
   MASUMI_INBOX_AGENT_REQUIRED_CREDITS,
+  type MasumiActorRegistrationMetadata,
   type MasumiRegistryInboxAgentStatus,
   normalizeMasumiDiscoveryPage,
   normalizeMasumiDiscoveryTake,
+  parseMasumiPayInboxAgentCollection,
   parseMasumiRegistryInboxAgentCollection,
   parseMasumiPayInboxAgentEntry,
   pickNewestExactInboxAgentMatch,
@@ -106,6 +109,7 @@ async function fetchMasumiInboxAgentRegistrationsForSessionRaw(params: {
   page?: number;
   filterStatuses?: MasumiRegistryInboxAgentStatus[];
   agentSlug?: string;
+  includeDeregistered?: boolean;
 }): Promise<SerializedMasumiInboxAgentSearchResponse> {
   const take = normalizeMasumiDiscoveryTake(params.take);
   const page = normalizeMasumiDiscoveryPage(params.page);
@@ -139,7 +143,9 @@ async function fetchMasumiInboxAgentRegistrationsForSessionRaw(params: {
     }
 
     const parsed = parseMasumiRegistryInboxAgentCollection(await response.json());
-    agents = parsed.agents.filter(entry => isNonDeregisteredInboxAgentState(entry.state));
+    agents = params.includeDeregistered
+      ? parsed.agents
+      : parsed.agents.filter(entry => isNonDeregisteredInboxAgentState(entry.state));
     hasNextPage = agents.length >= take && parsed.nextCursor !== null;
 
     if (currentPage === page) {
@@ -204,6 +210,7 @@ async function fetchMasumiInboxAgentRegistrationsForSession(params: {
   page?: number;
   filterStatuses?: MasumiRegistryInboxAgentStatus[];
   agentSlug?: string;
+  includeDeregistered?: boolean;
 }): Promise<SerializedMasumiInboxAgentSearchResponse> {
   const result = await fetchMasumiInboxAgentRegistrationsForSessionRaw(params);
   return {
@@ -340,11 +347,13 @@ export async function lookupMasumiInboxAgentForSession(params: {
     agentSlug: slug,
     take: 20,
     page: 1,
-    filterStatuses: ['Pending', 'Verified'],
+    filterStatuses: ['Pending', 'Verified', 'Deregistered', 'Invalid'],
+    includeDeregistered: true,
   });
   const exactMatch = pickNewestExactInboxAgentMatch({
     entries: result.agents,
     slug,
+    includeDeregistered: true,
   });
 
   return {
@@ -358,17 +367,23 @@ export async function lookupMasumiInboxAgentForSession(params: {
 async function discoverInboxAgentBySlug(params: {
   session: AuthenticatedRequestBrowserSession;
   slug: string;
+  includeDeregistered?: boolean;
 }): Promise<MasumiInboxAgentEntry | null> {
+  const includeDeregistered = params.includeDeregistered ?? false;
   const result = await fetchMasumiInboxAgentRegistrationsForSession({
     session: params.session,
     agentSlug: params.slug,
     take: 20,
     page: 1,
-    filterStatuses: ['Pending', 'Verified'],
+    filterStatuses: includeDeregistered
+      ? ['Pending', 'Verified', 'Deregistered', 'Invalid']
+      : ['Pending', 'Verified'],
+    includeDeregistered,
   });
   return pickNewestExactInboxAgentMatch({
     entries: result.agents,
     slug: params.slug,
+    includeDeregistered,
   });
 }
 
@@ -418,6 +433,79 @@ async function createInboxAgent(params: {
   };
 }
 
+async function discoverOwnedPayInboxAgentBySlug(params: {
+  session: AuthenticatedRequestBrowserSession;
+  slug: string;
+}): Promise<MasumiInboxAgentEntry | null> {
+  const normalizedSlug = normalizeInboxSlug(params.slug);
+  if (!normalizedSlug) {
+    return null;
+  }
+
+  const url = buildMasumiPayApiUrl(params.session.user.issuer, 'inbox-agents');
+  url.searchParams.set('network', getMasumiInboxAgentNetwork());
+  url.searchParams.set('take', '20');
+  url.searchParams.set('search', normalizedSlug);
+  url.searchParams.set('filterStatus', 'Registered');
+
+  const response = await fetchMasumiApi(params.session, url);
+  if (!response.ok) {
+    const body = await readErrorBody(response);
+    throw new Error(body.error ?? `Unable to list inbox agents (${response.status})`);
+  }
+
+  const parsed = parseMasumiPayInboxAgentCollection(await response.json());
+  return pickNewestExactInboxAgentMatch({
+    entries: parsed.agents,
+    slug: normalizedSlug,
+  });
+}
+
+function isDeregisterableRegistrationMetadata(
+  metadata: MasumiActorRegistrationMetadata | null | undefined
+): metadata is MasumiActorRegistrationMetadata & { masumiInboxAgentId: string } {
+  return Boolean(
+    metadata?.masumiInboxAgentId?.trim() &&
+      metadata.masumiRegistrationState === 'RegistrationConfirmed'
+  );
+}
+
+async function resolveDeregisterableRegistrationMetadata(params: {
+  session: AuthenticatedRequestBrowserSession;
+  subject: SerializedMasumiActorRegistrationSubject;
+}): Promise<MasumiActorRegistrationMetadata | null> {
+  // Always resolve from the authenticated user's Pay inbox-agent list. The
+  // public registry id is not guaranteed to be the Pay inboxAgentId accepted by
+  // /deregister, and client-supplied registration metadata is untrusted.
+  const discovered = await discoverOwnedPayInboxAgentBySlug({
+    session: params.session,
+    slug: params.subject.slug,
+  });
+  return discovered ? registrationMetadataFromEntry(discovered) : null;
+}
+
+async function deregisterInboxAgent(params: {
+  session: AuthenticatedRequestBrowserSession;
+  inboxAgentId: string;
+}): Promise<MasumiInboxAgentEntry> {
+  const url = buildMasumiPayApiUrl(
+    params.session.user.issuer,
+    `inbox-agents/${encodeURIComponent(params.inboxAgentId)}/deregister`
+  );
+  url.searchParams.set('network', getMasumiInboxAgentNetwork());
+
+  const response = await fetchMasumiApi(params.session, url, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    const body = await readErrorBody(response);
+    throw new Error(body.error ?? `Unable to deregister inbox agent (${response.status})`);
+  }
+
+  return parseMasumiPayInboxAgentEntry(await response.json());
+}
+
 export async function syncMasumiInboxAgentRegistrationForSession(params: {
   session: AuthenticatedRequestBrowserSession;
   subject: SerializedMasumiActorRegistrationSubject;
@@ -429,6 +517,9 @@ export async function syncMasumiInboxAgentRegistrationForSession(params: {
     const discovered = await discoverInboxAgentBySlug({
       session: params.session,
       slug: params.subject.slug,
+      includeDeregistered:
+        Boolean(metadata?.masumiInboxAgentId) ||
+        isAnyDeregistrationInboxAgentState(metadata?.masumiRegistrationState),
     });
 
     if (!discovered) {
@@ -465,6 +556,45 @@ export async function syncMasumiInboxAgentRegistrationForSession(params: {
       },
       metadata: serializeMasumiRegistrationMetadata(metadata),
     };
+  }
+}
+
+export async function deregisterMasumiInboxAgentForSession(params: {
+  session: AuthenticatedRequestBrowserSession;
+  subject: SerializedMasumiActorRegistrationSubject;
+}): Promise<SerializedMasumiRegistrationResponse> {
+  try {
+    const metadata = await resolveDeregisterableRegistrationMetadata({
+      session: params.session,
+      subject: params.subject,
+    });
+
+    if (!isDeregisterableRegistrationMetadata(metadata)) {
+      const state = metadata?.masumiRegistrationState ?? 'not registered';
+      throw new Error(
+        `Inbox agent ${params.subject.slug} cannot be deregistered while its state is ${state}.`
+      );
+    }
+
+    const deregistered = await deregisterInboxAgent({
+      session: params.session,
+      inboxAgentId: metadata.masumiInboxAgentId,
+    });
+    const nextMetadata = registrationMetadataFromEntry(deregistered);
+    return {
+      registration: {
+        ...registrationResultFromMetadata(nextMetadata),
+        attempted: true,
+        error: null,
+      },
+      metadata: serializeMasumiRegistrationMetadata(nextMetadata),
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to deregister inbox agent';
+    throw new Error(
+      isMissingRequiredScopeMessage(message) ? toScopeMessage(message, params.session) : message,
+      { cause: error }
+    );
   }
 }
 

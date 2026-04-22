@@ -28,6 +28,7 @@ import { Route as SlugManageRouteImport } from './routes/$slug.manage'
 import { Route as ApiMasumiInboxAgentSyncRouteImport } from './routes/api.masumi.inbox-agent.sync'
 import { Route as ApiMasumiInboxAgentRegisterRouteImport } from './routes/api.masumi.inbox-agent.register'
 import { Route as ApiMasumiInboxAgentFindAgentsRouteImport } from './routes/api.masumi.inbox-agent.find-agents'
+import { Route as ApiMasumiInboxAgentDeregisterRouteImport } from './routes/api.masumi.inbox-agent.deregister'
 import { Route as ApiMasumiInboxAgentCreditsRouteImport } from './routes/api.masumi.inbox-agent.credits'
 
 const SecurityRoute = SecurityRouteImport.update({
@@ -127,6 +128,12 @@ const ApiMasumiInboxAgentFindAgentsRoute =
     path: '/api/masumi/inbox-agent/find-agents',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiMasumiInboxAgentDeregisterRoute =
+  ApiMasumiInboxAgentDeregisterRouteImport.update({
+    id: '/api/masumi/inbox-agent/deregister',
+    path: '/api/masumi/inbox-agent/deregister',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiMasumiInboxAgentCreditsRoute =
   ApiMasumiInboxAgentCreditsRouteImport.update({
     id: '/api/masumi/inbox-agent/credits',
@@ -152,6 +159,7 @@ export interface FileRoutesByFullPath {
   '/channels/$slug': typeof ChannelsSlugRoute
   '/discover/$slug': typeof DiscoverSlugRoute
   '/api/masumi/inbox-agent/credits': typeof ApiMasumiInboxAgentCreditsRoute
+  '/api/masumi/inbox-agent/deregister': typeof ApiMasumiInboxAgentDeregisterRoute
   '/api/masumi/inbox-agent/find-agents': typeof ApiMasumiInboxAgentFindAgentsRoute
   '/api/masumi/inbox-agent/register': typeof ApiMasumiInboxAgentRegisterRoute
   '/api/masumi/inbox-agent/sync': typeof ApiMasumiInboxAgentSyncRoute
@@ -174,6 +182,7 @@ export interface FileRoutesByTo {
   '/channels/$slug': typeof ChannelsSlugRoute
   '/discover/$slug': typeof DiscoverSlugRoute
   '/api/masumi/inbox-agent/credits': typeof ApiMasumiInboxAgentCreditsRoute
+  '/api/masumi/inbox-agent/deregister': typeof ApiMasumiInboxAgentDeregisterRoute
   '/api/masumi/inbox-agent/find-agents': typeof ApiMasumiInboxAgentFindAgentsRoute
   '/api/masumi/inbox-agent/register': typeof ApiMasumiInboxAgentRegisterRoute
   '/api/masumi/inbox-agent/sync': typeof ApiMasumiInboxAgentSyncRoute
@@ -197,6 +206,7 @@ export interface FileRoutesById {
   '/channels_/$slug': typeof ChannelsSlugRoute
   '/discover_/$slug': typeof DiscoverSlugRoute
   '/api/masumi/inbox-agent/credits': typeof ApiMasumiInboxAgentCreditsRoute
+  '/api/masumi/inbox-agent/deregister': typeof ApiMasumiInboxAgentDeregisterRoute
   '/api/masumi/inbox-agent/find-agents': typeof ApiMasumiInboxAgentFindAgentsRoute
   '/api/masumi/inbox-agent/register': typeof ApiMasumiInboxAgentRegisterRoute
   '/api/masumi/inbox-agent/sync': typeof ApiMasumiInboxAgentSyncRoute
@@ -221,6 +231,7 @@ export interface FileRouteTypes {
     | '/channels/$slug'
     | '/discover/$slug'
     | '/api/masumi/inbox-agent/credits'
+    | '/api/masumi/inbox-agent/deregister'
     | '/api/masumi/inbox-agent/find-agents'
     | '/api/masumi/inbox-agent/register'
     | '/api/masumi/inbox-agent/sync'
@@ -243,6 +254,7 @@ export interface FileRouteTypes {
     | '/channels/$slug'
     | '/discover/$slug'
     | '/api/masumi/inbox-agent/credits'
+    | '/api/masumi/inbox-agent/deregister'
     | '/api/masumi/inbox-agent/find-agents'
     | '/api/masumi/inbox-agent/register'
     | '/api/masumi/inbox-agent/sync'
@@ -265,6 +277,7 @@ export interface FileRouteTypes {
     | '/channels_/$slug'
     | '/discover_/$slug'
     | '/api/masumi/inbox-agent/credits'
+    | '/api/masumi/inbox-agent/deregister'
     | '/api/masumi/inbox-agent/find-agents'
     | '/api/masumi/inbox-agent/register'
     | '/api/masumi/inbox-agent/sync'
@@ -286,6 +299,7 @@ export interface RootRouteChildren {
   ChannelsSlugRoute: typeof ChannelsSlugRoute
   DiscoverSlugRoute: typeof DiscoverSlugRoute
   ApiMasumiInboxAgentCreditsRoute: typeof ApiMasumiInboxAgentCreditsRoute
+  ApiMasumiInboxAgentDeregisterRoute: typeof ApiMasumiInboxAgentDeregisterRoute
   ApiMasumiInboxAgentFindAgentsRoute: typeof ApiMasumiInboxAgentFindAgentsRoute
   ApiMasumiInboxAgentRegisterRoute: typeof ApiMasumiInboxAgentRegisterRoute
   ApiMasumiInboxAgentSyncRoute: typeof ApiMasumiInboxAgentSyncRoute
@@ -426,6 +440,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiMasumiInboxAgentFindAgentsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/masumi/inbox-agent/deregister': {
+      id: '/api/masumi/inbox-agent/deregister'
+      path: '/api/masumi/inbox-agent/deregister'
+      fullPath: '/api/masumi/inbox-agent/deregister'
+      preLoaderRoute: typeof ApiMasumiInboxAgentDeregisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/masumi/inbox-agent/credits': {
       id: '/api/masumi/inbox-agent/credits'
       path: '/api/masumi/inbox-agent/credits'
@@ -464,6 +485,7 @@ const rootRouteChildren: RootRouteChildren = {
   ChannelsSlugRoute: ChannelsSlugRoute,
   DiscoverSlugRoute: DiscoverSlugRoute,
   ApiMasumiInboxAgentCreditsRoute: ApiMasumiInboxAgentCreditsRoute,
+  ApiMasumiInboxAgentDeregisterRoute: ApiMasumiInboxAgentDeregisterRoute,
   ApiMasumiInboxAgentFindAgentsRoute: ApiMasumiInboxAgentFindAgentsRoute,
   ApiMasumiInboxAgentRegisterRoute: ApiMasumiInboxAgentRegisterRoute,
   ApiMasumiInboxAgentSyncRoute: ApiMasumiInboxAgentSyncRoute,
