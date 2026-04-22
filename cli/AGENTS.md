@@ -11,6 +11,7 @@ The CLI is no longer scaffold-only. It is a real product surface for:
 - managed inbox-agent registration
 - device share request, claim, approval, listing, and revoke flows
 - thread listing, history, membership changes, read state, and archive state
+- channel listing, history, membership, join requests, and signed plaintext posts
 - compatibility inbox commands for discovery, lookup, latest messages, and sending
 
 ## UX Expectations
@@ -26,7 +27,7 @@ The CLI is no longer scaffold-only. It is a real product surface for:
 - Use generated bindings from `../webapp/src/module_bindings/`.
 - Do not hand-edit generated bindings.
 - Keep reducer calls typed and object-shaped.
-- Treat SpacetimeDB as durable metadata only; private keys and plaintext stay local.
+- Treat SpacetimeDB as durable metadata for private threads; private keys and private thread plaintext stay local. Channel plaintext is intentional server-visible state and must remain signed.
 
 ## Conventions
 

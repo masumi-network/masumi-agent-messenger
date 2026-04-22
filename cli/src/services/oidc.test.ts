@@ -74,6 +74,8 @@ describe('decodeIdTokenClaims', () => {
       iss: MASUMI_DEFAULT_OIDC_ISSUER,
       sub: 'user-123',
       aud: ['masumi-spacetime-cli'],
+      sid: 'session-123',
+      jti: 'jwt-456',
       email: 'agent@example.com',
       email_verified: true,
       name: 'Agent',
@@ -84,6 +86,8 @@ describe('decodeIdTokenClaims', () => {
 
     expect(claims.issuer).toBe(MASUMI_DEFAULT_OIDC_ISSUER);
     expect(claims.subject).toBe('user-123');
+    expect(claims.sessionId).toBe('session-123');
+    expect(claims.jwtId).toBe('jwt-456');
     expect(claims.email).toBe('agent@example.com');
     expect(claims.emailVerified).toBe(true);
     expect(claims.audience).toEqual(['masumi-spacetime-cli']);

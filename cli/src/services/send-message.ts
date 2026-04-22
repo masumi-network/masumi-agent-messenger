@@ -91,13 +91,13 @@ export type SendMessageResult =
     }
   | {
       sent: false;
-      approvalRequired: true;
+      approvalRequired: boolean;
       profile: string;
       selectionMode: 'new';
       to: SendTargetSummary;
       threadId: string;
       requestId: string;
-      requestStatus: 'pending';
+      requestStatus: 'pending' | 'approved';
       createdDirectThread: false;
       targetLookup: SendTargetLookupMetadata;
     };
@@ -881,6 +881,53 @@ export async function sendMessageToSlug(params: {
           );
           params.reporter.success(`Contact request sent to ${target.slug}`);
 
+          const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+          const targetOwnedActor = snapshot.actors.find(
+            actor => actor.publicIdentity === target.publicIdentity && ownActorIds.has(actor.id)
+          ) ?? null;
+
+          if (targetOwnedActor) {
+            params.reporter.verbose?.(`Auto-approving contact request from owned agent ${target.slug}`);
+            await conn.reducers.approveContactRequest({
+              agentDbId: targetOwnedActor.id,
+              requestId: pendingRequest.id,
+            });
+            const approvedRequest = await new Promise<VisibleContactRequestRow>((resolve, reject) => {
+              const timeoutAt = Date.now() + 10000;
+              const poll = () => {
+                const req = read().contactRequests.find(r => r.id === pendingRequest!.id);
+                if (req?.status === 'approved') { resolve(req); return; }
+                if (Date.now() >= timeoutAt) {
+                  reject(connectivityError('Timed out waiting for auto-approval to sync.', { code: 'CONTACT_REQUEST_SYNC_TIMEOUT' }));
+                  return;
+                }
+                setTimeout(poll, 100);
+              };
+              poll();
+            });
+            return {
+              sent: false,
+              approvalRequired: false,
+              profile: profile.name,
+              selectionMode: 'new',
+              to: {
+                slug: target.slug,
+                publicIdentity: target.publicIdentity,
+                displayName: target.displayName ?? null,
+              },
+              threadId: approvedRequest.threadId.toString(),
+              requestId: approvedRequest.id.toString(),
+              requestStatus: 'approved',
+              createdDirectThread: false,
+              targetLookup: {
+                input: targetLookup.input,
+                inputKind: targetLookup.inputKind,
+                matchedActors: targetLookup.matchedActors,
+                selected: targetLookup.selectedActor,
+              },
+            };
+          }
+
           return {
             sent: false,
             approvalRequired: true,
@@ -997,13 +1044,14 @@ export async function sendMessageToSlug(params: {
         .filter(participant => participant.threadId === thread.id && participant.active)
         .map(participant => snapshot.actors.find(actor => actor.id === participant.agentDbId))
         .filter((actor): actor is VisibleAgentRow => Boolean(actor));
+      const ownActorIdsForThread = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
       for (const recipient of recipientActors) {
         if (recipient.id === ownActor.id) continue;
         await requirePeerKeyTrust({
           publicIdentity: recipient.publicIdentity,
           displayLabel: recipient.slug,
           observed: tupleFromVisibleActor(recipient),
-          allowFirstContactTrust: false,
+          allowFirstContactTrust: ownActorIdsForThread.has(recipient.id),
         });
       }
       const recipients = recipientActors.map(toActorPublicKeys);
@@ -1169,13 +1217,14 @@ export async function sendMessageToThread(params: {
           code: 'THREAD_PARTICIPANTS_NOT_VISIBLE',
         });
       }
+      const ownActorIdsForReply = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
       for (const recipient of recipientActors) {
         if (recipient.id === ownActor.id) continue;
         await requirePeerKeyTrust({
           publicIdentity: recipient.publicIdentity,
           displayLabel: recipient.slug,
           observed: tupleFromVisibleActor(recipient),
-          allowFirstContactTrust: false,
+          allowFirstContactTrust: ownActorIdsForReply.has(recipient.id),
         });
       }
       const recipients = recipientActors.map(toActorPublicKeys);

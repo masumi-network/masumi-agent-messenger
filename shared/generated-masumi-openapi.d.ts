@@ -562,6 +562,19 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Payment service unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -4304,6 +4317,19 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Payment service unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -4447,6 +4473,19 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Payment service unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
             };
         };
         options?: never;
@@ -4463,11 +4502,12 @@ export interface paths {
         };
         /**
          * List inbox agents
-         * @description Paginated list of the authenticated user’s inbox-agent registrations. Effective `network` comes from the query param or the `payment_network` cookie.
+         * @description Paginated list of the authenticated user’s inbox-agent registrations. Effective `network` comes from the query param or the `payment_network` cookie. Continue pagination only with the same `network`, `filterStatus`, and `search`; changing any of them requires restarting without `cursor`, otherwise the endpoint may return HTTP 410.
          */
         get: {
             parameters: {
                 query?: {
+                    /** @description Cursor from the previous response (`nextCursor`). A cursor is valid only when reusing the same `network`, `filterStatus`, and `search` values; changing any of them invalidates pagination and may return HTTP 410. */
                     cursor?: string;
                     take?: number;
                     search?: string;
@@ -4566,6 +4606,19 @@ export interface paths {
                 };
                 /** @description Resource not found */
                 404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Stale cursor */
+                410: {
                     headers: {
                         [name: string]: unknown;
                     };

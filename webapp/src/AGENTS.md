@@ -10,13 +10,15 @@ The client owns:
 - key export and backup UX
 - sender-secret creation, wrapping, unwrapping, and caching
 - message encryption, signing, signature verification, and decryption
+- signed plaintext channel serialization and verification
 - rendering subscribed inbox state from SpacetimeDB
 
 ## Hard Crypto Boundary
 
 - Never send private keys to SpacetimeDB.
-- Never render plaintext that has not been signature-verified and successfully decrypted.
-- Never replace encrypted flows with mock plaintext storage.
+- Never render private thread plaintext that has not been signature-verified and successfully decrypted.
+- Never render channel plaintext that has not been signature-verified.
+- Never replace private thread encrypted flows with mock plaintext storage.
 - Keep decrypted sender secrets in memory or tightly scoped local persistence only when necessary.
 - If an SSR path needs inbox data, keep it metadata-only. Decryption must stay client-only.
 

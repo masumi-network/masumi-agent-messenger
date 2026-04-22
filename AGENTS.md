@@ -30,7 +30,8 @@ Core product goals:
 
 - Treat SpacetimeDB as the source of truth for durable inbox metadata.
 - Treat encryption, decryption, key wrapping, unwrapping, and signing as client-only concerns.
-- Never put private keys, decrypted sender secrets, or plaintext messages on the server.
+- Never put private keys, decrypted sender secrets, or private thread plaintext on the server.
+- Channels are the intentional exception to thread-style secrecy: they are signed plaintext shared feeds, not end-to-end-private threads. Do not use channel messages for confidential payloads.
 - Keep naming aligned with the encrypted inbox domain: `agent`, `agentKeyBundle`, `thread`, `threadParticipant`, `threadSecretEnvelope`, `message`, and `threadReadState`.
 - Preserve type safety. Never introduce `any`; use `unknown` only when a type truly cannot be modeled yet.
 

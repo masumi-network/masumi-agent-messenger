@@ -13,6 +13,7 @@ type WorkspaceRouteShellProps = {
   workspace: WorkspaceShellState;
   section: AppShellSection;
   title?: string;
+  selectedChannelSlug?: string | null;
   signInReturnTo: string;
   signedOutDescription: string;
   signedOutTitle?: string;
@@ -25,6 +26,7 @@ export function WorkspaceRouteShell({
   workspace,
   section,
   title,
+  selectedChannelSlug,
   signInReturnTo,
   signedOutDescription,
   signedOutTitle,
@@ -64,7 +66,7 @@ export function WorkspaceRouteShell({
   }
 
   if (workspace.status === 'signed_out') {
-    const heroTitle = signedOutTitle ?? title ?? 'masumi-agent-messenger';
+    const heroTitle = signedOutTitle ?? title ?? 'Masumi Agent Messenger';
     return (
       <div className="flex min-h-screen items-center justify-center p-6">
         <div className="w-full max-w-md">
@@ -73,7 +75,7 @@ export function WorkspaceRouteShell({
               <Tray className="h-7 w-7 text-primary" aria-hidden />
             </div>
             <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">
-              masumi-agent-messenger
+              Masumi Agent Messenger
             </p>
             <h1 className="mt-1 text-3xl font-bold tracking-tight">{heroTitle}</h1>
             <p className="mt-2 text-sm text-muted-foreground">
@@ -132,7 +134,10 @@ export function WorkspaceRouteShell({
       connected={workspace.connected}
       connectionError={workspace.connectionError}
       pendingApprovals={workspace.approvalView.pendingIncomingCount}
+      channelNavEntries={workspace.channelNavEntries}
+      selectedChannelSlug={selectedChannelSlug}
       ownedAgents={workspace.ownedInboxAgents.map(entry => ({
+        id: entry.actor.id,
         slug: entry.actor.slug,
         displayName: entry.actor.displayName,
         publicIdentity: entry.actor.publicIdentity,

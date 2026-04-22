@@ -328,7 +328,7 @@ function SecurityPage() {
                                     navigate({
                                       to: '/$slug',
                                       params: { slug: shellInboxSlug },
-                                      search: buildWorkspaceSearch({ tab: 'settings' }),
+                                      search: buildWorkspaceSearch({}),
                                     })
                                 : undefined
                             }
@@ -366,7 +366,7 @@ function SecurityPage() {
                                     navigate({
                                       to: '/$slug',
                                       params: { slug: shellInboxSlug },
-                                      search: buildWorkspaceSearch({ tab: 'settings' }),
+                                      search: buildWorkspaceSearch({}),
                                     })
                                 : undefined
                             }

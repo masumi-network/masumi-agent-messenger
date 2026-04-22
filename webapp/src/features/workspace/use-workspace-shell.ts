@@ -1,18 +1,42 @@
-import { useMemo } from 'react';
-import { useSpacetimeDB } from 'spacetimedb/tanstack';
+import { useEffect, useMemo, useState } from 'react';
+import { useReducer, useSpacetimeDB } from 'spacetimedb/tanstack';
 import { useAuthSession, type AuthenticatedBrowserSession } from '@/lib/auth-session';
 import {
+  buildChannelNavEntries,
   resolveWorkspaceSnapshot,
+  type ChannelNavEntry,
   type OwnedInboxAgentEntry,
 } from '@/lib/app-shell';
+import { deferEffectStateUpdate } from '@/lib/effect-state';
+import { syncBrowserInboxAgentRegistration } from '@/lib/inbox-agent-registration';
 import { useLiveTable } from '@/lib/spacetime-live-table';
-import { tables } from '@/module_bindings';
+import { reducers, tables } from '@/module_bindings';
+import type { MasumiRegistrationResult } from '../../../../shared/inbox-agent-registration';
 import type {
   Agent,
   Inbox as InboxRow,
+  VisibleChannelJoinRequestRow,
+  VisibleChannelMembershipRow,
+  VisibleChannelRow,
   VisibleContactRequestRow,
   VisibleThreadInviteRow,
 } from '@/module_bindings/types';
+import { buildMasumiRegistrationSyncKey } from './actor-settings';
+
+type RefreshedWorkspaceAgentRegistration = {
+  sourceSyncKey: string | null;
+  actor: Agent;
+  registration: MasumiRegistrationResult;
+};
+
+type OwnedInboxAgentRegistrationRefresh = {
+  busy: boolean;
+  targetIds: Set<string>;
+  refreshKey: string;
+  completedKey: string | null;
+  resultsByActorId: Record<string, RefreshedWorkspaceAgentRegistration>;
+  errorsByActorId: Record<string, string>;
+};
 
 export type WorkspaceShellReadyState = {
   status: 'ready';
@@ -29,12 +53,16 @@ export type WorkspaceShellReadyState = {
   actorsReady: boolean;
   contactRequestsReady: boolean;
   threadInvitesReady: boolean;
+  channelTablesReady: boolean;
   tablesReady: boolean;
   tablesError: string | null;
+  channelTablesError: string | null;
   normalizedEmail: string;
   ownedInbox: InboxRow | null;
   existingDefaultActor: Agent | null;
   ownedInboxAgents: OwnedInboxAgentEntry<Agent>[];
+  channelNavEntries: ChannelNavEntry[];
+  ownedInboxAgentRegistrationRefresh: OwnedInboxAgentRegistrationRefresh;
   selectedActor: Agent | null;
   shellInboxSlug: string | null;
   approvalView: {
@@ -62,6 +90,17 @@ export function useWorkspaceShell(params?: {
   const auth = useAuthSession();
   const conn = useSpacetimeDB();
   const session = auth.status === 'authenticated' ? auth.session : null;
+  const upsertMasumiInboxAgentRegistrationReducer = useReducer(
+    reducers.upsertMasumiInboxAgentRegistration
+  );
+  const [refreshedRegistrationByActorId, setRefreshedRegistrationByActorId] =
+    useState<Record<string, RefreshedWorkspaceAgentRegistration>>({});
+  const [completedOwnedAgentRegistrationRefreshKey, setCompletedOwnedAgentRegistrationRefreshKey] =
+    useState<string | null>(null);
+  const [ownedAgentRegistrationRefreshBusy, setOwnedAgentRegistrationRefreshBusy] =
+    useState(false);
+  const [ownedAgentRegistrationRefreshErrors, setOwnedAgentRegistrationRefreshErrors] =
+    useState<Record<string, string>>({});
 
   const [inboxes, inboxesReady, inboxesError] = useLiveTable<InboxRow>(
     tables.visibleInboxes,
@@ -81,7 +120,28 @@ export function useWorkspaceShell(params?: {
       tables.visibleThreadInvites,
       'visibleThreadInvites'
     );
-  const snapshot = useMemo(
+  const [visibleChannels, visibleChannelsReady, visibleChannelsError] =
+    useLiveTable<VisibleChannelRow>(
+      tables.visibleChannels,
+      'visibleChannels'
+    );
+  const [
+    visibleChannelMemberships,
+    visibleChannelMembershipsReady,
+    visibleChannelMembershipsError,
+  ] = useLiveTable<VisibleChannelMembershipRow>(
+    tables.visibleChannelMemberships,
+    'visibleChannelMemberships'
+  );
+  const [
+    visibleChannelJoinRequests,
+    visibleChannelJoinRequestsReady,
+    visibleChannelJoinRequestsError,
+  ] = useLiveTable<VisibleChannelJoinRequestRow>(
+    tables.visibleChannelJoinRequests,
+    'visibleChannelJoinRequests'
+  );
+  const rawSnapshot = useMemo(
     () =>
       resolveWorkspaceSnapshot({
         inboxes,
@@ -93,6 +153,180 @@ export function useWorkspaceShell(params?: {
       }),
     [actors, contactRequests, inboxes, params?.selectedSlug, session, threadInvites]
   );
+  const ownedAgentRegistrationRefreshTargets = rawSnapshot.ownedInboxAgents;
+  const ownedAgentRegistrationRefreshKey = useMemo(
+    () =>
+      ownedAgentRegistrationRefreshTargets
+        .map(entry => buildMasumiRegistrationSyncKey(entry.actor) ?? '')
+        .join('\n'),
+    [ownedAgentRegistrationRefreshTargets]
+  );
+  const ownedAgentRegistrationRefreshTargetIds = useMemo(
+    () =>
+      new Set(
+        ownedAgentRegistrationRefreshTargets.map(entry => entry.actor.id.toString())
+      ),
+    [ownedAgentRegistrationRefreshTargets]
+  );
+  const refreshedActors = useMemo(
+    () =>
+      actors.map(actor => {
+        const actorId = actor.id.toString();
+        const sourceSyncKey = buildMasumiRegistrationSyncKey(actor);
+        const refreshed = refreshedRegistrationByActorId[actorId];
+        return refreshed && refreshed.sourceSyncKey === sourceSyncKey
+          ? refreshed.actor
+          : actor;
+      }),
+    [actors, refreshedRegistrationByActorId]
+  );
+  const snapshot = useMemo(
+    () =>
+      resolveWorkspaceSnapshot({
+        inboxes,
+        actors: refreshedActors,
+        contactRequests,
+        threadInvites,
+        session,
+        selectedSlug: params?.selectedSlug ?? null,
+      }),
+    [contactRequests, inboxes, params?.selectedSlug, refreshedActors, session, threadInvites]
+  );
+  const channelNavEntries = useMemo(
+    () =>
+      buildChannelNavEntries({
+        channels: visibleChannels,
+        memberships: visibleChannelMemberships,
+        joinRequests: visibleChannelJoinRequests,
+        ownedActorIds: new Set(snapshot.ownedInboxAgents.map(entry => entry.actor.id)),
+      }),
+    [
+      snapshot.ownedInboxAgents,
+      visibleChannelJoinRequests,
+      visibleChannelMemberships,
+      visibleChannels,
+    ]
+  );
+  const channelTablesReady =
+    visibleChannelsReady &&
+    visibleChannelMembershipsReady &&
+    visibleChannelJoinRequestsReady;
+  const channelTablesError =
+    visibleChannelsError ||
+    visibleChannelMembershipsError ||
+    visibleChannelJoinRequestsError;
+
+  useEffect(() => {
+    if (
+      !session ||
+      !actorsReady ||
+      !inboxesReady ||
+      ownedAgentRegistrationRefreshTargets.length === 0
+    ) {
+      return deferEffectStateUpdate(() => {
+        setOwnedAgentRegistrationRefreshBusy(false);
+        setCompletedOwnedAgentRegistrationRefreshKey(current =>
+          current === ownedAgentRegistrationRefreshKey
+            ? current
+            : ownedAgentRegistrationRefreshKey
+        );
+      });
+    }
+
+    if (
+      completedOwnedAgentRegistrationRefreshKey ===
+      ownedAgentRegistrationRefreshKey
+    ) {
+      return deferEffectStateUpdate(() => {
+        setOwnedAgentRegistrationRefreshBusy(false);
+      });
+    }
+
+    let cancelled = false;
+    const cancelPendingState = deferEffectStateUpdate(() => {
+      if (!cancelled) {
+        setOwnedAgentRegistrationRefreshBusy(true);
+        setCompletedOwnedAgentRegistrationRefreshKey(null);
+      }
+    });
+
+    void (async () => {
+      const nextRefreshed: Record<string, RefreshedWorkspaceAgentRegistration> = {};
+      const nextErrors: Record<string, string> = {};
+
+      for (const entry of ownedAgentRegistrationRefreshTargets) {
+        const actor = entry.actor;
+        const actorId = actor.id.toString();
+        const sourceSyncKey = buildMasumiRegistrationSyncKey(actor);
+
+        try {
+          const result = await syncBrowserInboxAgentRegistration({
+            session,
+            actor,
+            persistRegistration: async payload => {
+              await Promise.resolve(
+                upsertMasumiInboxAgentRegistrationReducer(payload)
+              );
+            },
+          });
+          nextRefreshed[actorId] = {
+            sourceSyncKey,
+            actor: result.actor,
+            registration: result.registration,
+          };
+          if (result.registration.error) {
+            nextErrors[actorId] = result.registration.error;
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : 'Failed to refresh agent registration';
+          nextErrors[actorId] = message;
+          console.warn(
+            `Workspace shell: failed to refresh registration for actor ${actor.slug ?? actorId}`,
+            error
+          );
+        }
+      }
+
+      if (cancelled) {
+        return;
+      }
+
+      setRefreshedRegistrationByActorId(current => ({
+        ...current,
+        ...nextRefreshed,
+      }));
+      setOwnedAgentRegistrationRefreshErrors(current => {
+        const next = { ...current };
+        for (const entry of ownedAgentRegistrationRefreshTargets) {
+          const actorId = entry.actor.id.toString();
+          if (nextErrors[actorId]) {
+            next[actorId] = nextErrors[actorId];
+          } else {
+            delete next[actorId];
+          }
+        }
+        return next;
+      });
+      setCompletedOwnedAgentRegistrationRefreshKey(
+        ownedAgentRegistrationRefreshKey
+      );
+      setOwnedAgentRegistrationRefreshBusy(false);
+    })();
+
+    return () => {
+      cancelled = true;
+      cancelPendingState();
+    };
+  }, [
+    actorsReady,
+    completedOwnedAgentRegistrationRefreshKey,
+    inboxesReady,
+    ownedAgentRegistrationRefreshKey,
+    ownedAgentRegistrationRefreshTargets,
+    session,
+    upsertMasumiInboxAgentRegistrationReducer,
+  ]);
 
   if (auth.status === 'loading') {
     return { status: 'loading', auth, conn, session: null };
@@ -125,12 +359,23 @@ export function useWorkspaceShell(params?: {
     actorsReady,
     contactRequestsReady,
     threadInvitesReady,
+    channelTablesReady,
     tablesReady: inboxesReady && actorsReady && contactRequestsReady && threadInvitesReady,
     tablesError: inboxesError || actorsError || contactRequestsError || threadInvitesError,
+    channelTablesError,
     normalizedEmail: snapshot.normalizedEmail,
     ownedInbox: snapshot.ownedInbox,
     existingDefaultActor: snapshot.existingDefaultActor,
     ownedInboxAgents: snapshot.ownedInboxAgents,
+    channelNavEntries,
+    ownedInboxAgentRegistrationRefresh: {
+      busy: ownedAgentRegistrationRefreshBusy,
+      targetIds: ownedAgentRegistrationRefreshTargetIds,
+      refreshKey: ownedAgentRegistrationRefreshKey,
+      completedKey: completedOwnedAgentRegistrationRefreshKey,
+      resultsByActorId: refreshedRegistrationByActorId,
+      errorsByActorId: ownedAgentRegistrationRefreshErrors,
+    },
     selectedActor: snapshot.selectedActor,
     shellInboxSlug: snapshot.shellInboxSlug,
     approvalView: snapshot.approvalView,

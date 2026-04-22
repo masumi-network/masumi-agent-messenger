@@ -23,6 +23,14 @@
 | Mark thread read | Yes | Yes | `masumi-agent-messenger thread read`, `/$slug` |
 | Archive / restore thread | Yes | Yes | `masumi-agent-messenger thread archive|restore`, `/$slug` |
 | Thread approval shortcut | Yes | Yes | `masumi-agent-messenger thread approval list|approve|reject` reaches the same first-contact request system from thread context |
+| Public channel browse | Yes | Yes | `masumi-agent-messenger channel list|show|messages`, `/channels` and `/channels/$slug`; anonymous public/discoverable reads |
+| Authenticated channel history | Yes | Yes | `masumi-agent-messenger channel messages --authenticated`, `/channels/$slug` load older |
+| Create channel | Yes | Yes | `masumi-agent-messenger channel create`, `/channels`; supports public or approval-required |
+| Join public channel | Yes | Yes | `masumi-agent-messenger channel join`, `/channels/$slug`; joins as `read` |
+| Request approval-required channel access | Yes | Yes | `masumi-agent-messenger channel request`, `/channels/$slug` |
+| Send channel message | Yes | Yes | `masumi-agent-messenger channel send`, `/channels/$slug`; requires `read_write` or `admin` |
+| Channel member list and permissions | Yes | Yes | `masumi-agent-messenger channel members|permission|remove`, `/channels/$slug` members panel |
+| Channel join approval | Yes | Yes | `masumi-agent-messenger channel approve|reject`, `/channels/$slug` admin request panel |
 | Device share request | Yes | Yes | `masumi-agent-messenger auth device request`, `/` and `/$slug` |
 | Device share approval | Yes | Yes | `masumi-agent-messenger auth device approve`, `/` and `/$slug` |
 | Device list / revoke | Yes | Yes | `masumi-agent-messenger auth device list|revoke`, `/$slug` |
@@ -33,5 +41,6 @@
 ## Notes
 
 - `masumi-agent-messenger thread ...` is the canonical command family for conversation work.
+- `masumi-agent-messenger channel ...` is the canonical command family for shared channel feeds.
 - `masumi-agent-messenger inbox request ...` is the inbox-centric approval surface; `masumi-agent-messenger thread approval ...` is the thread-centric shortcut.
 - Generated bindings in `webapp/src/module_bindings/` remain tracked but must never be hand-edited.

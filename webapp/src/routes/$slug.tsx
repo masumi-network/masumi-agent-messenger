@@ -2,12 +2,12 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { type UIEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
+  ArrowDown,
   ChatText,
   Check,
   Checks,
   CircleDashed,
   Clock,
-  Gear,
   Lock,
   MagnifyingGlass,
   PaperPlaneTilt,
@@ -26,7 +26,7 @@ import { InboxShell } from '@/components/app/inbox-shell';
 import { AgentAvatar } from '@/components/inbox/agent-avatar';
 import { ThreadListItem } from '@/components/inbox/thread-list-item';
 import { ConnectionStatus } from '@/components/thread/connection-status';
-import { DayDivider } from '@/components/inbox/day-divider';
+import { DayDivider, UnreadDivider } from '@/components/inbox/day-divider';
 import { EmptyState } from '@/components/inbox/empty-state';
 import { KeyRotationItem, MessageItem } from '@/components/inbox/message-item';
 import { MessageComposer } from '@/components/inbox/message-composer';
@@ -58,7 +58,6 @@ import {
   exportInboxKeyShareSnapshot,
   getKeyVaultStatus,
   getAgentKeyPairForEncryptionVersion,
-  getOrCreateAgentKeyPair,
   getOrCreateDeviceKeyMaterial,
   initializeKeyVault,
   loadStoredAgentKeyPair,
@@ -71,6 +70,7 @@ import {
 } from '@/lib/agent-session';
 import { describeActor } from '@/lib/agent-directory';
 import {
+  buildChannelNavEntries,
   buildWorkspaceSearch,
   buildOwnedInboxAgentEntries,
   describeLocalVaultRequirement,
@@ -78,7 +78,6 @@ import {
   parseComposeMode,
   parseOptionalThreadId,
   parseOptionalLookup,
-  parseWorkspaceSettingsTab,
   parseWorkspaceTab,
   type DefaultKeyIssue,
 } from '@/lib/app-shell';
@@ -96,10 +95,7 @@ import {
   prepareLocalDeviceShareRequest,
   resolveVerifiedDeviceShareRequest,
 } from '@/lib/device-share';
-import {
-  consumeKeyBackupPrompt,
-  queueKeyBackupPrompt,
-} from '@/lib/key-backup-prompt';
+import { consumeKeyBackupPrompt } from '@/lib/key-backup-prompt';
 import {
   autoPinPeerIfUnknown,
   comparePinnedPeer,
@@ -121,7 +117,6 @@ import {
   decryptMessage,
   getCachedSenderSecret,
   prepareEncryptedMessage,
-  type ActorIdentity,
   type ActorPublicKeys,
   type AgentKeyPair,
 } from '@/lib/crypto';
@@ -137,6 +132,9 @@ import type {
   DeviceKeyBundleAttachment,
   Inbox,
   Message,
+  VisibleChannelJoinRequestRow,
+  VisibleChannelMembershipRow,
+  VisibleChannelRow,
   VisibleContactRequestRow,
   VisibleContactAllowlistEntryRow,
   VisibleThreadInviteRow,
@@ -182,7 +180,6 @@ export const Route = createFileRoute('/$slug')({
     compose: parseComposeMode(search.compose),
     lookup: parseOptionalLookup(search.lookup),
     tab: parseWorkspaceTab(search.tab),
-    settings: parseWorkspaceSettingsTab(search.settings),
   }),
   head: ({ params }) =>
     buildRouteHead({
@@ -1090,8 +1087,6 @@ function AuthenticatedInboxPage() {
   const [actorFeedback, setActorFeedback] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<bigint | null>(null);
   const [pendingVisibleThreadCount, setPendingVisibleThreadCount] = useState<number | null>(null);
-  const [newInboxSlug, setNewInboxSlug] = useState('');
-  const [newInboxDisplayName, setNewInboxDisplayName] = useState('');
   const [composeLookupSlug, setComposeLookupSlug] = useState('');
   const [composeResolvedTargets, setComposeResolvedTargets] = useState<ResolvedPublishedActor[]>([]);
   const [composeThreadTitle, setComposeThreadTitle] = useState('');
@@ -1137,6 +1132,9 @@ function AuthenticatedInboxPage() {
   const threadTimelineScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollTimelineRef = useRef(true);
   const lastTimelineSignatureRef = useRef<string | null>(null);
+  const [timelineUnseenCount, setTimelineUnseenCount] = useState(0);
+  const [unreadAnchorSeq, setUnreadAnchorSeq] = useState<bigint | null>(null);
+  const anchoredThreadIdRef = useRef<bigint | null>(null);
   const mountedRef = useRef(true);
   const pendingDeviceShareRequestRef = useRef<PendingDeviceShareRequestState | null>(null);
   const deviceShareClaimDeviceIdRef = useRef<string | null>(null);
@@ -1207,7 +1205,6 @@ function AuthenticatedInboxPage() {
     };
   }, [hydrated, keyVaultOwner]);
 
-  const createInboxIdentityReducer = useReducer(reducers.createInboxIdentity);
   const addContactAllowlistEntryReducer = useReducer(reducers.addContactAllowlistEntry);
   const removeContactAllowlistEntryReducer = useReducer(reducers.removeContactAllowlistEntry);
   const approveContactRequestReducer = useReducer(reducers.approveContactRequest);
@@ -1276,6 +1273,18 @@ function AuthenticatedInboxPage() {
   const [threadInvites, threadInvitesReady, threadInvitesError] = useLiveTable<VisibleThreadInviteRow>(
     tables.visibleThreadInvites,
     'visibleThreadInvites'
+  );
+  const [visibleChannels] = useLiveTable<VisibleChannelRow>(
+    tables.visibleChannels,
+    'visibleChannels'
+  );
+  const [visibleChannelMemberships] = useLiveTable<VisibleChannelMembershipRow>(
+    tables.visibleChannelMemberships,
+    'visibleChannelMemberships'
+  );
+  const [visibleChannelJoinRequests] = useLiveTable<VisibleChannelJoinRequestRow>(
+    tables.visibleChannelJoinRequests,
+    'visibleChannelJoinRequests'
   );
   const [allowlistEntries, allowlistEntriesReady, allowlistEntriesError] = useLiveTable<VisibleContactAllowlistEntryRow>(
     tables.visibleContactAllowlistEntries,
@@ -1445,6 +1454,21 @@ function AuthenticatedInboxPage() {
       }),
     [actors, normalizedSessionEmail, ownedInbox]
   );
+  const channelNavEntries = useMemo(
+    () =>
+      buildChannelNavEntries({
+        channels: visibleChannels,
+        memberships: visibleChannelMemberships,
+        joinRequests: visibleChannelJoinRequests,
+        ownedActorIds: new Set(shellOwnedInboxes.map(entry => entry.actor.id)),
+      }),
+    [
+      shellOwnedInboxes,
+      visibleChannelJoinRequests,
+      visibleChannelMemberships,
+      visibleChannels,
+    ]
+  );
   useEffect(() => {
     if (
       !authenticatedSession ||
@@ -1546,7 +1570,9 @@ function AuthenticatedInboxPage() {
   }, [activeActorIdentity, actorKeyPair]);
 
   useEffect(() => {
-    refreshImportedRotationKeyConfirmation();
+    return deferEffectStateUpdate(() => {
+      refreshImportedRotationKeyConfirmation();
+    });
   }, [refreshImportedRotationKeyConfirmation]);
 
   function handleRevealUnsupportedMessage(messageId: bigint) {
@@ -2667,6 +2693,9 @@ function AuthenticatedInboxPage() {
     const nearTop = target.scrollTop <= THREAD_LIST_SCROLL_LOAD_THRESHOLD_PX;
 
     shouldAutoScrollTimelineRef.current = nearBottom;
+    if (nearBottom) {
+      setTimelineUnseenCount(0);
+    }
 
     if (nearTop && canLoadOlderTimeline) {
       setThreadTimelinePage(page => Math.min(page + 1, threadTimelinePageCount));
@@ -2677,6 +2706,14 @@ function AuthenticatedInboxPage() {
       setThreadTimelinePage(page => Math.max(1, page - 1));
     }
   };
+
+  const scrollTimelineToBottom = useCallback(() => {
+    const el = threadTimelineScrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    setTimelineUnseenCount(0);
+    shouldAutoScrollTimelineRef.current = true;
+  }, []);
 
   function closeComposeDialog(options?: {
     threadId?: bigint | null;
@@ -2696,7 +2733,6 @@ function AuthenticatedInboxPage() {
         compose: undefined,
         lookup: undefined,
         tab: search.tab,
-        settings: search.settings,
       }),
       replace: true,
     });
@@ -2723,7 +2759,6 @@ function AuthenticatedInboxPage() {
         compose: 'add',
         lookup: search.lookup,
         tab: search.tab,
-        settings: search.settings,
       }),
       replace: true,
     });
@@ -2818,7 +2853,6 @@ function AuthenticatedInboxPage() {
               compose: search.compose,
               lookup: undefined,
               tab: search.tab,
-              settings: search.settings,
             }),
             replace: true,
           });
@@ -2827,7 +2861,7 @@ function AuthenticatedInboxPage() {
         // Auto-resolve failures are silent
       }
     })();
-  }, [activeActor, navigate, resolveVisiblePublishedActors, search.thread, search.compose, search.lookup, search.settings, search.tab]);
+  }, [activeActor, navigate, resolveVisiblePublishedActors, search.thread, search.compose, search.lookup, search.tab]);
 
   const selectedThread = useMemo(
     () => visibleThreads.find(thread => thread.id === selectedThreadId),
@@ -2961,13 +2995,35 @@ function AuthenticatedInboxPage() {
     }
 
     if (!shouldAutoScrollTimelineRef.current || threadTimelinePage !== 1) {
+      const wasFirstPaint = lastTimelineSignatureRef.current === null;
       lastTimelineSignatureRef.current = latestTimelineItemSignature;
+      if (!wasFirstPaint) {
+        setTimelineUnseenCount(count => count + 1);
+      }
       return;
     }
 
     lastTimelineSignatureRef.current = latestTimelineItemSignature;
     timelineScrollContainer.scrollTop = timelineScrollContainer.scrollHeight;
+    setTimelineUnseenCount(0);
   }, [threadTimelinePage, latestTimelineItemSignature, selectedThread]);
+
+  useEffect(() => {
+    setTimelineUnseenCount(0);
+  }, [selectedThread?.id]);
+
+  useEffect(() => {
+    const currentId = selectedThread?.id ?? null;
+    if (currentId !== anchoredThreadIdRef.current) {
+      anchoredThreadIdRef.current = currentId;
+      if (currentId === null) {
+        setUnreadAnchorSeq(null);
+        return;
+      }
+      const readState = readStateByThreadId.get(currentId);
+      setUnreadAnchorSeq(readState?.lastReadThreadSeq ?? null);
+    }
+  }, [selectedThread?.id, readStateByThreadId]);
 
   const latestSelectedThreadSenderMessage = useMemo(
     () =>
@@ -3334,66 +3390,6 @@ function AuthenticatedInboxPage() {
     selectedThread,
     selectedThreadMessages,
   ]);
-
-  async function handleCreateInboxIdentity(event: React.FormEvent) {
-    event.preventDefault();
-    if (!displayInbox || !connected) return;
-    if (!ensureAuthorizedWriteAccess()) return;
-    if (!vaultUnlocked) {
-      setActorActionError(
-        describeLocalVaultRequirement({
-          initialized: vaultInitialized,
-          phrase: 'before creating inbox keys',
-        })
-      );
-      return;
-    }
-
-    setActorActionError(null);
-    setActorFeedback(null);
-
-    const normalizedSlug = normalizeInboxSlug(newInboxSlug);
-    if (!normalizedSlug) {
-      setActorActionError('Inbox slug is required.');
-      return;
-    }
-
-    try {
-      const identity: ActorIdentity = {
-        normalizedEmail: displayInbox.normalizedEmail,
-        slug: normalizedSlug,
-        inboxIdentifier: normalizedSlug,
-      };
-      const keyPair = await getOrCreateAgentKeyPair(identity);
-      await Promise.resolve(
-        createInboxIdentityReducer({
-          slug: normalizedSlug,
-          displayName: newInboxDisplayName.trim() || undefined,
-          encryptionPublicKey: keyPair.encryption.publicKey,
-          encryptionKeyVersion: keyPair.encryption.keyVersion,
-          encryptionAlgorithm: keyPair.encryption.algorithm,
-          signingPublicKey: keyPair.signing.publicKey,
-          signingKeyVersion: keyPair.signing.keyVersion,
-          signingAlgorithm: keyPair.signing.algorithm,
-        })
-      );
-      queueKeyBackupPrompt({
-        normalizedEmail: displayInbox.normalizedEmail,
-        slug: normalizedSlug,
-        reason: 'created',
-      });
-      setActiveActorIdentity(identity);
-      setNewInboxSlug('');
-      setNewInboxDisplayName('');
-      void navigate({
-        to: '/$slug',
-        params: { slug: normalizedSlug },
-        search: buildWorkspaceSearch({}),
-      });
-    } catch (error) {
-      setActorActionError(error instanceof Error ? error.message : 'Unable to create inbox slug');
-    }
-  }
 
   async function handleRotateKeys() {
     if (!activeActor || !connected) return;
@@ -4646,7 +4642,6 @@ function AuthenticatedInboxPage() {
         thread: search.thread,
         compose: search.compose,
         tab: search.tab,
-        settings: search.settings,
       }),
         replace: true,
       });
@@ -4665,7 +4660,6 @@ function AuthenticatedInboxPage() {
         compose: 'add',
         lookup: lookupTargetActor.slug,
         tab: search.tab,
-        settings: search.settings,
       }),
       replace: true,
     });
@@ -4680,8 +4674,15 @@ function AuthenticatedInboxPage() {
         connected={connected}
         connectionError={conn.connectionError?.message ?? null}
         pendingApprovals={pendingIncomingCount}
+        channelNavEntries={channelNavEntries}
         avatarName={activeActor?.displayName ?? activeActor?.slug ?? authenticatedSession?.user.email ?? undefined}
         avatarIdentity={activeActor?.publicIdentity ?? activeActor?.slug ?? authenticatedSession?.user.email ?? undefined}
+        ownedAgents={shellOwnedInboxes.map(entry => ({
+          id: entry.actor.id,
+          slug: entry.actor.slug,
+          displayName: entry.actor.displayName,
+          publicIdentity: entry.actor.publicIdentity,
+        }))}
       >
       {displayInbox ? (
         <KeysRecoveryDialog
@@ -4949,7 +4950,7 @@ function AuthenticatedInboxPage() {
         <Tabs
           value={activeWorkspaceTab}
           onValueChange={value => {
-            if (value !== 'inbox' && value !== 'approvals' && value !== 'settings') {
+            if (value !== 'inbox' && value !== 'approvals') {
               return;
             }
 
@@ -4961,7 +4962,6 @@ function AuthenticatedInboxPage() {
                 compose: search.compose,
                 lookup: search.lookup,
                 tab: value,
-                settings: value === 'settings' ? 'advanced' : undefined,
               }),
               replace: true,
             });
@@ -4987,13 +4987,6 @@ function AuthenticatedInboxPage() {
                   {pendingIncomingCount}
                 </Badge>
               ) : null}
-            </TabsTrigger>
-            <TabsTrigger
-              value="settings"
-              className="rounded-md px-3.5 py-1.5 text-xs"
-            >
-              <Gear className="h-3.5 w-3.5" />
-              Settings
             </TabsTrigger>
           </TabsList>
 
@@ -5248,11 +5241,6 @@ function AuthenticatedInboxPage() {
                             </AlertDescription>
                           </Alert>
                         ) : null}
-                        {composerDisabledReason && !importedRotationKeyPending && !showVaultLockedThreadGuard ? (
-                          <Alert>
-                            <AlertDescription>{composerDisabledReason}</AlertDescription>
-                          </Alert>
-                        ) : null}
                         {!composerDisabledReason && (rotateSecret || requiresSecretRotation) ? (
                           <Alert>
                             <AlertDescription>
@@ -5286,9 +5274,10 @@ function AuthenticatedInboxPage() {
                           </div>
                         ) : (
                           <>
+                            <div className="relative min-h-0 flex-1">
                             <div
                               ref={threadTimelineScrollRef}
-                              className="min-h-0 flex-1 overflow-y-auto px-1 pr-2"
+                              className="absolute inset-0 overflow-y-auto px-1 pr-2"
                               onScrollCapture={handleThreadTimelineScroll}
                             >
                               <div>
@@ -5318,15 +5307,26 @@ function AuthenticatedInboxPage() {
                                   });
                                   const groupedFlags = computeGroupedFlags(timelineMeta);
                                   const dayBoundaries = computeDayBoundaries(timelineMeta);
+                                  const firstUnreadIndex =
+                                    unreadAnchorSeq !== null
+                                      ? paginatedThreadTimeline.findIndex(
+                                          entry =>
+                                            entry.kind !== 'keyRotation' &&
+                                            entry.message.threadSeq > unreadAnchorSeq &&
+                                            entry.message.senderAgentDbId !== activeActor?.id
+                                        )
+                                      : -1;
                                   return paginatedThreadTimeline.map((item, index) => {
                                     const showDayDivider = dayBoundaries[index];
                                     const dayLabel = showDayDivider
                                       ? formatDayLabel(timelineMeta[index]!.createdAtMs)
                                       : null;
+                                    const showUnreadDivider = index === firstUnreadIndex;
                                     if (item.kind === 'keyRotation') {
                                       return (
                                         <div key={`kr-${item.notice.bundle.id.toString()}`}>
                                           {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                                          {showUnreadDivider ? <UnreadDivider /> : null}
                                           <div
                                             style={staggeredDelay(index, 24)}
                                             className="animate-soft-enter"
@@ -5347,6 +5347,7 @@ function AuthenticatedInboxPage() {
                                     return (
                                       <div key={message.id.toString()}>
                                         {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                                        {showUnreadDivider ? <UnreadDivider /> : null}
                                         <MessageItem
                                           senderName={senderName}
                                           senderIdentity={
@@ -5370,6 +5371,17 @@ function AuthenticatedInboxPage() {
                                 })()}
                               </div>
                             </div>
+                            {timelineUnseenCount > 0 ? (
+                              <button
+                                type="button"
+                                onClick={scrollTimelineToBottom}
+                                className="pointer-events-auto absolute bottom-3 left-1/2 z-10 inline-flex -translate-x-1/2 items-center gap-2 rounded-full border border-border bg-foreground px-3 py-1.5 text-xs font-medium text-background shadow-soft-md transition-transform hover:-translate-y-px hover:translate-x-[-50%]"
+                              >
+                                <ArrowDown className="h-3.5 w-3.5" aria-hidden />
+                                {timelineUnseenCount} new message{timelineUnseenCount === 1 ? '' : 's'}
+                              </button>
+                            ) : null}
+                            </div>
                             <MessageComposer
                               value={composerInput}
                               onChange={setComposerInput}
@@ -5377,6 +5389,7 @@ function AuthenticatedInboxPage() {
                               onSubmit={handleSendMessage}
                               maxLength={MAX_MESSAGE_BODY_CHARS}
                               disabled={Boolean(composerDisabledReason)}
+                              disabledReason={composerDisabledReason}
                             />
                           </>
                         )}
@@ -5682,40 +5695,6 @@ function AuthenticatedInboxPage() {
             </div>
           </TabsContent>
 
-          <TabsContent value="settings" className="mt-0">
-            <section className="space-y-4">
-              <h2 className="text-sm font-medium">Create inbox alias</h2>
-              <form className="space-y-2" onSubmit={handleCreateInboxIdentity}>
-                <Input
-                  value={newInboxSlug}
-                  onChange={e => setNewInboxSlug(e.target.value)}
-                  placeholder="New slug"
-                  className="h-8 text-sm"
-                  disabled={!canWriteToActiveInbox || !vaultUnlocked}
-                />
-                <Input
-                  value={newInboxDisplayName}
-                  onChange={e => setNewInboxDisplayName(e.target.value)}
-                  placeholder="Display name (optional)"
-                  className="h-8 text-sm"
-                  disabled={!canWriteToActiveInbox || !vaultUnlocked}
-                />
-                <Button
-                  type="submit"
-                  size="sm"
-                  variant="secondary"
-                  className="h-7 w-full text-xs md:w-auto"
-                  disabled={
-                    !canWriteToActiveInbox ||
-                    !vaultUnlocked ||
-                    !newInboxSlug.trim()
-                  }
-                >
-                  <Plus className="h-3.5 w-3.5" /> Create alias
-                </Button>
-              </form>
-            </section>
-          </TabsContent>
         </Tabs>
       ) : null}
     </InboxShell>

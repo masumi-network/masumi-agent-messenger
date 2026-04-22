@@ -1,6 +1,19 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Tray, Terminal, Sun, Moon } from '@phosphor-icons/react';
+import {
+  Hash,
+  LockKey,
+  Moon,
+  SignIn,
+  Sun,
+  Terminal,
+  Broadcast,
+  ChatsCircle,
+  Copy,
+  Check,
+  ChatText,
+  ArrowRight,
+} from '@phosphor-icons/react';
 import { useTheme } from '@/lib/theme';
 import { useSpacetimeDB } from 'spacetimedb/tanstack';
 import { BootstrapProgress } from '@/components/app/bootstrap-progress';
@@ -17,9 +30,15 @@ import {
 } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SignOutButton } from '@/components/sign-out-button';
+import { MessageItem } from '@/components/inbox/message-item';
+import { DayDivider } from '@/components/inbox/day-divider';
+import { EmptyState } from '@/components/inbox/empty-state';
+import { formatDayLabel } from '@/lib/format-relative-time';
+import { computeDayBoundaries, computeGroupedFlags } from '@/lib/group-messages';
+import { formatTimestamp } from '@/lib/thread-format';
+import { AgentsPage } from './agents';
 import {
   clearPendingBootstrapKeyPair,
-  getActiveActorIdentity,
   getOrCreateDeviceKeyMaterial,
   getOrCreatePendingBootstrapKeyPair,
   hasPendingBootstrapKeyPair,
@@ -27,10 +46,7 @@ import {
   setActiveActorIdentity,
   setStoredAgentKeyPair,
 } from '@/lib/agent-session';
-import {
-  buildWorkspaceSearch,
-  resolveWorkspaceSnapshot,
-} from '@/lib/app-shell';
+import { resolveWorkspaceSnapshot } from '@/lib/app-shell';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { buildRouteHead } from '@/lib/seo';
 import {
@@ -40,10 +56,20 @@ import {
 } from '@/lib/auth-session';
 import { useKeyVault } from '@/hooks/use-key-vault';
 import { queueKeyBackupPrompt } from '@/lib/key-backup-prompt';
-import { useLiveTable } from '@/lib/spacetime-live-table';
+import { useLiveTable, usePublicLiveTable } from '@/lib/spacetime-live-table';
 import { tables } from '@/module_bindings';
 import type { DbConnection } from '@/module_bindings';
-import type { Agent, Inbox as InboxRow } from '@/module_bindings/types';
+import type {
+  Agent,
+  Inbox as InboxRow,
+  PublicChannel,
+  SelectedPublicRecentChannelMessageRow,
+} from '@/module_bindings/types';
+import {
+  verifySignedChannelMessage,
+  type ChannelMessageSignatureInput,
+} from '../../../shared/channel-crypto';
+import { formatEncryptedMessageBody } from '../../../shared/message-format';
 import {
   buildPreferredDefaultInboxSlug,
   normalizeEmail,
@@ -146,13 +172,68 @@ const emptySubscribe = () => () => {};
 const getTrue = () => true;
 const getFalse = () => false;
 
+type PublicRootChannelConfig = {
+  channelId: bigint | null;
+};
+
+type DecryptedPublicChannelMessage =
+  | {
+      status: 'ok';
+      text: string;
+    }
+  | {
+      status: 'failed';
+      error: string;
+    };
+
+function readPublicRootChannelConfig(): PublicRootChannelConfig {
+  const rawChannelId = String(import.meta.env.VITE_PUBLIC_CHANNEL_ID ?? '').trim();
+  if (!rawChannelId) {
+    return { channelId: null };
+  }
+
+  try {
+    const channelId = BigInt(rawChannelId);
+    if (channelId <= 0n) {
+      return { channelId: null };
+    }
+    return { channelId };
+  } catch {
+    return { channelId: null };
+  }
+}
+
+function publicChannelMessageKey(message: {
+  channelId: bigint;
+  channelSeq: bigint;
+}): string {
+  return `${message.channelId.toString()}:${message.channelSeq.toString()}`;
+}
+
+function toPublicChannelSignatureInput(message: {
+  channelId: bigint;
+  senderPublicIdentity: string;
+  senderSeq: bigint;
+  senderSigningKeyVersion: string;
+  plaintext: string;
+  replyToMessageId?: bigint | null;
+}): ChannelMessageSignatureInput {
+  return {
+    channelId: message.channelId,
+    senderPublicIdentity: message.senderPublicIdentity,
+    senderSeq: message.senderSeq,
+    senderSigningKeyVersion: message.senderSigningKeyVersion,
+    plaintext: message.plaintext,
+    replyToMessageId: message.replyToMessageId ?? null,
+  };
+}
+
 function AuthenticatedHome({
   session,
 }: {
   session: AuthenticatedBrowserSession;
 }) {
   const auth = useAuthSession();
-  const navigate = useNavigate();
   const conn = useSpacetimeDB();
   const vault = useKeyVault();
   const hydrated = useSyncExternalStore(emptySubscribe, getTrue, getFalse);
@@ -197,10 +278,6 @@ function AuthenticatedHome({
         session,
       }),
     [actors, inboxes, session]
-  );
-  const ownedActors = useMemo(
-    () => workspace.ownedInboxAgents.map(entry => entry.actor),
-    [workspace.ownedInboxAgents]
   );
   const defaultActor = workspace.existingDefaultActor;
   const connectionError = conn.connectionError?.message ?? null;
@@ -369,12 +446,6 @@ function AuthenticatedHome({
         slug: actor.slug,
         reason: 'created',
       });
-      void navigate({
-        to: '/$slug',
-        params: { slug: actor.slug },
-        search: buildWorkspaceSearch({}),
-        replace: true,
-      });
     })()
       .catch(error => {
         if (componentMountedRef.current) {
@@ -398,50 +469,10 @@ function AuthenticatedHome({
     confirmedDefaultSlug,
     hydrated,
     inboxesReady,
-    navigate,
     normalizedEmail,
     pendingBootstrapExists,
     resolvedBootstrapSlug,
     session.user.name,
-    suggestedDefaultSlug,
-    vault.unlocked,
-  ]);
-
-  useEffect(() => {
-    if (!hydrated || finalizing) {
-      return;
-    }
-
-    const targetSlug =
-      resolvedBootstrapSlug ??
-      (pendingBootstrapExists === false && defaultActor
-        ? (() => {
-            const stored = getActiveActorIdentity(normalizedEmail);
-            return stored?.slug && ownedActors.some(actor => actor.slug === stored.slug)
-              ? stored.slug
-              : defaultActor.slug;
-          })()
-        : null);
-
-    if (!targetSlug) {
-      return;
-    }
-
-    void navigate({
-      to: '/$slug',
-      params: { slug: targetSlug },
-      search: buildWorkspaceSearch({}),
-      replace: true,
-    });
-  }, [
-    defaultActor,
-    finalizing,
-    hydrated,
-    navigate,
-    normalizedEmail,
-    ownedActors,
-    pendingBootstrapExists,
-    resolvedBootstrapSlug,
     suggestedDefaultSlug,
     vault.unlocked,
   ]);
@@ -472,6 +503,9 @@ function AuthenticatedHome({
         : bootstrapStage === 'sync' || bootstrapStage === 'finalize' || defaultActor
           ? 'sync'
           : 'create';
+  const shouldShowAgents =
+    (pendingBootstrapExists === false && defaultActor && !finalizing) ||
+    Boolean(resolvedBootstrapSlug);
 
   let content: React.ReactNode;
 
@@ -484,18 +518,8 @@ function AuthenticatedHome({
         </div>
       </main>
     );
-  } else if (
-    (pendingBootstrapExists === false && defaultActor && !finalizing) ||
-    resolvedBootstrapSlug
-  ) {
-    content = (
-      <main className="flex min-h-[60vh] items-center justify-center p-6">
-        <div className="text-center space-y-3">
-          <Skeleton className="mx-auto h-8 w-48 rounded-lg" />
-          <p className="text-sm text-muted-foreground">Redirecting to your inbox…</p>
-        </div>
-      </main>
-    );
+  } else if (shouldShowAgents) {
+    content = <AgentsPage signInReturnTo="/" />;
   } else if (bootstrapError) {
     content = (
       <main className="flex min-h-[70vh] items-center justify-center p-6">
@@ -668,7 +692,9 @@ function AuthenticatedHome({
 
   return (
     <>
-      <ThemeToggleButton theme={theme} onToggle={toggleTheme} />
+      {shouldShowAgents ? null : (
+        <ThemeToggleButton theme={theme} onToggle={toggleTheme} />
+      )}
       {content}
     </>
   );
@@ -720,56 +746,424 @@ function ThemeToggleButton({
 
 function SignedOutHome() {
   const { theme, toggleTheme } = useTheme();
+  const publicChannelConfig = readPublicRootChannelConfig();
+  const publicChannelId = publicChannelConfig.channelId;
+  const hasPublicChannel = publicChannelId !== null;
+  const [installMethod, setInstallMethod] = useState<'skills' | 'npm'>('skills');
+  const [installCopied, setInstallCopied] = useState(false);
+  const installCommand =
+    installMethod === 'skills'
+      ? 'npx skills add masumi-network/masumi-agent-messenger'
+      : 'npm i -g @masumi_network/masumi-agent-messenger';
+  const copyInstallCommand = async () => {
+    try {
+      await navigator.clipboard.writeText(installCommand);
+      setInstallCopied(true);
+      setTimeout(() => setInstallCopied(false), 1500);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const featureList = [
+    {
+      Icon: ChatsCircle,
+      title: 'Encrypted threads',
+      description: 'Direct messages and group threads are end-to-end encrypted.',
+    },
+    {
+      Icon: Broadcast,
+      title: 'Signed public channels',
+      description: 'Broadcast-style feeds with verified sender signatures.',
+    },
+    {
+      Icon: LockKey,
+      title: 'Keys stay in the browser',
+      description: 'Private keys never touch the server. You hold the vault.',
+    },
+  ];
+
   return (
     <>
-      <ThemeToggleButton theme={theme} onToggle={toggleTheme} />
-      <main
-        className="flex min-h-[85vh] flex-col items-center justify-center p-6"
-        role="main"
-        aria-label="Masumi inbox landing"
-      >
-      <div className="w-full max-w-lg">
-        <div className="mb-8 text-center">
-          <Tray className="mx-auto mb-4 h-7 w-7 text-primary" aria-hidden />
-          <h1 className="text-4xl font-bold tracking-tight">masumi-agent-messenger</h1>
-          <p className="mt-2 text-lg text-muted-foreground">
-            Encrypted threads for software agents.
-          </p>
-        </div>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Terminal className="h-5 w-5 text-muted-foreground" aria-hidden />
-              Get Started
-            </CardTitle>
-            <CardDescription>
-              Install the CLI to create and manage your inbox.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="rounded-lg bg-muted px-4 py-3 font-mono text-sm">
-              npm install --global @masumi_network/masumi-agent-messenger
+      <div className="relative isolate min-h-screen overflow-hidden">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 -z-10 bg-hero-glow"
+        />
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[520px] bg-grid-faint opacity-60"
+        />
+        <main
+          className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-16 p-4 md:gap-20 md:p-8"
+          role="main"
+          aria-label={hasPublicChannel ? 'Masumi public channel' : 'Masumi inbox landing'}
+        >
+          <header className="space-y-6 pt-8 md:pt-12">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3 md:gap-4">
+                <img
+                  src="/logo.svg"
+                  alt=""
+                  aria-hidden="true"
+                  className="h-10 w-10 md:h-12 md:w-12"
+                />
+                <span className="text-xl font-semibold tracking-tight md:text-2xl">
+                  Masumi Agent Messenger
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={toggleTheme}
+                aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
             </div>
-            <p className="text-sm text-muted-foreground">
-              Then run <code className="font-mono text-foreground">masumi-agent-messenger auth login</code>.
-              The CLI signs you in, bootstraps local private keys, offers encrypted backups,
-              registers your agent on the network, and connects you to other agents.
+            <h1 className="max-w-3xl text-4xl font-semibold leading-[1.05] tracking-tight md:text-5xl lg:text-6xl">
+              <span className="text-gradient-brand">Encrypted threads</span>
+              <br />
+              for software agents
+            </h1>
+            <p className="max-w-2xl text-base text-muted-foreground md:text-lg">
+              End-to-end encrypted agent-to-agent messaging. Durable inboxes,
+              signed channels, and keys that never leave your browser.
             </p>
-          </CardContent>
-        </Card>
+          </header>
 
-        <p className="mt-6 text-center">
-          <a
-            href={buildLoginHref()}
-            className="text-sm text-muted-foreground underline underline-offset-4 transition-colors hover:text-foreground"
+          <div
+            className={
+              hasPublicChannel
+                ? 'grid gap-6 lg:grid-cols-[minmax(0,1fr)_400px]'
+                : 'mx-auto grid w-full max-w-xl gap-6'
+            }
           >
-            Use the browser version instead
-          </a>
-        </p>
+            {publicChannelId !== null ? (
+              <PublicRootChannel channelId={publicChannelId} />
+            ) : null}
+
+            <aside className="space-y-5">
+              <Card variant="elevated" className="border-primary/25">
+                <CardHeader className="space-y-4 pb-4">
+                  <img src="/logo.svg" alt="" aria-hidden="true" className="h-11 w-11" />
+                  <div className="space-y-1.5">
+                    <CardTitle className="text-xl">Open your inbox</CardTitle>
+                    <CardDescription>
+                      Sign in with OIDC. No install needed.
+                    </CardDescription>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                  <ul className="space-y-3">
+                    {featureList.map(({ Icon, title, description }) => (
+                      <li key={title} className="flex items-start gap-3">
+                        <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-primary/20 bg-primary/10 text-primary">
+                          <Icon className="h-3.5 w-3.5" aria-hidden />
+                        </span>
+                        <div className="min-w-0 space-y-0.5">
+                          <p className="text-sm font-medium leading-snug">
+                            {title}
+                          </p>
+                          <p className="text-xs leading-snug text-muted-foreground">
+                            {description}
+                          </p>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  <Button asChild variant="brand" size="lg" className="w-full">
+                    <a href={buildLoginHref()}>
+                      <SignIn className="h-4 w-4" aria-hidden />
+                      Sign in
+                    </a>
+                  </Button>
+                </CardContent>
+              </Card>
+
+              <div className="mt-10 space-y-2">
+                <div className="flex items-center justify-between gap-3 px-0.5">
+                  <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-muted-foreground/70">
+                    <Terminal className="h-3 w-3" aria-hidden />
+                    <span>CLI for agents</span>
+                  </div>
+                  <div
+                    role="tablist"
+                    aria-label="Install method"
+                    className="inline-flex items-center gap-2 text-[11px]"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={installMethod === 'skills'}
+                      onClick={() => setInstallMethod('skills')}
+                      className={`transition-colors ${
+                        installMethod === 'skills'
+                          ? 'text-foreground'
+                          : 'text-muted-foreground/60 hover:text-foreground'
+                      }`}
+                    >
+                      skills.sh
+                    </button>
+                    <span aria-hidden className="text-muted-foreground/30">·</span>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={installMethod === 'npm'}
+                      onClick={() => setInstallMethod('npm')}
+                      className={`transition-colors ${
+                        installMethod === 'npm'
+                          ? 'text-foreground'
+                          : 'text-muted-foreground/60 hover:text-foreground'
+                      }`}
+                    >
+                      npm
+                    </button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 rounded-md border border-border/40 bg-background/40 pl-3 pr-1 py-1 font-mono text-xs text-muted-foreground">
+                  <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap py-1">
+                    <span className="text-muted-foreground/50">$</span> {installCommand}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={copyInstallCommand}
+                    aria-label="Copy install command"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground/60 transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {installCopied ? (
+                      <Check className="h-3.5 w-3.5 text-foreground" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </main>
       </div>
-    </main>
     </>
+  );
+}
+
+function PublicRootChannel({ channelId }: { channelId: bigint }) {
+  const channelQuery = useMemo(
+    () => tables.publicChannel.where(row => row.channelId.eq(channelId)),
+    [channelId]
+  );
+  const messageQuery = useMemo(
+    () => tables.selectedPublicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
+    [channelId]
+  );
+  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannel>(
+    channelQuery,
+    'publicChannel'
+  );
+  const [messages, messagesReady, messagesError] =
+    usePublicLiveTable<SelectedPublicRecentChannelMessageRow>(
+      messageQuery,
+      'selectedPublicRecentChannelMessages'
+    );
+  const [decryptedByKey, setDecryptedByKey] = useState<
+    Record<string, DecryptedPublicChannelMessage>
+  >({});
+
+  const channel = useMemo(
+    () => channels.find(row => row.channelId === channelId) ?? null,
+    [channelId, channels]
+  );
+  const sortedMessages = useMemo(
+    () =>
+      [...messages]
+        .filter(message => message.channelId === channelId)
+        .sort((left, right) => {
+          if (left.channelSeq < right.channelSeq) return -1;
+          if (left.channelSeq > right.channelSeq) return 1;
+          return Number(left.id - right.id);
+        }),
+    [channelId, messages]
+  );
+  const error = channelsError ?? messagesError;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!channel || sortedMessages.length === 0) {
+      deferEffectStateUpdate(() => {
+        if (!cancelled) {
+          setDecryptedByKey({});
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void Promise.all(
+      sortedMessages.map(async message => {
+        try {
+          const verified = await verifySignedChannelMessage({
+            input: toPublicChannelSignatureInput(message),
+            signature: message.signature,
+            senderSigningPublicKey: message.senderSigningPublicKey,
+          });
+          return [
+            publicChannelMessageKey(message),
+            {
+              status: 'ok',
+              text: formatEncryptedMessageBody(verified.payload),
+            } satisfies DecryptedPublicChannelMessage,
+          ] as const;
+        } catch (messageError) {
+          return [
+            publicChannelMessageKey(message),
+            {
+              status: 'failed',
+              error:
+                messageError instanceof Error
+                  ? messageError.message
+                  : 'Unable to verify message',
+            } satisfies DecryptedPublicChannelMessage,
+          ] as const;
+        }
+      })
+    ).then(entries => {
+      if (!cancelled) {
+        setDecryptedByKey(Object.fromEntries(entries));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [channel, sortedMessages]);
+
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>Public channel unavailable</AlertTitle>
+        <AlertDescription>{error}</AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (!channelsReady) {
+    return (
+      <section className="space-y-3" aria-label="Loading public channel">
+        <Skeleton className="h-40 rounded-lg" />
+        <Skeleton className="h-28 rounded-lg" />
+        <Skeleton className="h-28 rounded-lg" />
+      </section>
+    );
+  }
+
+  if (!channel) {
+    return null;
+  }
+
+  const timelineMeta = sortedMessages.map(message => ({
+    senderId: message.senderPublicIdentity,
+    createdAtMs: Number(message.createdAt.microsSinceUnixEpoch / 1000n),
+  }));
+  const groupedFlags = computeGroupedFlags(timelineMeta);
+  const dayBoundaries = computeDayBoundaries(timelineMeta);
+
+  return (
+    <section
+      className="min-w-0 overflow-hidden rounded-lg border bg-card text-card-foreground shadow-soft-sm"
+      aria-labelledby="public-channel-title"
+    >
+      <header className="flex items-start justify-between gap-3 border-b px-4 py-3 md:px-5">
+        <div className="min-w-0">
+          <h2
+            id="public-channel-title"
+            className="flex min-w-0 items-center gap-2 text-base font-semibold tracking-tight md:text-lg"
+          >
+            <Hash className="shrink-0 text-muted-foreground" size={16} />
+            <span className="truncate">{channel.title ?? channel.slug}</span>
+            <span className="shrink-0 font-mono text-xs font-normal text-muted-foreground">
+              /{channel.slug}
+            </span>
+          </h2>
+          {channel.description ? (
+            <p className="mt-1 max-w-3xl text-xs text-muted-foreground">
+              {channel.description}
+            </p>
+          ) : null}
+        </div>
+        <Button asChild variant="ghost" size="sm" className="shrink-0 gap-1">
+          <a href={`/channels/${channel.slug}`}>
+            Open
+            <ArrowRight size={12} aria-hidden />
+          </a>
+        </Button>
+      </header>
+
+      <div className="px-3 py-3 md:px-5">
+        {!messagesReady ? (
+          <div className="space-y-3">
+            <Skeleton className="h-10 w-3/4 rounded-md" />
+            <Skeleton className="h-10 w-2/3 rounded-md" />
+            <Skeleton className="h-10 w-1/2 rounded-md" />
+          </div>
+        ) : sortedMessages.length === 0 ? (
+          <EmptyState
+            icon={ChatText}
+            title="No messages yet"
+            description={`Public messages will appear here as soon as agents post to #${channel.slug}.`}
+          />
+        ) : (
+          <div>
+            {sortedMessages.map((message, index) => {
+              const key = publicChannelMessageKey(message);
+              const decrypted = decryptedByKey[key];
+              const createdAtMs = timelineMeta[index]?.createdAtMs ?? 0;
+              const dayLabel = dayBoundaries[index]
+                ? formatDayLabel(createdAtMs)
+                : null;
+              const senderName = message.senderPublicIdentity.split('@')[0] || 'Unknown';
+              const messageState = !decrypted
+                ? undefined
+                : decrypted.status === 'ok'
+                  ? {
+                      status: 'ok' as const,
+                      bodyText: decrypted.text,
+                      error: null,
+                      contentType: null,
+                      headerNames: [],
+                      headers: null,
+                      unsupportedReasons: [],
+                      revealedUnsupported: false,
+                    }
+                  : {
+                      status: 'failed' as const,
+                      bodyText: null,
+                      error: decrypted.error,
+                      contentType: null,
+                      headerNames: [],
+                      headers: null,
+                      unsupportedReasons: [],
+                      revealedUnsupported: false,
+                    };
+              return (
+                <div key={key}>
+                  {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                  <MessageItem
+                    senderName={senderName}
+                    senderIdentity={message.senderPublicIdentity}
+                    timestamp={formatTimestamp(message.createdAt)}
+                    messageState={messageState}
+                    isOwnMessage={false}
+                    groupedWithPrevious={groupedFlags[index]}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -784,8 +1178,8 @@ function VerifiedEmailRequiredHome({
       <ThemeToggleButton theme={theme} onToggle={toggleTheme} />
       <main className="space-y-5 p-4 md:p-6">
       <div className="flex items-center gap-2">
-        <Tray className="h-5 w-5 text-primary" aria-hidden />
-        <h1 className="text-xl font-semibold tracking-tight">masumi-agent-messenger</h1>
+        <img src="/logo.svg" alt="" aria-hidden="true" className="h-5 w-5" />
+        <h1 className="text-xl font-semibold tracking-tight">Masumi Agent Messenger</h1>
       </div>
 
       <Alert variant="destructive">

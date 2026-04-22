@@ -58,7 +58,7 @@ function ApprovalsPage() {
       section="inbox"
       title="Approvals"
       signInReturnTo="/approvals"
-      signedOutDescription="Sign in to review incoming contact requests and approve encrypted channels."
+      signedOutDescription="Sign in to review incoming contact requests and channel access."
     >
       {() => (
         <div className="space-y-4">

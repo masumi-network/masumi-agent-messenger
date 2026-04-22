@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { PaperPlaneTilt } from '@phosphor-icons/react';
+import { Info, PaperPlaneTilt } from '@phosphor-icons/react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -30,6 +30,7 @@ export function MessageComposer({
   onSubmit,
   maxLength,
   disabled,
+  disabledReason,
   placeholder = 'Send a message…',
 }: {
   value: string;
@@ -38,11 +39,18 @@ export function MessageComposer({
   onSubmit: (event: React.FormEvent) => void;
   maxLength: number;
   disabled: boolean;
+  disabledReason?: string | null;
   placeholder?: string;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const remaining = maxLength - value.length;
   const showInlineCounter = remaining <= COUNTER_THRESHOLD;
+  const hasText = value.trim().length > 0;
+  const sendDisabled = disabled || !hasText;
+  const isMac =
+    typeof navigator !== 'undefined' &&
+    /mac|iphone|ipad|ipod/i.test(navigator.platform || navigator.userAgent);
+  const sendHintKey = isMac ? '⌘↵' : 'Ctrl+↵';
 
   useEffect(() => {
     resizeTextarea(textareaRef.current);
@@ -50,6 +58,15 @@ export function MessageComposer({
 
   return (
     <form className="pt-4" onSubmit={onSubmit}>
+      {disabled && disabledReason ? (
+        <div
+          className="mb-2 flex items-start gap-2 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          role="status"
+        >
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1 leading-snug">{disabledReason}</span>
+        </div>
+      ) : null}
       <div className="flex items-end gap-2">
         <Textarea
           ref={textareaRef}
@@ -67,8 +84,8 @@ export function MessageComposer({
           <TooltipTrigger asChild>
             <Button
               type="submit"
-              variant="ghost"
-              disabled={disabled || !value.trim()}
+              variant={hasText && !disabled ? 'brand' : 'ghost'}
+              disabled={sendDisabled}
               aria-label="Send message"
               className="h-14 w-14 shrink-0 rounded-md p-0"
             >
@@ -77,26 +94,34 @@ export function MessageComposer({
           </TooltipTrigger>
           <TooltipContent side="top" sideOffset={6}>
             <span className="text-[11px]">
-              {value.length.toLocaleString()}/{maxLength.toLocaleString()} · Cmd+Enter to send
+              {value.length.toLocaleString()}/{maxLength.toLocaleString()} · {sendHintKey} to send
             </span>
           </TooltipContent>
         </Tooltip>
       </div>
-      {showInlineCounter ? (
-        <p className={cnCounter(remaining)}>
-          {remaining.toLocaleString()} characters left
-        </p>
-      ) : null}
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <span className="text-[11px] text-muted-foreground/60">
+          <kbd className="rounded border border-border/60 bg-muted/40 px-1 py-0.5 font-mono text-[10px]">
+            {sendHintKey}
+          </kbd>{' '}
+          to send
+        </span>
+        {showInlineCounter ? (
+          <span className={cnCounter(remaining)}>
+            {remaining.toLocaleString()} characters left
+          </span>
+        ) : null}
+      </div>
     </form>
   );
 }
 
 function cnCounter(remaining: number): string {
   if (remaining <= 0) {
-    return 'mt-2 text-[11px] text-destructive';
+    return 'text-[11px] text-destructive';
   }
   if (remaining <= 50) {
-    return 'mt-2 text-[11px] text-amber-500';
+    return 'text-[11px] text-amber-500';
   }
-  return 'mt-2 text-[11px] text-muted-foreground/70';
+  return 'text-[11px] text-muted-foreground/70';
 }

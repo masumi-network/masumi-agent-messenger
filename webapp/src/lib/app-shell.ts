@@ -12,15 +12,105 @@ export type DefaultKeyIssue = 'missing' | 'mismatch' | null;
 export type SecurityPanel = 'recovery' | 'backups';
 export type InboxComposeMode = 'direct' | 'group';
 type InboxComposeModeInput = InboxComposeMode | 'add';
-export type WorkspaceTab = 'inbox' | 'approvals' | 'settings';
-export type WorkspaceSettingsTab = 'profile' | 'security' | 'advanced';
-export type AppShellSection = 'inbox' | 'discover' | 'agents' | 'security';
+export type WorkspaceTab = 'inbox' | 'approvals';
+export type AppShellSection = 'inbox' | 'discover' | 'agents' | 'security' | 'channels';
+
+export type ChannelNavEntry = {
+  channelId: bigint;
+  slug: string;
+  title: string | null;
+  permission: string;
+  isAdmin: boolean;
+  pendingApprovals: number;
+};
+
+type ChannelNavChannelLike = {
+  id: bigint;
+  slug: string;
+  title?: string | null;
+};
+
+type ChannelNavMembershipLike = {
+  channelId: bigint;
+  agentDbId: bigint;
+  permission: string;
+  active: boolean;
+};
+
+type ChannelNavJoinRequestLike = {
+  channelId: bigint;
+  direction: string;
+  status: string;
+};
+
+function channelPermissionRank(permission: string): number {
+  if (permission === 'admin') return 3;
+  if (permission === 'read_write') return 2;
+  if (permission === 'read') return 1;
+  return 0;
+}
+
+export function buildChannelNavEntries<
+  Channel extends ChannelNavChannelLike,
+  Membership extends ChannelNavMembershipLike,
+  JoinRequest extends ChannelNavJoinRequestLike,
+>(params: {
+  channels: Channel[];
+  memberships: Membership[];
+  joinRequests: JoinRequest[];
+  ownedActorIds: Set<bigint>;
+}): ChannelNavEntry[] {
+  const channelById = new Map(params.channels.map(channel => [channel.id, channel]));
+  const byChannelId = new Map<bigint, ChannelNavEntry>();
+
+  for (const membership of params.memberships) {
+    if (!params.ownedActorIds.has(membership.agentDbId) || !membership.active) {
+      continue;
+    }
+    const channel = channelById.get(membership.channelId);
+    if (!channel) {
+      continue;
+    }
+    const existing = byChannelId.get(membership.channelId);
+    if (
+      existing &&
+      channelPermissionRank(existing.permission) >= channelPermissionRank(membership.permission)
+    ) {
+      continue;
+    }
+    byChannelId.set(membership.channelId, {
+      channelId: membership.channelId,
+      slug: channel.slug,
+      title: channel.title ?? null,
+      permission: membership.permission,
+      isAdmin: membership.permission === 'admin',
+      pendingApprovals: existing?.pendingApprovals ?? 0,
+    });
+  }
+
+  for (const request of params.joinRequests) {
+    if (request.direction !== 'incoming' || request.status !== 'pending') {
+      continue;
+    }
+    const entry = byChannelId.get(request.channelId);
+    if (!entry || !entry.isAdmin) {
+      continue;
+    }
+    entry.pendingApprovals += 1;
+  }
+
+  return Array.from(byChannelId.values()).sort((left, right) => {
+    if (left.isAdmin !== right.isAdmin) {
+      return left.isAdmin ? -1 : 1;
+    }
+    return left.slug.localeCompare(right.slug);
+  });
+}
 export type WorkspaceSearch = {
   thread: string | undefined;
   compose: InboxComposeMode | undefined;
   lookup: string | undefined;
   tab: Exclude<WorkspaceTab, 'inbox'> | undefined;
-  settings: Exclude<WorkspaceSettingsTab, 'profile'> | undefined;
 };
 
 export type OwnedInboxActorLike = ActorLike & {
@@ -123,6 +213,10 @@ export function deriveAppShellSection(pathname: string): AppShellSection {
     return 'security';
   }
 
+  if (pathname === '/channels' || pathname.startsWith('/channels/')) {
+    return 'channels';
+  }
+
   return 'inbox';
 }
 
@@ -155,16 +249,7 @@ export function parseSecurityPanel(value: unknown): SecurityPanel | undefined {
 export function parseWorkspaceTab(
   value: unknown
 ): Exclude<WorkspaceTab, 'inbox'> | undefined {
-  return value === 'approvals' || value === 'settings' ? value : undefined;
-}
-
-export function parseWorkspaceSettingsTab(
-  value: unknown
-): Exclude<WorkspaceSettingsTab, 'profile'> | undefined {
-  if (value === 'advanced' || value === 'security') {
-    return 'advanced';
-  }
-  return undefined;
+  return value === 'approvals' ? value : undefined;
 }
 
 export function findSessionOwnedInbox<Inbox extends SessionOwnedInboxLike>(params: {
@@ -269,13 +354,8 @@ export function buildWorkspaceSearch(params: {
   compose?: InboxComposeModeInput;
   lookup?: string;
   tab?: WorkspaceTab;
-  settings?: WorkspaceSettingsTab;
 }): WorkspaceSearch {
   const tab = params.tab && params.tab !== 'inbox' ? params.tab : undefined;
-  const settings =
-    tab === 'settings' && params.settings && params.settings !== 'profile'
-      ? params.settings
-      : undefined;
   const compose =
     params.compose === 'add' ? 'direct' : params.compose;
 
@@ -284,7 +364,6 @@ export function buildWorkspaceSearch(params: {
     compose,
     lookup: params.lookup,
     tab,
-    settings,
   };
 }
 

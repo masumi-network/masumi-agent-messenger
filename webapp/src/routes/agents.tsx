@@ -30,14 +30,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { describeActor } from '@/lib/agent-directory';
 import { getOrCreateAgentKeyPair, setActiveActorIdentity } from '@/lib/agent-session';
-import { describeLocalVaultRequirement } from '@/lib/app-shell';
+import { buildWorkspaceSearch, describeLocalVaultRequirement } from '@/lib/app-shell';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { buildRouteHead } from '@/lib/seo';
 import { useKeyVault } from '@/hooks/use-key-vault';
 import {
   registerBrowserInboxAgent,
   readActorRegistrationMetadata,
-  syncBrowserInboxAgentRegistration,
 } from '@/lib/inbox-agent-registration';
 import { queueKeyBackupPrompt } from '@/lib/key-backup-prompt';
 import { reducers } from '@/module_bindings';
@@ -65,7 +64,6 @@ import {
   STANDARD_MESSAGE_CONTENT_TYPES,
   STANDARD_MESSAGE_HEADER_NAMES,
 } from '../../../shared/message-format';
-import type { Agent } from '@/module_bindings/types';
 
 export const Route = createFileRoute('/agents')({
   head: () =>
@@ -79,14 +77,11 @@ export const Route = createFileRoute('/agents')({
 });
 
 type ManagedAgentDetailsTab = 'profile' | 'registration';
-
-type RefreshedOwnedAgentRegistration = {
-  sourceSyncKey: string | null;
-  actor: Agent;
-  registration: MasumiRegistrationResult;
+type AgentsPageProps = {
+  signInReturnTo?: string;
 };
 
-function AgentsPage() {
+export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {}) {
   const navigate = useNavigate();
   const vault = useKeyVault();
   const workspace = useWorkspaceShell();
@@ -112,12 +107,6 @@ function AgentsPage() {
   const [publicDescriptionBusy, setPublicDescriptionBusy] = useState(false);
   const [managedAgentRegistration, setManagedAgentRegistration] =
     useState<MasumiRegistrationResult>(createEmptyMasumiRegistrationResult());
-  const [refreshedRegistrationByActorId, setRefreshedRegistrationByActorId] =
-    useState<Record<string, RefreshedOwnedAgentRegistration>>({});
-  const [completedOwnedAgentRegistrationRefreshKey, setCompletedOwnedAgentRegistrationRefreshKey] =
-    useState<string | null>(null);
-  const [ownedAgentRegistrationRefreshBusy, setOwnedAgentRegistrationRefreshBusy] =
-    useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -148,45 +137,48 @@ function AgentsPage() {
     () => (workspace.status === 'ready' ? workspace.ownedInboxAgents : []),
     [workspace]
   );
-  const ownedAgentRegistrationRefreshTargets = useMemo(
-    () => subscribedOwnedAgentEntries,
-    [subscribedOwnedAgentEntries]
-  );
-  const ownedAgentRegistrationRefreshKey = useMemo(
-    () =>
-      ownedAgentRegistrationRefreshTargets
-        .map(entry => buildMasumiRegistrationSyncKey(entry.actor) ?? '')
-        .join('\n'),
-    [ownedAgentRegistrationRefreshTargets]
-  );
-  const ownedAgentRegistrationRefreshTargetIds = useMemo(
-    () =>
-      new Set(
-        ownedAgentRegistrationRefreshTargets.map(entry => entry.actor.id.toString())
-      ),
-    [ownedAgentRegistrationRefreshTargets]
-  );
+  const ownedAgentRegistrationRefresh =
+    workspace.status === 'ready'
+      ? workspace.ownedInboxAgentRegistrationRefresh
+      : null;
   const ownedAgentEntries = useMemo(
     () =>
       subscribedOwnedAgentEntries.map(entry => {
-        const actorId = entry.actor.id.toString();
-        const sourceSyncKey = buildMasumiRegistrationSyncKey(entry.actor);
-        const refreshed = refreshedRegistrationByActorId[actorId];
-        const actor =
-          refreshed && refreshed.sourceSyncKey === sourceSyncKey
-            ? refreshed.actor
-            : entry.actor;
-        const registration = registrationResultFromMetadata(
-          readActorRegistrationMetadata(actor)
-        );
+        const actor = entry.actor;
+        const actorId = actor.id.toString();
+        const sourceSyncKey = buildMasumiRegistrationSyncKey(actor);
+        const metadata = readActorRegistrationMetadata(actor);
+        const baseRegistration = registrationResultFromMetadata(metadata);
+        const refreshedRegistration =
+          ownedAgentRegistrationRefresh?.resultsByActorId[actorId];
+        const refreshError = ownedAgentRegistrationRefresh?.errorsByActorId[actorId];
+        const registration =
+          refreshedRegistration &&
+          refreshedRegistration.sourceSyncKey === sourceSyncKey
+            ? refreshedRegistration.registration
+            : refreshError
+              ? {
+                  ...baseRegistration,
+                  attempted: true,
+                  error: refreshError,
+                  status:
+                    baseRegistration.status === 'skipped'
+                      ? 'service_unavailable'
+                      : baseRegistration.status,
+                }
+              : baseRegistration;
         return {
           ...entry,
           actor,
-          managed: readActorRegistrationMetadata(actor) !== null,
+          registration,
+          managed:
+            metadata !== null ||
+            registration.attempted ||
+            registration.error !== null,
           registered: registration.status === 'registered',
         };
       }),
-    [refreshedRegistrationByActorId, subscribedOwnedAgentEntries]
+    [ownedAgentRegistrationRefresh, subscribedOwnedAgentEntries]
   );
   const ownedAgents = useMemo(
     () => ownedAgentEntries.map(entry => entry.actor),
@@ -209,11 +201,13 @@ function AgentsPage() {
     }
   }, [ownedAgents, selectedOwnedAgentSlug]);
 
-  const selectedOwnedAgent = useMemo(
+  const selectedOwnedAgentEntry = useMemo(
     () =>
-      ownedAgents.find(actor => actor.slug === selectedOwnedAgentSlug) ?? null,
-    [ownedAgents, selectedOwnedAgentSlug]
+      ownedAgentEntries.find(entry => entry.actor.slug === selectedOwnedAgentSlug) ??
+      null,
+    [ownedAgentEntries, selectedOwnedAgentSlug]
   );
+  const selectedOwnedAgent = selectedOwnedAgentEntry?.actor ?? null;
   const selectedOwnedAgentSupportedContentTypes = useMemo(
     () => (selectedOwnedAgent ? getActorSupportedContentTypes(selectedOwnedAgent) : []),
     [selectedOwnedAgent]
@@ -222,19 +216,9 @@ function AgentsPage() {
     () => (selectedOwnedAgent ? getActorSupportedHeaderNames(selectedOwnedAgent) : []),
     [selectedOwnedAgent]
   );
-  const selectedOwnedAgentRegistrationSyncKey = useMemo(
-    () => buildMasumiRegistrationSyncKey(selectedOwnedAgent),
-    [selectedOwnedAgent]
-  );
   const selectedOwnedAgentRegistrationBase = useMemo(() => {
-    if (!selectedOwnedAgent) {
-      return createEmptyMasumiRegistrationResult();
-    }
-
-    return registrationResultFromMetadata(
-      readActorRegistrationMetadata(selectedOwnedAgent)
-    );
-  }, [selectedOwnedAgent]);
+    return selectedOwnedAgentEntry?.registration ?? createEmptyMasumiRegistrationResult();
+  }, [selectedOwnedAgentEntry]);
 
   const writeAccess = useWorkspaceWriteAccess({
     connected,
@@ -293,98 +277,8 @@ function AgentsPage() {
     inboxAgentBusy,
     selectedOwnedAgent,
     selectedOwnedAgentRegistrationBase,
-    selectedOwnedAgentRegistrationSyncKey,
   ]);
 
-  useEffect(() => {
-    if (inboxAgentBusy) {
-      return;
-    }
-
-    if (!session || ownedAgentRegistrationRefreshTargets.length === 0) {
-      return deferEffectStateUpdate(() => {
-        setOwnedAgentRegistrationRefreshBusy(false);
-        setCompletedOwnedAgentRegistrationRefreshKey(
-          ownedAgentRegistrationRefreshKey || ''
-        );
-      });
-    }
-
-    let cancelled = false;
-    deferEffectStateUpdate(() => {
-      if (!cancelled) {
-        setOwnedAgentRegistrationRefreshBusy(true);
-        setCompletedOwnedAgentRegistrationRefreshKey(null);
-      }
-    });
-
-    void (async () => {
-      const nextRefreshed: Record<string, RefreshedOwnedAgentRegistration> = {};
-
-      for (const entry of ownedAgentRegistrationRefreshTargets) {
-        const actor = entry.actor;
-        const actorId = actor.id.toString();
-        const sourceSyncKey = buildMasumiRegistrationSyncKey(actor);
-        const baseRegistration = registrationResultFromMetadata(
-          readActorRegistrationMetadata(actor)
-        );
-
-        try {
-          const result = await syncBrowserInboxAgentRegistration({
-            session,
-            actor,
-            persistRegistration: async payload => {
-              await Promise.resolve(upsertMasumiInboxAgentRegistrationReducer(payload));
-            },
-          });
-          nextRefreshed[actorId] = {
-            sourceSyncKey,
-            actor: result.actor,
-            registration: result.registration,
-          };
-        } catch (syncError) {
-          nextRefreshed[actorId] = {
-            sourceSyncKey,
-            actor,
-            registration: {
-              ...baseRegistration,
-              status:
-                baseRegistration.status !== 'skipped'
-                  ? baseRegistration.status
-                  : 'service_unavailable',
-              error:
-                syncError instanceof Error
-                  ? syncError.message
-                  : 'Unable to sync managed agent status right now.',
-            },
-          };
-        }
-      }
-
-      if (cancelled) {
-        return;
-      }
-
-      setRefreshedRegistrationByActorId(current => ({
-        ...current,
-        ...nextRefreshed,
-      }));
-      setCompletedOwnedAgentRegistrationRefreshKey(
-        ownedAgentRegistrationRefreshKey
-      );
-      setOwnedAgentRegistrationRefreshBusy(false);
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    inboxAgentBusy,
-    ownedAgentRegistrationRefreshKey,
-    ownedAgentRegistrationRefreshTargets,
-    session,
-    upsertMasumiInboxAgentRegistrationReducer,
-  ]);
   const canRegisterManagedAgent = useMemo(
     () => canAttemptManagedAgentRegistration(managedAgentRegistration),
     [managedAgentRegistration]
@@ -504,14 +398,6 @@ function AgentsPage() {
           await Promise.resolve(upsertMasumiInboxAgentRegistrationReducer(payload));
         },
       });
-      setRefreshedRegistrationByActorId(current => ({
-        ...current,
-        [selectedOwnedAgent.id.toString()]: {
-          sourceSyncKey: buildMasumiRegistrationSyncKey(selectedOwnedAgent),
-          actor: result.actor,
-          registration: result.registration,
-        },
-      }));
       setManagedAgentRegistration(result.registration);
       if (result.registration.status === 'registered') {
         setFeedback('Registration is confirmed on the Masumi network.');
@@ -658,7 +544,7 @@ function AgentsPage() {
       workspace={workspace}
       section="agents"
       title="My agents"
-      signInReturnTo="/agents"
+      signInReturnTo={signInReturnTo}
       signedOutDescription="Sign in to manage inbox identities, keys, and Masumi registration."
     >
       {needsBootstrapRedirect ? (
@@ -769,37 +655,38 @@ function AgentsPage() {
                 const isExpanded = actor.slug === selectedOwnedAgent?.slug;
                 const isSelectedActor = isExpanded && selectedOwnedAgent !== null;
                 const accent = AGENT_ACCENT[getAgentColorIndex(actor.publicIdentity)];
-                const rowRegistration = registrationResultFromMetadata(
-                  readActorRegistrationMetadata(actor)
-                );
+                const rowRegistration = entry.registration;
                 const rowRegistrationRefreshPending =
-                  ownedAgentRegistrationRefreshBusy &&
-                  ownedAgentRegistrationRefreshTargetIds.has(actor.id.toString()) &&
-                  completedOwnedAgentRegistrationRefreshKey !==
-                    ownedAgentRegistrationRefreshKey;
+                  Boolean(
+                    ownedAgentRegistrationRefresh?.busy &&
+                      ownedAgentRegistrationRefresh.targetIds.has(actor.id.toString()) &&
+                      ownedAgentRegistrationRefresh.completedKey !==
+                        ownedAgentRegistrationRefresh.refreshKey
+                  );
                 const rowIsRegistered = rowRegistration.status === 'registered';
                 const rowIsPending = rowRegistration.status === 'pending';
                 const rowHasError =
+                  rowRegistration.error !== null ||
                   rowRegistration.status === 'failed' ||
                   rowRegistration.status === 'service_unavailable' ||
                   rowRegistration.status === 'scope_missing';
                 const statusLabel = rowRegistrationRefreshPending
                   ? 'Refreshing'
-                  : rowIsRegistered
+                  : rowHasError
+                    ? 'Error'
+                    : rowIsRegistered
                     ? 'Registered'
                     : rowIsPending
                       ? 'Pending'
-                      : rowHasError
-                        ? 'Error'
                         : 'Unregistered';
                 const statusClass = rowRegistrationRefreshPending
                   ? 'bg-muted text-muted-foreground ring-border'
-                  : rowIsRegistered
+                  : rowHasError
+                    ? 'bg-rose-500/10 text-rose-500 ring-rose-500/30'
+                    : rowIsRegistered
                     ? 'bg-emerald-500/10 text-emerald-500 ring-emerald-500/30'
                     : rowIsPending
                       ? 'bg-sky-500/10 text-sky-500 ring-sky-500/30'
-                      : rowHasError
-                        ? 'bg-rose-500/10 text-rose-500 ring-rose-500/30'
                         : 'bg-amber-500/10 text-amber-500 ring-amber-500/30';
 
                 return (
@@ -812,75 +699,99 @@ function AgentsPage() {
                         : cn('border-border/60 border-l-transparent', accent.tint)
                     )}
                   >
-                    <button
-                      type="button"
-                      aria-expanded={isExpanded}
-                      onClick={() =>
-                        setSelectedOwnedAgentSlug(isExpanded ? null : actor.slug)
-                      }
-                      className="flex w-full items-start gap-3 px-4 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                    >
-                      <AgentAvatar
-                        name={describeActor(actor)}
-                        identity={actor.publicIdentity}
-                        size="lg"
-                      />
-                      <div className="min-w-0 flex-1 space-y-1.5">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="truncate text-sm font-semibold text-foreground">
-                            {describeActor(actor)}
-                          </p>
-                          <span className="truncate font-mono text-[11px] text-muted-foreground">
-                            /{actor.slug}
-                          </span>
-                          {actor.isDefault ? (
-                            <Badge variant="secondary" className="text-[10px]">
-                              Default
-                            </Badge>
-                          ) : null}
-                          {entry.registered ? (
-                            <Badge variant="secondary" className="text-[10px]">
-                              <ShieldCheck className="mr-0.5 h-3 w-3" />
-                              Published
-                            </Badge>
-                          ) : null}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span
-                            className={cn(
-                              'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ring-1 ring-inset',
-                              statusClass
-                            )}
-                          >
+                    <div className="flex w-full items-start gap-2 px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void navigate({
+                            to: '/$slug',
+                            params: { slug: actor.slug },
+                            search: buildWorkspaceSearch({}),
+                          });
+                        }}
+                        className="flex min-w-0 flex-1 items-start gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                      >
+                        <AgentAvatar
+                          name={describeActor(actor)}
+                          identity={actor.publicIdentity}
+                          size="lg"
+                        />
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="truncate text-sm font-semibold text-foreground">
+                              {describeActor(actor)}
+                            </p>
+                            <span className="truncate font-mono text-[11px] text-muted-foreground">
+                              /{actor.slug}
+                            </span>
+                            {actor.isDefault ? (
+                              <Badge variant="secondary" className="text-[10px]">
+                                Default
+                              </Badge>
+                            ) : null}
+                            {entry.registered ? (
+                              <Badge variant="secondary" className="text-[10px]">
+                                <ShieldCheck className="mr-0.5 h-3 w-3" />
+                                Published
+                              </Badge>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
                             <span
                               className={cn(
-                                'h-1.5 w-1.5 rounded-full',
-                                rowRegistrationRefreshPending
-                                  ? 'bg-muted-foreground'
-                                  : rowIsRegistered
-                                  ? 'bg-emerald-500'
-                                  : rowHasError
-                                    ? 'bg-rose-500'
-                                    : 'bg-amber-500'
+                                'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ring-1 ring-inset',
+                                statusClass
                               )}
-                              aria-hidden
-                            />
-                            {statusLabel}
-                          </span>
+                            >
+                              <span
+                                className={cn(
+                                  'h-1.5 w-1.5 rounded-full',
+                                  rowRegistrationRefreshPending
+                                    ? 'bg-muted-foreground'
+                                    : rowHasError
+                                      ? 'bg-rose-500'
+                                      : rowIsRegistered
+                                      ? 'bg-emerald-500'
+                                      : 'bg-amber-500'
+                                )}
+                                aria-hidden
+                              />
+                              {statusLabel}
+                            </span>
+                          </div>
+                          {actor.publicDescription ? (
+                            <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+                              {actor.publicDescription}
+                            </p>
+                          ) : null}
+                          {rowRegistration.error ? (
+                            <p className="line-clamp-2 text-xs leading-relaxed text-destructive">
+                              {rowRegistration.error}
+                            </p>
+                          ) : null}
                         </div>
-                        {actor.publicDescription ? (
-                          <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-                            {actor.publicDescription}
-                          </p>
-                        ) : null}
-                      </div>
-                      <CaretDown
-                        className={cn(
-                          'mt-1 h-4 w-4 shrink-0 text-muted-foreground transition-transform',
-                          isExpanded && 'rotate-180'
-                        )}
-                      />
-                    </button>
+                      </button>
+                      <button
+                        type="button"
+                        aria-expanded={isExpanded}
+                        aria-label={
+                          isExpanded
+                            ? `Hide settings for ${describeActor(actor)}`
+                            : `Show settings for ${describeActor(actor)}`
+                        }
+                        onClick={() =>
+                          setSelectedOwnedAgentSlug(isExpanded ? null : actor.slug)
+                        }
+                        className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <CaretDown
+                          className={cn(
+                            'h-4 w-4 transition-transform',
+                            isExpanded && 'rotate-180'
+                          )}
+                        />
+                      </button>
+                    </div>
 
                     {isSelectedActor && selectedOwnedAgent ? (
                       <div className="animate-soft-enter border-t border-border/60 p-4">

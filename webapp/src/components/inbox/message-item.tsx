@@ -52,7 +52,7 @@ export function MessageItem({
     <div
       className={cn(
         'animate-soft-subtle',
-        groupedWithPrevious ? 'mt-1' : 'mt-3',
+        groupedWithPrevious ? 'mt-0.5' : 'mt-2',
         className
       )}
     >

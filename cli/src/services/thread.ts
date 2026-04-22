@@ -107,6 +107,25 @@ export type ThreadHistoryResult = {
   messages: ThreadHistoryMessage[];
 };
 
+export type ThreadMessageCountResult = {
+  authenticated: true;
+  connected: true;
+  profile: string;
+  actorSlug: string;
+  thread: {
+    id: string;
+    kind: string;
+    label: string;
+    locked: boolean;
+    archived: boolean;
+    participantCount: number;
+    participants: string[];
+  };
+  messageCount: number;
+  lastMessageSeq: string;
+  lastMessageAt: string;
+};
+
 export type PaginatedThreadHistoryResult = ThreadHistoryResult & {
   page: number;
   pageSize: number;
@@ -552,6 +571,106 @@ export async function listThreads(params: {
     }
     throw connectivityError('Unable to list threads.', {
       code: 'THREAD_LIST_FAILED',
+      cause: error,
+    });
+  } finally {
+    disconnectConnection(conn);
+  }
+}
+
+export async function countThreadMessages(params: {
+  profileName: string;
+  threadId: string;
+  actorSlug?: string;
+  reporter: TaskReporter;
+}): Promise<ThreadMessageCountResult> {
+  const { profile, session, claims } = await ensureAuthenticatedSession(params);
+  const normalizedEmail = normalizeEmail(claims.email ?? '');
+  if (!normalizedEmail) {
+    throw userError('Current OIDC session is missing an email claim.', {
+      code: 'OIDC_EMAIL_MISSING',
+    });
+  }
+
+  const requestedThreadId = parseThreadId(params.threadId);
+
+  params.reporter.verbose?.('Connecting to SpacetimeDB');
+  const { conn } = await connectAuthenticated({
+    host: profile.spacetimeHost,
+    databaseName: profile.spacetimeDbName,
+    sessionToken: session.idToken,
+  });
+  params.reporter.verbose?.('Connected to SpacetimeDB');
+
+  try {
+    params.reporter.verbose?.('Subscribing to thread message state');
+    const subscription = await subscribeMessageTables(conn);
+
+    try {
+      const snapshot = readMessageRows(conn);
+      const actor = resolveOwnedActor({
+        snapshot,
+        normalizedEmail,
+        actorSlug: params.actorSlug,
+        threadId: requestedThreadId,
+      });
+      const thread = requireThread(snapshot, requestedThreadId);
+      requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
+
+      const ownActorIds = buildOwnActorIds(snapshot.actors, actor.inboxId);
+      const participantsByThreadId = buildParticipantsByThreadId(
+        snapshot.participants.filter(participant => participant.active)
+      );
+      const actorsById = new Map(snapshot.actors.map(row => [row.id, row] as const));
+      const readState = buildReadStateByThreadId(snapshot.readStates, actor.id).get(thread.id);
+      const participants = listThreadParticipants({
+        participantsByThreadId,
+        threadId: thread.id,
+        actorsById,
+      });
+      const messageCount = snapshot.messages.filter(
+        message => message.threadId === requestedThreadId
+      ).length;
+      const label = buildThreadLabel({
+        thread,
+        participantsByThreadId,
+        actorsById,
+        ownActorIds,
+      });
+
+      params.reporter.success(
+        `Counted ${messageCount} message${
+          messageCount === 1 ? '' : 's'
+        } in thread ${thread.id.toString()}`
+      );
+
+      return {
+        authenticated: true,
+        connected: true,
+        profile: profile.name,
+        actorSlug: actor.slug,
+        thread: {
+          id: thread.id.toString(),
+          kind: thread.kind,
+          label,
+          locked: thread.membershipLocked,
+          archived: readState?.archived ?? false,
+          participantCount: participants.length,
+          participants,
+        },
+        messageCount,
+        lastMessageSeq: thread.lastMessageSeq.toString(),
+        lastMessageAt: timestampToISOString(thread.lastMessageAt),
+      };
+    } finally {
+      subscription.unsubscribe();
+    }
+  } catch (error) {
+    if (isCliError(error)) {
+      throw error;
+    }
+    throw connectivityError('Unable to count thread messages.', {
+      code: 'THREAD_MESSAGE_COUNT_FAILED',
       cause: error,
     });
   } finally {
