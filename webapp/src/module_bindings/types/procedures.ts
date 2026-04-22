@@ -7,6 +7,8 @@ import { type Infer as __Infer } from "spacetimedb";
 
 // Import all procedure arg schemas
 import * as ClaimDeviceKeyBundleProcedure from "../claim_device_key_bundle_procedure";
+import * as ListChannelMembersProcedure from "../list_channel_members_procedure";
+import * as ListChannelMessagesProcedure from "../list_channel_messages_procedure";
 import * as LookupPublishedAgentBySlugProcedure from "../lookup_published_agent_by_slug_procedure";
 import * as LookupPublishedAgentsByEmailProcedure from "../lookup_published_agents_by_email_procedure";
 import * as LookupPublishedPublicRouteBySlugProcedure from "../lookup_published_public_route_by_slug_procedure";
@@ -14,6 +16,10 @@ import * as ResolveDeviceShareRequestByCodeProcedure from "../resolve_device_sha
 
 export type ClaimDeviceKeyBundleArgs = __Infer<typeof ClaimDeviceKeyBundleProcedure.params>;
 export type ClaimDeviceKeyBundleResult = __Infer<typeof ClaimDeviceKeyBundleProcedure.returnType>;
+export type ListChannelMembersArgs = __Infer<typeof ListChannelMembersProcedure.params>;
+export type ListChannelMembersResult = __Infer<typeof ListChannelMembersProcedure.returnType>;
+export type ListChannelMessagesArgs = __Infer<typeof ListChannelMessagesProcedure.params>;
+export type ListChannelMessagesResult = __Infer<typeof ListChannelMessagesProcedure.returnType>;
 export type LookupPublishedAgentBySlugArgs = __Infer<typeof LookupPublishedAgentBySlugProcedure.params>;
 export type LookupPublishedAgentBySlugResult = __Infer<typeof LookupPublishedAgentBySlugProcedure.returnType>;
 export type LookupPublishedAgentsByEmailArgs = __Infer<typeof LookupPublishedAgentsByEmailProcedure.params>;

@@ -1,6 +1,14 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Tray, Terminal, Sun, Moon } from '@phosphor-icons/react';
+import {
+  Hash,
+  Moon,
+  ShieldCheck,
+  Sun,
+  Terminal,
+  Tray,
+  WarningCircle,
+} from '@phosphor-icons/react';
 import { useTheme } from '@/lib/theme';
 import { useSpacetimeDB } from 'spacetimedb/tanstack';
 import { BootstrapProgress } from '@/components/app/bootstrap-progress';
@@ -17,9 +25,9 @@ import {
 } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SignOutButton } from '@/components/sign-out-button';
+import { AgentsPage } from './agents';
 import {
   clearPendingBootstrapKeyPair,
-  getActiveActorIdentity,
   getOrCreateDeviceKeyMaterial,
   getOrCreatePendingBootstrapKeyPair,
   hasPendingBootstrapKeyPair,
@@ -27,10 +35,7 @@ import {
   setActiveActorIdentity,
   setStoredAgentKeyPair,
 } from '@/lib/agent-session';
-import {
-  buildWorkspaceSearch,
-  resolveWorkspaceSnapshot,
-} from '@/lib/app-shell';
+import { resolveWorkspaceSnapshot } from '@/lib/app-shell';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { buildRouteHead } from '@/lib/seo';
 import {
@@ -40,10 +45,24 @@ import {
 } from '@/lib/auth-session';
 import { useKeyVault } from '@/hooks/use-key-vault';
 import { queueKeyBackupPrompt } from '@/lib/key-backup-prompt';
-import { useLiveTable } from '@/lib/spacetime-live-table';
+import { useLiveTable, usePublicLiveTable } from '@/lib/spacetime-live-table';
 import { tables } from '@/module_bindings';
 import type { DbConnection } from '@/module_bindings';
-import type { Agent, Inbox as InboxRow } from '@/module_bindings/types';
+import type {
+  Agent,
+  Inbox as InboxRow,
+  PublicChannel,
+  SelectedPublicRecentChannelMessageRow,
+} from '@/module_bindings/types';
+import {
+  verifySignedChannelMessage,
+  type ChannelMessageSignatureInput,
+} from '../../../shared/channel-crypto';
+import { formatEncryptedMessageBody } from '../../../shared/message-format';
+import {
+  timestampToISOString,
+  timestampToLocaleString,
+} from '../../../shared/spacetime-time';
 import {
   buildPreferredDefaultInboxSlug,
   normalizeEmail,
@@ -146,13 +165,68 @@ const emptySubscribe = () => () => {};
 const getTrue = () => true;
 const getFalse = () => false;
 
+type PublicRootChannelConfig = {
+  channelId: bigint | null;
+};
+
+type DecryptedPublicChannelMessage =
+  | {
+      status: 'ok';
+      text: string;
+    }
+  | {
+      status: 'failed';
+      error: string;
+    };
+
+function readPublicRootChannelConfig(): PublicRootChannelConfig {
+  const rawChannelId = String(import.meta.env.VITE_PUBLIC_CHANNEL_ID ?? '').trim();
+  if (!rawChannelId) {
+    return { channelId: null };
+  }
+
+  try {
+    const channelId = BigInt(rawChannelId);
+    if (channelId <= 0n) {
+      return { channelId: null };
+    }
+    return { channelId };
+  } catch {
+    return { channelId: null };
+  }
+}
+
+function publicChannelMessageKey(message: {
+  channelId: bigint;
+  channelSeq: bigint;
+}): string {
+  return `${message.channelId.toString()}:${message.channelSeq.toString()}`;
+}
+
+function toPublicChannelSignatureInput(message: {
+  channelId: bigint;
+  senderPublicIdentity: string;
+  senderSeq: bigint;
+  senderSigningKeyVersion: string;
+  plaintext: string;
+  replyToMessageId?: bigint | null;
+}): ChannelMessageSignatureInput {
+  return {
+    channelId: message.channelId,
+    senderPublicIdentity: message.senderPublicIdentity,
+    senderSeq: message.senderSeq,
+    senderSigningKeyVersion: message.senderSigningKeyVersion,
+    plaintext: message.plaintext,
+    replyToMessageId: message.replyToMessageId ?? null,
+  };
+}
+
 function AuthenticatedHome({
   session,
 }: {
   session: AuthenticatedBrowserSession;
 }) {
   const auth = useAuthSession();
-  const navigate = useNavigate();
   const conn = useSpacetimeDB();
   const vault = useKeyVault();
   const hydrated = useSyncExternalStore(emptySubscribe, getTrue, getFalse);
@@ -197,10 +271,6 @@ function AuthenticatedHome({
         session,
       }),
     [actors, inboxes, session]
-  );
-  const ownedActors = useMemo(
-    () => workspace.ownedInboxAgents.map(entry => entry.actor),
-    [workspace.ownedInboxAgents]
   );
   const defaultActor = workspace.existingDefaultActor;
   const connectionError = conn.connectionError?.message ?? null;
@@ -369,12 +439,6 @@ function AuthenticatedHome({
         slug: actor.slug,
         reason: 'created',
       });
-      void navigate({
-        to: '/$slug',
-        params: { slug: actor.slug },
-        search: buildWorkspaceSearch({}),
-        replace: true,
-      });
     })()
       .catch(error => {
         if (componentMountedRef.current) {
@@ -398,50 +462,10 @@ function AuthenticatedHome({
     confirmedDefaultSlug,
     hydrated,
     inboxesReady,
-    navigate,
     normalizedEmail,
     pendingBootstrapExists,
     resolvedBootstrapSlug,
     session.user.name,
-    suggestedDefaultSlug,
-    vault.unlocked,
-  ]);
-
-  useEffect(() => {
-    if (!hydrated || finalizing) {
-      return;
-    }
-
-    const targetSlug =
-      resolvedBootstrapSlug ??
-      (pendingBootstrapExists === false && defaultActor
-        ? (() => {
-            const stored = getActiveActorIdentity(normalizedEmail);
-            return stored?.slug && ownedActors.some(actor => actor.slug === stored.slug)
-              ? stored.slug
-              : defaultActor.slug;
-          })()
-        : null);
-
-    if (!targetSlug) {
-      return;
-    }
-
-    void navigate({
-      to: '/$slug',
-      params: { slug: targetSlug },
-      search: buildWorkspaceSearch({}),
-      replace: true,
-    });
-  }, [
-    defaultActor,
-    finalizing,
-    hydrated,
-    navigate,
-    normalizedEmail,
-    ownedActors,
-    pendingBootstrapExists,
-    resolvedBootstrapSlug,
     suggestedDefaultSlug,
     vault.unlocked,
   ]);
@@ -472,6 +496,9 @@ function AuthenticatedHome({
         : bootstrapStage === 'sync' || bootstrapStage === 'finalize' || defaultActor
           ? 'sync'
           : 'create';
+  const shouldShowAgents =
+    (pendingBootstrapExists === false && defaultActor && !finalizing) ||
+    Boolean(resolvedBootstrapSlug);
 
   let content: React.ReactNode;
 
@@ -484,18 +511,8 @@ function AuthenticatedHome({
         </div>
       </main>
     );
-  } else if (
-    (pendingBootstrapExists === false && defaultActor && !finalizing) ||
-    resolvedBootstrapSlug
-  ) {
-    content = (
-      <main className="flex min-h-[60vh] items-center justify-center p-6">
-        <div className="text-center space-y-3">
-          <Skeleton className="mx-auto h-8 w-48 rounded-lg" />
-          <p className="text-sm text-muted-foreground">Redirecting to your inbox…</p>
-        </div>
-      </main>
-    );
+  } else if (shouldShowAgents) {
+    content = <AgentsPage signInReturnTo="/" />;
   } else if (bootstrapError) {
     content = (
       <main className="flex min-h-[70vh] items-center justify-center p-6">
@@ -668,7 +685,9 @@ function AuthenticatedHome({
 
   return (
     <>
-      <ThemeToggleButton theme={theme} onToggle={toggleTheme} />
+      {shouldShowAgents ? null : (
+        <ThemeToggleButton theme={theme} onToggle={toggleTheme} />
+      )}
       {content}
     </>
   );
@@ -720,56 +739,276 @@ function ThemeToggleButton({
 
 function SignedOutHome() {
   const { theme, toggleTheme } = useTheme();
+  const publicChannelConfig = readPublicRootChannelConfig();
+  const publicChannelId = publicChannelConfig.channelId;
+  const hasPublicChannel = publicChannelId !== null;
+
   return (
     <>
       <ThemeToggleButton theme={theme} onToggle={toggleTheme} />
       <main
-        className="flex min-h-[85vh] flex-col items-center justify-center p-6"
+        className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 p-4 md:p-8"
         role="main"
-        aria-label="Masumi inbox landing"
+        aria-label={hasPublicChannel ? 'Masumi public channel' : 'Masumi inbox landing'}
       >
-      <div className="w-full max-w-lg">
-        <div className="mb-8 text-center">
-          <Tray className="mx-auto mb-4 h-7 w-7 text-primary" aria-hidden />
-          <h1 className="text-4xl font-bold tracking-tight">masumi-agent-messenger</h1>
-          <p className="mt-2 text-lg text-muted-foreground">
-            Encrypted threads for software agents.
-          </p>
-        </div>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Terminal className="h-5 w-5 text-muted-foreground" aria-hidden />
-              Get Started
-            </CardTitle>
-            <CardDescription>
-              Install the CLI to create and manage your inbox.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="rounded-lg bg-muted px-4 py-3 font-mono text-sm">
-              npm install --global @masumi_network/masumi-agent-messenger
+        <header className="flex flex-col gap-4 pt-6 md:flex-row md:items-end md:justify-between">
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+              <Tray className="h-5 w-5 text-primary" aria-hidden />
+              masumi-agent-messenger
             </div>
-            <p className="text-sm text-muted-foreground">
-              Then run <code className="font-mono text-foreground">masumi-agent-messenger auth login</code>.
-              The CLI signs you in, bootstraps local private keys, offers encrypted backups,
-              registers your agent on the network, and connects you to other agents.
+            <h1 className="max-w-3xl text-3xl font-semibold tracking-tight md:text-4xl">
+              {hasPublicChannel ? 'Public agent channel' : 'Encrypted threads for software agents'}
+            </h1>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              {hasPublicChannel
+                ? 'Signed public channel messages are readable here without signing in.'
+                : 'Install the CLI, register your inbox, and exchange end-to-end encrypted messages with other agents.'}
             </p>
-          </CardContent>
-        </Card>
+          </div>
+          <Button asChild variant="outline">
+            <a href={buildLoginHref()}>Sign in</a>
+          </Button>
+        </header>
 
-        <p className="mt-6 text-center">
-          <a
-            href={buildLoginHref()}
-            className="text-sm text-muted-foreground underline underline-offset-4 transition-colors hover:text-foreground"
-          >
-            Use the browser version instead
-          </a>
-        </p>
-      </div>
-    </main>
+        <div
+          className={
+            hasPublicChannel
+              ? 'grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]'
+              : 'mx-auto grid w-full max-w-lg gap-5'
+          }
+        >
+          {publicChannelId !== null ? (
+            <PublicRootChannel channelId={publicChannelId} />
+          ) : null}
+
+          <aside className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Terminal className="h-5 w-5 text-muted-foreground" aria-hidden />
+                  Get Started
+                </CardTitle>
+                <CardDescription>
+                  Install the CLI to create and manage your inbox.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="overflow-x-auto rounded-lg bg-muted px-4 py-3 font-mono text-sm">
+                  npm install --global @masumi_network/masumi-agent-messenger
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Then run <code className="font-mono text-foreground">masumi-agent-messenger auth login</code>.
+                  The CLI signs you in, bootstraps local private keys, offers encrypted backups,
+                  registers your agent on the network, and connects you to other agents.
+                </p>
+              </CardContent>
+            </Card>
+          </aside>
+        </div>
+      </main>
     </>
+  );
+}
+
+function PublicRootChannel({ channelId }: { channelId: bigint }) {
+  const channelQuery = useMemo(
+    () => tables.publicChannel.where(row => row.channelId.eq(channelId)),
+    [channelId]
+  );
+  const messageQuery = useMemo(
+    () => tables.selectedPublicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
+    [channelId]
+  );
+  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannel>(
+    channelQuery,
+    'publicChannel'
+  );
+  const [messages, messagesReady, messagesError] =
+    usePublicLiveTable<SelectedPublicRecentChannelMessageRow>(
+      messageQuery,
+      'selectedPublicRecentChannelMessages'
+    );
+  const [decryptedByKey, setDecryptedByKey] = useState<
+    Record<string, DecryptedPublicChannelMessage>
+  >({});
+
+  const channel = useMemo(
+    () => channels.find(row => row.channelId === channelId) ?? null,
+    [channelId, channels]
+  );
+  const sortedMessages = useMemo(
+    () =>
+      [...messages]
+        .filter(message => message.channelId === channelId)
+        .sort((left, right) => {
+          if (left.channelSeq < right.channelSeq) return -1;
+          if (left.channelSeq > right.channelSeq) return 1;
+          return Number(left.id - right.id);
+        }),
+    [channelId, messages]
+  );
+  const error = channelsError ?? messagesError;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!channel || sortedMessages.length === 0) {
+      deferEffectStateUpdate(() => {
+        if (!cancelled) {
+          setDecryptedByKey({});
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void Promise.all(
+      sortedMessages.map(async message => {
+        try {
+          const verified = await verifySignedChannelMessage({
+            input: toPublicChannelSignatureInput(message),
+            signature: message.signature,
+            senderSigningPublicKey: message.senderSigningPublicKey,
+          });
+          return [
+            publicChannelMessageKey(message),
+            {
+              status: 'ok',
+              text: formatEncryptedMessageBody(verified.payload),
+            } satisfies DecryptedPublicChannelMessage,
+          ] as const;
+        } catch (messageError) {
+          return [
+            publicChannelMessageKey(message),
+            {
+              status: 'failed',
+              error:
+                messageError instanceof Error
+                  ? messageError.message
+                  : 'Unable to verify message',
+            } satisfies DecryptedPublicChannelMessage,
+          ] as const;
+        }
+      })
+    ).then(entries => {
+      if (!cancelled) {
+        setDecryptedByKey(Object.fromEntries(entries));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [channel, sortedMessages]);
+
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>Public channel unavailable</AlertTitle>
+        <AlertDescription>{error}</AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (!channelsReady) {
+    return (
+      <section className="space-y-3" aria-label="Loading public channel">
+        <Skeleton className="h-40 rounded-lg" />
+        <Skeleton className="h-28 rounded-lg" />
+        <Skeleton className="h-28 rounded-lg" />
+      </section>
+    );
+  }
+
+  if (!channel) {
+    return null;
+  }
+
+  return (
+    <section className="min-w-0 space-y-4" aria-labelledby="public-channel-title">
+      <div className="rounded-lg border bg-card p-5 text-card-foreground">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="min-w-0 space-y-2">
+            <h2
+              id="public-channel-title"
+              className="flex min-w-0 items-center gap-2 text-2xl font-semibold tracking-tight"
+            >
+              <Hash className="shrink-0" size={22} />
+              <span className="truncate">{channel.title ?? channel.slug}</span>
+            </h2>
+            <p className="text-sm text-muted-foreground">/{channel.slug}</p>
+            {channel.description ? (
+              <p className="max-w-3xl text-sm text-muted-foreground">
+                {channel.description}
+              </p>
+            ) : null}
+          </div>
+          <Button asChild variant="outline" size="sm">
+            <a href={`/channels/${channel.slug}`}>Open channel</a>
+          </Button>
+        </div>
+      </div>
+
+      {!messagesReady ? (
+        <div className="space-y-3">
+          <Skeleton className="h-28 rounded-lg" />
+          <Skeleton className="h-28 rounded-lg" />
+        </div>
+      ) : sortedMessages.length === 0 ? (
+        <Alert>
+          <AlertTitle>No messages</AlertTitle>
+          <AlertDescription>
+            Public messages will appear here as soon as agents post to #{channel.slug}.
+          </AlertDescription>
+        </Alert>
+      ) : (
+        <div className="space-y-3">
+          {sortedMessages.map(message => {
+            const messageKey = publicChannelMessageKey(message);
+            const decrypted = decryptedByKey[messageKey];
+            return (
+              <Card key={messageKey}>
+                <CardHeader className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <CardTitle className="min-w-0 truncate text-base">
+                      {message.senderPublicIdentity}
+                    </CardTitle>
+                    <span className="shrink-0 rounded-md border px-2 py-1 text-xs text-muted-foreground">
+                      #{message.channelSeq.toString()}
+                    </span>
+                  </div>
+                  <CardDescription className="flex flex-wrap items-center gap-2">
+                    <ShieldCheck size={15} />
+                    <span>{message.senderSigningKeyVersion}</span>
+                    <span aria-hidden>-</span>
+                    <time dateTime={timestampToISOString(message.createdAt)}>
+                      {timestampToLocaleString(message.createdAt)}
+                    </time>
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {!decrypted ? (
+                    <Skeleton className="h-6 w-2/3 rounded-md" />
+                  ) : decrypted.status === 'ok' ? (
+                    <p className="whitespace-pre-wrap text-sm leading-6">
+                      {decrypted.text}
+                    </p>
+                  ) : (
+                    <Alert variant="destructive">
+                      <WarningCircle size={16} />
+                      <AlertTitle>Wrong signature or payload</AlertTitle>
+                      <AlertDescription>{decrypted.error}</AlertDescription>
+                    </Alert>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 

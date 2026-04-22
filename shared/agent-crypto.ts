@@ -1,3 +1,14 @@
+import {
+  fromHex,
+  importEncryptionPrivateKey,
+  importEncryptionPublicKey,
+  importSigningPrivateKey,
+  importSigningPublicKey,
+  sha256Hex,
+  toBufferSource,
+  toHex,
+  utf8,
+} from './crypto-utils';
 import { normalizeEmail as normalizeSharedEmail, normalizeInboxSlug } from './inbox-slug';
 import {
   normalizeEncryptedMessagePayload,
@@ -96,34 +107,6 @@ export type InboundEncryptedMessage = {
   replyToMessageId?: bigint;
 };
 
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map(byte => byte.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function fromHex(hex: string): Uint8Array {
-  if (hex.length % 2 !== 0) {
-    throw new Error('Invalid hex encoding');
-  }
-
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = parseInt(hex.slice(index * 2, index * 2 + 2), 16);
-  }
-  return bytes;
-}
-
-function utf8(value: string): Uint8Array {
-  return new TextEncoder().encode(value);
-}
-
-function toBufferSource(bytes: Uint8Array): ArrayBuffer {
-  const buffer = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(buffer).set(bytes);
-  return buffer;
-}
-
 function secretCacheKey(threadId: bigint, senderPublicIdentity: string, secretVersion: string): string {
   return `${threadId.toString()}:${senderPublicIdentity}:${secretVersion}`;
 }
@@ -206,12 +189,6 @@ export function canonicalJsonStringify(value: unknown): string {
   return JSON.stringify(stableJsonValue(value));
 }
 
-async function sha256Hex(value: string | Uint8Array): Promise<string> {
-  const bytes = typeof value === 'string' ? utf8(value) : value;
-  const digest = await crypto.subtle.digest('SHA-256', toBufferSource(bytes));
-  return toHex(new Uint8Array(digest));
-}
-
 async function exportPublicKey(key: CryptoKey): Promise<string> {
   const jwk = await crypto.subtle.exportKey('jwk', key);
   return stableStringify(jwk);
@@ -220,54 +197,6 @@ async function exportPublicKey(key: CryptoKey): Promise<string> {
 async function exportPrivateKey(key: CryptoKey): Promise<string> {
   const jwk = await crypto.subtle.exportKey('jwk', key);
   return stableStringify(jwk);
-}
-
-function parseSerializedJwk(serialized: string): JsonWebKey {
-  const parsed = JSON.parse(serialized) as unknown;
-  if (!isRecord(parsed)) {
-    throw new Error('Invalid serialized key');
-  }
-  return parsed as JsonWebKey;
-}
-
-async function importEncryptionPublicKey(serialized: string): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'jwk',
-    parseSerializedJwk(serialized),
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    []
-  );
-}
-
-async function importEncryptionPrivateKey(serialized: string): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'jwk',
-    parseSerializedJwk(serialized),
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    ['deriveBits']
-  );
-}
-
-async function importSigningPublicKey(serialized: string): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'jwk',
-    parseSerializedJwk(serialized),
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    true,
-    ['verify']
-  );
-}
-
-async function importSigningPrivateKey(serialized: string): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'jwk',
-    parseSerializedJwk(serialized),
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    true,
-    ['sign']
-  );
 }
 
 async function deriveEnvelopeKey(

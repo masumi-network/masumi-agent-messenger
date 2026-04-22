@@ -6,7 +6,8 @@ This repository is an encrypted agent-to-agent inbox built with TanStack Start a
 
 - Treat SpacetimeDB as the source of truth for durable inbox metadata.
 - Treat encryption, decryption, signing, and key wrapping as client-only concerns.
-- Never send private keys, decrypted sender secrets, or plaintext messages to the server.
+- Never send private keys, decrypted sender secrets, or private thread plaintext to the server.
+- Channels are the intentional exception to thread-style secrecy: they are signed plaintext shared feeds, not end-to-end-private threads. Do not use channel messages for confidential payloads.
 - Prefer domain names such as `agent`, `agentKeyBundle`, `thread`, `threadParticipant`, `threadSecretEnvelope`, `message`, and `threadReadState`.
 - Avoid new `context` terminology.
 
@@ -41,6 +42,20 @@ When backend and frontend both change:
 - On detecting a new version for a pinned peer, clients MUST keep outbound sends blocked until the user explicitly confirms the new tuple out-of-band and that confirmation is persisted to the local trust store.
 - Inbound messages from rotated keys can be shown with a timeline/CLI notice, but they remain untrusted unless the message signature validates against a signing key already present in the local trust store history.
 - Never auto-promote a rotated peer tuple just because SpacetimeDB currently publishes it. That would turn the server into a trust anchor and let a compromised peer OIDC session redirect future encrypted messages to attacker-controlled keys.
+
+### Channel exception: trust is enforced device-side
+
+Per-peer key pinning does NOT apply to channel message verification. Channels are broadcast feeds with potentially many senders across many inboxes; requiring an out-of-band confirmation for every rotated signer does not scale and does not match how channels are used.
+
+For channels, trust is enforced at the device layer instead:
+
+- `rotateAgentKeys` requires an OIDC-authenticated device that the inbox owner has approved through the `deviceShareRequest` / `deviceKeyBundle` flow. Key history is append-only in `agentKeyBundle`.
+- Channel message rows carry a pinned `senderSigningKeyVersion`. The server resolves the matching `senderSigningPublicKey` from `agentKeyBundle` history (see `toChannelMessageRow` in `spacetimedb/src/models/helpers.ts`), so historical messages always verify against the key that signed them.
+- Clients verify channel signatures against the `(senderSigningKeyVersion, senderSigningPublicKey)` tuple the server reports for each message row. They do NOT maintain a per-peer pinned trust store for channel senders.
+- Accepted residual risk: if an attacker compromises a sender's device and that device publishes a new signing key, future channel messages signed with the attacker-controlled key will verify. This is mitigated by the device trust layer (device approval required to rotate, device revocation when a compromise is detected), not by per-channel peer pinning.
+- Threads still follow the full peer-pinning rules above. The channel exception applies ONLY to `channelMessage` / `publicRecentChannelMessage` signature verification.
+
+Do not re-introduce per-peer channel-signer pinning without also reworking the device trust model — the two were considered together when this exception was accepted.
 # masumi-agent-messenger Claude Guide
 
 This repository is an agent-to-agent messaging and inbox application.

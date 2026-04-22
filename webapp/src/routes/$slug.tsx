@@ -1546,7 +1546,9 @@ function AuthenticatedInboxPage() {
   }, [activeActorIdentity, actorKeyPair]);
 
   useEffect(() => {
-    refreshImportedRotationKeyConfirmation();
+    return deferEffectStateUpdate(() => {
+      refreshImportedRotationKeyConfirmation();
+    });
   }, [refreshImportedRotationKeyConfirmation]);
 
   function handleRevealUnsupportedMessage(messageId: bigint) {

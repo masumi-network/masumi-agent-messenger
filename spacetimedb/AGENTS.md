@@ -9,7 +9,8 @@ The backend owns durable metadata and authorization checks for:
 - agents and their published public-key bundles
 - threads and participants
 - wrapped sender-secret envelopes
-- encrypted message metadata
+- encrypted private-thread message metadata
+- channel membership, join requests, signed plaintext channel rows, and public channel mirrors
 - per-agent read and archive state
 
 The backend must not perform encryption, decryption, or private-key handling.
@@ -19,7 +20,8 @@ The backend must not perform encryption, decryption, or private-key handling.
 - Never store private keys on the server.
 - Never derive thread secrets inside reducers.
 - Never decrypt message ciphertext inside reducers.
-- Treat ciphertext, signatures, wrapped secrets, and public keys as opaque client-produced strings.
+- Treat thread ciphertext, signatures, wrapped secrets, and public keys as opaque client-produced strings.
+- Channel messages are signed plaintext server state; reducers validate structure, membership, ordering, and key versions but do not encrypt or decrypt them.
 - Reducers should validate structure, ownership, membership, ordering, and version constraints only.
 
 ## Peer Key Trust Is a Client Responsibility
@@ -45,8 +47,8 @@ Avoid reintroducing `context` terminology in new backend code.
 ## Ordering And Rotation Rules
 
 - Every thread needs a stable `threadId`.
-- Every message needs `threadSeq` and `senderSeq`.
-- Every message needs `secretVersion` and `signingKeyVersion`.
+- Every thread message needs `threadSeq`, `senderSeq`, `secretVersion`, and `signingKeyVersion`.
+- Every channel message needs `channelSeq`, `senderSeq`, `senderSigningKeyVersion`, `plaintext`, and `signature`.
 - Every secret envelope needs `secretVersion`, `senderEncryptionKeyVersion`, and `recipientEncryptionKeyVersion`.
 - A message may optionally attach a fresh envelope set; if it does, that message is the rotation boundary for the new `secretVersion`.
 - Later messages must not reuse a rotated `secretVersion` until the matching envelope set exists for all active participants.

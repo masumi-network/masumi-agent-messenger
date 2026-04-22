@@ -10,6 +10,7 @@ import {
   normalizeSupportedContentTypes,
   normalizeSupportedHeaderNames,
 } from '../../../shared/message-format';
+import type { DbConnection } from '../../../webapp/src/module_bindings';
 import type { VisibleAgentRow } from '../../../webapp/src/module_bindings/types';
 import { ensureAuthenticatedSession } from './auth';
 import type { TaskReporter } from './command-runtime';
@@ -19,6 +20,11 @@ import {
   type ResolvedProfile,
 } from './config-store';
 import { connectivityError, isCliError, userError } from './errors';
+import {
+  applyRegistrationMetadataToActor,
+  syncMasumiInboxAgentRegistration,
+} from './masumi-inbox-agent';
+import type { StoredOidcSession } from './oidc';
 import {
   connectAuthenticated,
   disconnectConnection,
@@ -213,6 +219,27 @@ function arraysEqual(left: readonly string[], right: readonly string[]): boolean
   );
 }
 
+async function refreshOwnedAgentRegistration(params: {
+  profile: ResolvedProfile;
+  session: StoredOidcSession;
+  conn: DbConnection;
+  actor: VisibleAgentRow;
+  reporter: TaskReporter;
+}): Promise<VisibleAgentRow> {
+  const syncedRegistration = await syncMasumiInboxAgentRegistration({
+    profile: params.profile,
+    session: params.session,
+    conn: params.conn,
+    actor: params.actor,
+    reporter: params.reporter,
+    mode: 'skip',
+  });
+  return applyRegistrationMetadataToActor(
+    params.actor,
+    syncedRegistration.metadata
+  );
+}
+
 export async function resolvePreferredAgentSlug(
   profileName: string,
   explicitAgentSlug?: string | null
@@ -254,16 +281,27 @@ export async function listOwnedAgents(params: {
         normalizedEmail,
       });
       const selectedSlug = activeAgentSlug ?? defaultActor.slug;
-      const agents = ownedActors
-        .sort((left, right) => {
-          if (left.slug === selectedSlug) return -1;
-          if (right.slug === selectedSlug) return 1;
-          if (left.isDefault !== right.isDefault) {
-            return left.isDefault ? -1 : 1;
-          }
-          return left.slug.localeCompare(right.slug);
-        })
-        .map(actor => toOwnedAgentSummary(actor, selectedSlug));
+      const sortedActors = ownedActors.sort((left, right) => {
+        if (left.slug === selectedSlug) return -1;
+        if (right.slug === selectedSlug) return 1;
+        if (left.isDefault !== right.isDefault) {
+          return left.isDefault ? -1 : 1;
+        }
+        return left.slug.localeCompare(right.slug);
+      });
+      const refreshedActors: VisibleAgentRow[] = [];
+      for (const actor of sortedActors) {
+        refreshedActors.push(
+          await refreshOwnedAgentRegistration({
+            profile,
+            session,
+            conn,
+            actor,
+            reporter: params.reporter,
+          })
+        );
+      }
+      const agents = refreshedActors.map(actor => toOwnedAgentSummary(actor, selectedSlug));
 
       return {
         profile: profile.name,
@@ -315,10 +353,17 @@ export async function getOwnedAgentProfile(params: {
       const requestedActorSlug = params.actorSlug ? normalizeInboxSlug(params.actorSlug) : null;
       const activeAgentSlug =
         requestedActorSlug ?? resolveStoredActiveAgentSlug(profileState) ?? actor.slug;
+      const refreshedActor = await refreshOwnedAgentRegistration({
+        profile,
+        session,
+        conn,
+        actor,
+        reporter: params.reporter,
+      });
       return {
         profile: profile.name,
         activeAgentSlug,
-        agent: toOwnedAgentProfile(actor, activeAgentSlug),
+        agent: toOwnedAgentProfile(refreshedActor, activeAgentSlug),
       };
     } finally {
       subscription.unsubscribe();
@@ -360,10 +405,17 @@ export async function useOwnedAgent(params: {
         actorSlug: params.actorSlug,
       });
       await saveActiveAgentSlug(profile.name, actor.slug);
+      const refreshedActor = await refreshOwnedAgentRegistration({
+        profile,
+        session,
+        conn,
+        actor,
+        reporter: params.reporter,
+      });
       return {
         profile: profile.name,
         activeAgentSlug: actor.slug,
-        agent: toOwnedAgentProfile(actor, actor.slug),
+        agent: toOwnedAgentProfile(refreshedActor, actor.slug),
       };
     } finally {
       subscription.unsubscribe();
@@ -476,10 +528,17 @@ export async function updateOwnedAgentProfile(params: {
       const requestedActorSlug = params.actorSlug ? normalizeInboxSlug(params.actorSlug) : null;
       const activeAgentSlug =
         requestedActorSlug ?? resolveStoredActiveAgentSlug(profileState) ?? updatedActor.slug;
+      const refreshedActor = await refreshOwnedAgentRegistration({
+        profile,
+        session,
+        conn,
+        actor: updatedActor,
+        reporter: params.reporter,
+      });
       return {
         profile: profile.name,
         activeAgentSlug,
-        agent: toOwnedAgentProfile(updatedActor, activeAgentSlug),
+        agent: toOwnedAgentProfile(refreshedActor, activeAgentSlug),
       };
     } finally {
       subscription.unsubscribe();
@@ -616,10 +675,17 @@ export async function updateOwnedAgentMessageCapabilities(params: {
       const requestedActorSlug = params.actorSlug ? normalizeInboxSlug(params.actorSlug) : null;
       const activeAgentSlug =
         requestedActorSlug ?? resolveStoredActiveAgentSlug(profileState) ?? updatedActor.slug;
+      const refreshedActor = await refreshOwnedAgentRegistration({
+        profile,
+        session,
+        conn,
+        actor: updatedActor,
+        reporter: params.reporter,
+      });
       return {
         profile: profile.name,
         activeAgentSlug,
-        agent: toOwnedAgentProfile(updatedActor, activeAgentSlug),
+        agent: toOwnedAgentProfile(refreshedActor, activeAgentSlug),
       };
     } finally {
       subscription.unsubscribe();

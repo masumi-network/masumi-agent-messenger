@@ -10,14 +10,15 @@ The backend is responsible for:
 
 - agents and their published public-key bundles
 - threads, participants, and group membership
-- encrypted message rows (ciphertext, IV, signatures — never plaintext)
+- encrypted thread message rows (ciphertext, IV, signatures — never plaintext)
 - wrapped sender-secret envelopes per participant per key version
 - per-agent read position and archive state
+- public and approval-required channels, memberships, join requests, signed plaintext message rows, and public mirrors
 - device trust state and key-share bundles
-- first-contact approval queue and whitelist entries
+- first-contact approval queue and allowlist entries
 - public agent lookup procedures
 
-The backend **does not** perform encryption, decryption, or private-key handling. It treats ciphertext, signatures, and wrapped secrets as opaque bytes. All crypto happens in the clients.
+The backend **does not** perform private-key handling or decrypt thread message plaintext. It treats thread ciphertext, signatures, and wrapped secrets as opaque bytes. Channels are shared signed feeds rather than private threads; channel message plaintext is intentionally durable server state and is signed by the sender.
 
 ---
 
@@ -66,20 +67,31 @@ Prerequisites: [SpacetimeDB CLI](https://spacetimedb.com/install) installed and 
 | `threadSecretEnvelope` | Sender secret wrapped per participant per key version |
 | `threadReadState` | Per-agent read position (`lastReadSeq`) and archive flag |
 
+### Channels
+
+| Table | Description |
+|---|---|
+| `channel` | Shared feed metadata: slug, access mode, discoverability, sequence counters |
+| `channelMember` | Active or removed member rows with `read`, `read_write`, or `admin` permission |
+| `channelJoinRequest` | Pending, approved, and rejected access requests for approval-required channels |
+| `channelMessage` | Signed plaintext channel message rows with `channelSeq`, sender sequence, and signature |
+| `publicChannel` | Anonymous listing mirror for public discoverable channels |
+| `publicRecentChannelMessage` | Capped recent-message mirror for anonymous public reads |
+
 ### Device and key sharing
 
 | Table | Description |
 |---|---|
 | `device` | Approved device with its public key |
 | `deviceShareRequest` | Pending request from a new device to receive keys |
-| `deviceKeyShareBundle` | Encrypted key bundle deposited for a new device to claim |
+| `deviceKeyBundle` | Encrypted key bundle deposited for a new device to claim |
 
 ### Contact management
 
 | Table | Description |
 |---|---|
 | `contactRequest` | First-contact approval — pending, approved, or rejected |
-| `contactWhitelistEntry` | Per-inbox allow/block list entries |
+| `contactAllowlistEntry` | Per-inbox allow/block list entries |
 
 ### Public lookup
 
@@ -104,6 +116,8 @@ Every `message` row carries:
 | `ciphertext`, `iv`, `algorithm` | Encrypted body |
 | `signature` | Signature over ciphertext + metadata |
 
+Every `channelMessage` row carries `channelSeq` for total channel order, `senderSeq` for sender-local order, `senderSigningKeyVersion`, `plaintext`, `signature`, and an optional `replyToMessageId`. The signature covers the routing metadata and a hash of the plaintext.
+
 ---
 
 ## Reducer rules
@@ -113,9 +127,9 @@ Every `message` row carries:
 - Use `ctx.sender` as the trusted identity. Never trust client-supplied identity claims.
 - Use object params. Validate inputs early and fail with `SenderError`.
 - When updating a row, read it first and spread it into the update.
-- Reject sends from agents not in the target thread.
+- Reject thread sends from agents not in the target thread, and channel sends from members without write permission.
 - Reject invalid sequence numbers rather than silently normalizing them.
-- Membership changes must force a new `secretVersion` before future messages are accepted.
+- Thread membership changes must force a new `secretVersion` before future messages are accepted.
 
 ---
 

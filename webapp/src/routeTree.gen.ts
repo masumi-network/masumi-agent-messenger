@@ -12,11 +12,13 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as SecurityRouteImport } from './routes/security'
 import { Route as InboxesRouteImport } from './routes/inboxes'
 import { Route as DiscoverRouteImport } from './routes/discover'
+import { Route as ChannelsRouteImport } from './routes/channels'
 import { Route as ApprovalsRouteImport } from './routes/approvals'
 import { Route as AgentsRouteImport } from './routes/agents'
 import { Route as SlugRouteImport } from './routes/$slug'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as DiscoverSlugRouteImport } from './routes/discover_.$slug'
+import { Route as ChannelsSlugRouteImport } from './routes/channels.$slug'
 import { Route as AuthSessionRouteImport } from './routes/auth.session'
 import { Route as AuthLogoutRouteImport } from './routes/auth.logout'
 import { Route as AuthLoginRouteImport } from './routes/auth.login'
@@ -43,6 +45,11 @@ const DiscoverRoute = DiscoverRouteImport.update({
   path: '/discover',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ChannelsRoute = ChannelsRouteImport.update({
+  id: '/channels',
+  path: '/channels',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApprovalsRoute = ApprovalsRouteImport.update({
   id: '/approvals',
   path: '/approvals',
@@ -67,6 +74,11 @@ const DiscoverSlugRoute = DiscoverSlugRouteImport.update({
   id: '/discover_/$slug',
   path: '/discover/$slug',
   getParentRoute: () => rootRouteImport,
+} as any)
+const ChannelsSlugRoute = ChannelsSlugRouteImport.update({
+  id: '/$slug',
+  path: '/$slug',
+  getParentRoute: () => ChannelsRoute,
 } as any)
 const AuthSessionRoute = AuthSessionRouteImport.update({
   id: '/auth/session',
@@ -127,6 +139,7 @@ export interface FileRoutesByFullPath {
   '/$slug': typeof SlugRouteWithChildren
   '/agents': typeof AgentsRoute
   '/approvals': typeof ApprovalsRoute
+  '/channels': typeof ChannelsRouteWithChildren
   '/discover': typeof DiscoverRoute
   '/inboxes': typeof InboxesRoute
   '/security': typeof SecurityRoute
@@ -136,6 +149,7 @@ export interface FileRoutesByFullPath {
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
   '/auth/session': typeof AuthSessionRoute
+  '/channels/$slug': typeof ChannelsSlugRoute
   '/discover/$slug': typeof DiscoverSlugRoute
   '/api/masumi/inbox-agent/credits': typeof ApiMasumiInboxAgentCreditsRoute
   '/api/masumi/inbox-agent/find-agents': typeof ApiMasumiInboxAgentFindAgentsRoute
@@ -147,6 +161,7 @@ export interface FileRoutesByTo {
   '/$slug': typeof SlugRouteWithChildren
   '/agents': typeof AgentsRoute
   '/approvals': typeof ApprovalsRoute
+  '/channels': typeof ChannelsRouteWithChildren
   '/discover': typeof DiscoverRoute
   '/inboxes': typeof InboxesRoute
   '/security': typeof SecurityRoute
@@ -156,6 +171,7 @@ export interface FileRoutesByTo {
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
   '/auth/session': typeof AuthSessionRoute
+  '/channels/$slug': typeof ChannelsSlugRoute
   '/discover/$slug': typeof DiscoverSlugRoute
   '/api/masumi/inbox-agent/credits': typeof ApiMasumiInboxAgentCreditsRoute
   '/api/masumi/inbox-agent/find-agents': typeof ApiMasumiInboxAgentFindAgentsRoute
@@ -168,6 +184,7 @@ export interface FileRoutesById {
   '/$slug': typeof SlugRouteWithChildren
   '/agents': typeof AgentsRoute
   '/approvals': typeof ApprovalsRoute
+  '/channels': typeof ChannelsRouteWithChildren
   '/discover': typeof DiscoverRoute
   '/inboxes': typeof InboxesRoute
   '/security': typeof SecurityRoute
@@ -177,6 +194,7 @@ export interface FileRoutesById {
   '/auth/login': typeof AuthLoginRoute
   '/auth/logout': typeof AuthLogoutRoute
   '/auth/session': typeof AuthSessionRoute
+  '/channels/$slug': typeof ChannelsSlugRoute
   '/discover_/$slug': typeof DiscoverSlugRoute
   '/api/masumi/inbox-agent/credits': typeof ApiMasumiInboxAgentCreditsRoute
   '/api/masumi/inbox-agent/find-agents': typeof ApiMasumiInboxAgentFindAgentsRoute
@@ -190,6 +208,7 @@ export interface FileRouteTypes {
     | '/$slug'
     | '/agents'
     | '/approvals'
+    | '/channels'
     | '/discover'
     | '/inboxes'
     | '/security'
@@ -199,6 +218,7 @@ export interface FileRouteTypes {
     | '/auth/login'
     | '/auth/logout'
     | '/auth/session'
+    | '/channels/$slug'
     | '/discover/$slug'
     | '/api/masumi/inbox-agent/credits'
     | '/api/masumi/inbox-agent/find-agents'
@@ -210,6 +230,7 @@ export interface FileRouteTypes {
     | '/$slug'
     | '/agents'
     | '/approvals'
+    | '/channels'
     | '/discover'
     | '/inboxes'
     | '/security'
@@ -219,6 +240,7 @@ export interface FileRouteTypes {
     | '/auth/login'
     | '/auth/logout'
     | '/auth/session'
+    | '/channels/$slug'
     | '/discover/$slug'
     | '/api/masumi/inbox-agent/credits'
     | '/api/masumi/inbox-agent/find-agents'
@@ -230,6 +252,7 @@ export interface FileRouteTypes {
     | '/$slug'
     | '/agents'
     | '/approvals'
+    | '/channels'
     | '/discover'
     | '/inboxes'
     | '/security'
@@ -239,6 +262,7 @@ export interface FileRouteTypes {
     | '/auth/login'
     | '/auth/logout'
     | '/auth/session'
+    | '/channels/$slug'
     | '/discover_/$slug'
     | '/api/masumi/inbox-agent/credits'
     | '/api/masumi/inbox-agent/find-agents'
@@ -251,6 +275,7 @@ export interface RootRouteChildren {
   SlugRoute: typeof SlugRouteWithChildren
   AgentsRoute: typeof AgentsRoute
   ApprovalsRoute: typeof ApprovalsRoute
+  ChannelsRoute: typeof ChannelsRouteWithChildren
   DiscoverRoute: typeof DiscoverRoute
   InboxesRoute: typeof InboxesRoute
   SecurityRoute: typeof SecurityRoute
@@ -288,6 +313,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DiscoverRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/channels': {
+      id: '/channels'
+      path: '/channels'
+      fullPath: '/channels'
+      preLoaderRoute: typeof ChannelsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/approvals': {
       id: '/approvals'
       path: '/approvals'
@@ -322,6 +354,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/discover/$slug'
       preLoaderRoute: typeof DiscoverSlugRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/channels/$slug': {
+      id: '/channels/$slug'
+      path: '/$slug'
+      fullPath: '/channels/$slug'
+      preLoaderRoute: typeof ChannelsSlugRouteImport
+      parentRoute: typeof ChannelsRoute
     }
     '/auth/session': {
       id: '/auth/session'
@@ -408,11 +447,24 @@ const SlugRouteChildren: SlugRouteChildren = {
 
 const SlugRouteWithChildren = SlugRoute._addFileChildren(SlugRouteChildren)
 
+interface ChannelsRouteChildren {
+  ChannelsSlugRoute: typeof ChannelsSlugRoute
+}
+
+const ChannelsRouteChildren: ChannelsRouteChildren = {
+  ChannelsSlugRoute: ChannelsSlugRoute,
+}
+
+const ChannelsRouteWithChildren = ChannelsRoute._addFileChildren(
+  ChannelsRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   SlugRoute: SlugRouteWithChildren,
   AgentsRoute: AgentsRoute,
   ApprovalsRoute: ApprovalsRoute,
+  ChannelsRoute: ChannelsRouteWithChildren,
   DiscoverRoute: DiscoverRoute,
   InboxesRoute: InboxesRoute,
   SecurityRoute: SecurityRoute,

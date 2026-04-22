@@ -367,6 +367,75 @@ async function loadProgramWithMocks(params: {
       },
     },
   }));
+  const listPublicChannels = vi.fn(async () => ({
+    profile: 'default',
+    channels: [],
+  }));
+  const readPublicChannelMessages = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    anonymous: true,
+    cappedToRecent: true,
+    messages: [],
+  }));
+  const readAuthenticatedChannelMessages = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    anonymous: false,
+    cappedToRecent: false,
+    messages: [],
+  }));
+  const listChannelMembers = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    members: [],
+  }));
+  const createChannel = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    status: 'created',
+  }));
+  const joinPublicChannel = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    status: 'joined',
+  }));
+  const requestChannelJoin = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    status: 'requested',
+  }));
+  const listChannelJoinRequests = vi.fn(async () => ({
+    profile: 'default',
+    requests: [],
+  }));
+  const approveChannelJoin = vi.fn(async (_input: { requestId: string }) => ({
+    profile: 'default',
+    channelId: '1',
+    status: 'approved',
+  }));
+  const rejectChannelJoin = vi.fn(async () => ({
+    profile: 'default',
+    status: 'rejected',
+  }));
+  const setChannelMemberPermission = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    channelId: '1',
+    status: 'permission-updated',
+  }));
+  const removeChannelMember = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    channelId: '1',
+    status: 'member-removed',
+  }));
+  const sendChannelMessage = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    channelId: '1',
+    status: 'sent',
+  }));
   const lookupPublishedAgentBySlug = vi.fn(async (input: { slug: string }) => [
     {
       slug: input.slug,
@@ -498,6 +567,22 @@ async function loadProgramWithMocks(params: {
     showDiscoveredAgent,
   }));
 
+  vi.doMock('./services/channel', () => ({
+    approveChannelJoin,
+    createChannel,
+    joinPublicChannel,
+    listChannelJoinRequests,
+    listChannelMembers,
+    listPublicChannels,
+    readAuthenticatedChannelMessages,
+    readPublicChannelMessages,
+    rejectChannelJoin,
+    removeChannelMember,
+    requestChannelJoin,
+    sendChannelMessage,
+    setChannelMemberPermission,
+  }));
+
   const programModule = await import('./program');
   return {
     buildProgram: programModule.buildProgram,
@@ -515,6 +600,7 @@ async function loadProgramWithMocks(params: {
       resolvePreferredAgentSlug,
       useOwnedAgent,
       listOwnedAgents,
+      getOwnedAgentProfile,
       updateOwnedAgentMessageCapabilities,
       sendMessageToSlug,
       sendMessageToThread,
@@ -524,6 +610,19 @@ async function loadProgramWithMocks(params: {
       removeContactAllowlist,
       discoverAgents,
       showDiscoveredAgent,
+      listPublicChannels,
+      readPublicChannelMessages,
+      readAuthenticatedChannelMessages,
+      listChannelMembers,
+      createChannel,
+      joinPublicChannel,
+      requestChannelJoin,
+      listChannelJoinRequests,
+      approveChannelJoin,
+      rejectChannelJoin,
+      setChannelMemberPermission,
+      removeChannelMember,
+      sendChannelMessage,
       lookupPublishedAgentBySlug,
       lookupPublishedAgentsByEmail,
       connectAnonymous,
@@ -574,10 +673,12 @@ describe('CLI help', () => {
     const { buildProgram } = await import('./program');
     const help = buildProgram().helpInformation();
 
-    expect(help).toContain('masumi-agent-messenger CLI for account, agent, thread, and discovery workflows');
+    expect(help).toContain('masumi-agent-messenger CLI for account, agent, thread, channel, and discovery');
+    expect(help).toContain('workflows');
     expect(help).toContain('account');
     expect(help).toContain('agent');
     expect(help).toContain('thread');
+    expect(help).toContain('channel');
     expect(help).toContain('discover');
     expect(help).not.toContain('\nauth');
     expect(help).not.toContain('\ninbox');
@@ -638,6 +739,21 @@ describe('CLI help', () => {
 
     expect(help).toContain('search');
     expect(help).toContain('show');
+  });
+
+  it('shows the channel help', async () => {
+    const { buildProgram } = await import('./program');
+    const channel = buildProgram().commands.find(command => command.name() === 'channel');
+    const help = channel?.helpInformation() ?? '';
+
+    expect(help).toContain('list');
+    expect(help).toContain('show');
+    expect(help).toContain('messages');
+    expect(help).toContain('create');
+    expect(help).toContain('join');
+    expect(help).toContain('request');
+    expect(help).toContain('send');
+    expect(help).toContain('members');
   });
 });
 
@@ -757,6 +873,62 @@ describe('CLI command parsing', () => {
     );
   });
 
+  it('parses agent show in json mode', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'agent',
+      'show',
+      'support-bot',
+    ]);
+
+    expect(mocks.getOwnedAgentProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorSlug: 'support-bot',
+        profileName: 'default',
+      })
+    );
+    expect(mocks.runCommandAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Masumi agent show',
+        options: expect.objectContaining({
+          json: true,
+        }),
+      })
+    );
+  });
+
+  it('parses agent show in human mode', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      'agent',
+      'show',
+      '--agent',
+      'support-bot',
+    ]);
+
+    expect(mocks.getOwnedAgentProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorSlug: 'support-bot',
+        profileName: 'default',
+      })
+    );
+    expect(mocks.runCommandAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Masumi agent show',
+        options: expect.objectContaining({
+          json: false,
+        }),
+      })
+    );
+  });
+
   it('parses thread start positional arguments', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
@@ -802,6 +974,96 @@ describe('CLI command parsing', () => {
         requestId: '42',
         action: 'approve',
         actorSlug: 'support-bot',
+      })
+    );
+  });
+
+  it('parses channel create options', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channel',
+      'create',
+      'release-room',
+      '--agent',
+      'deploy-agent',
+      '--title',
+      'Release Room',
+      '--description',
+      'Deployment handoffs',
+      '--approval-required',
+      '--no-discoverable',
+    ]);
+
+    expect(mocks.createChannel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'deploy-agent',
+        slug: 'release-room',
+        title: 'Release Room',
+        description: 'Deployment handoffs',
+        accessMode: 'approval_required',
+        discoverable: false,
+      })
+    );
+  });
+
+  it('parses channel approvals without secret material', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channel',
+      'approve',
+      '42',
+      '--agent',
+      'deploy-agent',
+      '--permission',
+      'read_write',
+    ]);
+
+    const call = mocks.approveChannelJoin.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(call).toEqual(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'deploy-agent',
+        requestId: '42',
+        permission: 'read_write',
+      })
+    );
+    expect(call).not.toHaveProperty('secretEnvelope');
+  });
+
+  it('parses the plural channels alias for sending', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channels',
+      'send',
+      'release-room',
+      'ship',
+      'it',
+      '--agent',
+      'deploy-agent',
+      '--content-type',
+      'text/plain',
+    ]);
+
+    expect(mocks.sendChannelMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'deploy-agent',
+        slug: 'release-room',
+        message: 'ship it',
+        contentType: 'text/plain',
       })
     );
   });
