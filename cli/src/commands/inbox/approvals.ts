@@ -25,6 +25,7 @@ type ApprovalListOptions = GlobalOptions & {
 
 type ApprovalResolveOptions = GlobalOptions & {
   requestId: string;
+  agent?: string;
 };
 
 function renderStatus(status: 'pending' | 'approved' | 'rejected'): string {
@@ -99,6 +100,7 @@ export function registerInboxRequestCommands(command: Command): void {
     .command('approve')
     .description('Approve a pending incoming contact request')
     .requiredOption('--request-id <id>', 'Contact request id')
+    .option('--agent <slug>', 'Owned agent slug to approve on behalf of')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as ApprovalResolveOptions;
       await runCommandAction({
@@ -110,6 +112,7 @@ export function registerInboxRequestCommands(command: Command): void {
             reporter,
             requestId: options.requestId,
             action: 'approve',
+            actorSlug: options.agent,
           }),
         toHuman: result => ({
           summary: `Approved request ${cyan(`#${result.requestId}`)} for ${senderColor(result.slug)}.`,
@@ -122,6 +125,7 @@ export function registerInboxRequestCommands(command: Command): void {
     .command('reject')
     .description('Reject a pending incoming contact request')
     .requiredOption('--request-id <id>', 'Contact request id')
+    .option('--agent <slug>', 'Owned agent slug to reject on behalf of')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as ApprovalResolveOptions;
       await runCommandAction({
@@ -133,6 +137,7 @@ export function registerInboxRequestCommands(command: Command): void {
             reporter,
             requestId: options.requestId,
             action: 'reject',
+            actorSlug: options.agent,
           }),
         toHuman: result => ({
           summary: `Rejected request ${cyan(`#${result.requestId}`)} for ${senderColor(result.slug)}.`,
