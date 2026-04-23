@@ -3,6 +3,7 @@ import {
   createDecipheriv,
   createHash,
   randomBytes,
+  webcrypto,
 } from 'node:crypto';
 import {
   appendStandardSecurityHeaders,
@@ -30,6 +31,7 @@ type OidcMetadata = {
   issuer: string;
   authorization_endpoint: string;
   token_endpoint: string;
+  jwks_uri: string;
   end_session_endpoint?: string;
 };
 
@@ -65,6 +67,7 @@ type IdTokenClaims = {
   issuer: string;
   subject: string;
   audience: string[];
+  authorizedParty?: string;
   sessionId?: string;
   jwtId?: string;
   email: string | null;
@@ -72,6 +75,25 @@ type IdTokenClaims = {
   name?: string;
   nonce?: string;
   expiresAt: number;
+  notBefore?: number;
+};
+
+type IdTokenHeader = {
+  alg: string;
+  kid?: string;
+};
+
+type JwksKey = JsonWebKey & {
+  alg?: string;
+  kid?: string;
+  kty?: string;
+  use?: string;
+};
+
+type JwksCacheEntry = {
+  jwksUri: string;
+  keys: JwksKey[];
+  cachedAt: number;
 };
 
 type BrowserAuthSession =
@@ -111,6 +133,14 @@ let oidcMetadataCache:
       cachedAt: number;
     }
   | undefined;
+let jwksCache: JwksCacheEntry | undefined;
+
+class OidcIdTokenValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OidcIdTokenValidationError';
+  }
+}
 
 function getOidcRuntimeConfig() {
   return resolveOidcRuntimeConfigFromEnv(process.env, {
@@ -178,6 +208,16 @@ function base64UrlDecode(value: string): Buffer {
   const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
   const padding = base64.length % 4 === 0 ? '' : '='.repeat(4 - (base64.length % 4));
   return Buffer.from(`${base64}${padding}`, 'base64');
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+}
+
+function throwIdTokenValidation(message: string): never {
+  throw new OidcIdTokenValidationError(message);
 }
 
 function randomBase64Url(byteLength: number): string {
@@ -291,11 +331,33 @@ function clearCookie(
   });
 }
 
+function hasUnsafeRedirectCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.charCodeAt(0);
+    if (character === '\\' || codePoint <= 0x1f || codePoint === 0x7f) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function sanitizeReturnTo(value: string | null): string {
   if (!value) return '/';
   if (!value.startsWith('/')) return '/';
   if (value.startsWith('//')) return '/';
-  return value;
+  if (hasUnsafeRedirectCharacter(value)) return '/';
+
+  const sameOriginBase = 'https://masumi-agent-messenger.local';
+  try {
+    const resolved = new URL(value, sameOriginBase);
+    if (resolved.origin !== sameOriginBase) {
+      return '/';
+    }
+    return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+  } catch {
+    return '/';
+  }
 }
 
 function resolveRedirectUri(requestUrl: URL): string {
@@ -341,7 +403,8 @@ async function getOidcMetadata(): Promise<OidcMetadata> {
   if (
     !metadata.authorization_endpoint ||
     !metadata.token_endpoint ||
-    !metadata.issuer
+    !metadata.issuer ||
+    !metadata.jwks_uri
   ) {
     throw new Error('OIDC discovery response is missing required endpoints');
   }
@@ -350,8 +413,13 @@ async function getOidcMetadata(): Promise<OidcMetadata> {
     issuer: metadata.issuer.replace(/\/+$/, ''),
     authorization_endpoint: metadata.authorization_endpoint,
     token_endpoint: metadata.token_endpoint,
+    jwks_uri: metadata.jwks_uri,
     end_session_endpoint: metadata.end_session_endpoint,
   } satisfies OidcMetadata;
+
+  if (normalized.issuer !== issuer) {
+    throw new Error('OIDC discovery issuer does not match configured issuer');
+  }
 
   oidcMetadataCache = {
     issuer,
@@ -368,6 +436,27 @@ function parseBooleanClaim(value: unknown): boolean {
   return false;
 }
 
+function isStoredOidcSession(value: unknown): value is StoredOidcSession {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.idToken === 'string' &&
+    record.idToken.trim().length > 0 &&
+    (record.refreshToken === undefined || typeof record.refreshToken === 'string') &&
+    (record.accessToken === undefined || typeof record.accessToken === 'string') &&
+    (record.grantedScopes === undefined ||
+      (Array.isArray(record.grantedScopes) &&
+        record.grantedScopes.every(scope => typeof scope === 'string'))) &&
+    typeof record.expiresAt === 'number' &&
+    Number.isFinite(record.expiresAt) &&
+    typeof record.createdAt === 'number' &&
+    Number.isFinite(record.createdAt)
+  );
+}
+
 function parseStringClaim(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -378,25 +467,55 @@ function parseNumericClaim(value: unknown): number | undefined {
   return undefined;
 }
 
+function decodeJwtJsonSegment(value: string, label: string): Record<string, unknown> {
+  try {
+    const decoded = JSON.parse(base64UrlDecode(value).toString('utf8')) as unknown;
+    if (typeof decoded === 'object' && decoded !== null && !Array.isArray(decoded)) {
+      return decoded as Record<string, unknown>;
+    }
+  } catch {
+    // Fall through to a domain-specific validation error.
+  }
+
+  throwIdTokenValidation(`OIDC id_token ${label} is malformed`);
+}
+
+function decodeIdTokenHeader(idToken: string): IdTokenHeader {
+  const segments = idToken.split('.');
+  if (segments.length !== 3) {
+    throwIdTokenValidation('OIDC id_token is malformed');
+  }
+
+  const header = decodeJwtJsonSegment(segments[0], 'header');
+  const alg = parseStringClaim(header.alg);
+  if (!alg || alg.toLowerCase() === 'none') {
+    throwIdTokenValidation('OIDC id_token uses an invalid signing algorithm');
+  }
+
+  return {
+    alg,
+    kid: parseStringClaim(header.kid),
+  };
+}
+
 function decodeIdTokenClaims(idToken: string): IdTokenClaims {
   const segments = idToken.split('.');
-  if (segments.length < 2) {
+  if (segments.length !== 3) {
     throw new Error('OIDC id_token is malformed');
   }
 
-  const payload = JSON.parse(base64UrlDecode(segments[1]).toString('utf8')) as Record<
-    string,
-    unknown
-  >;
+  const payload = decodeJwtJsonSegment(segments[1], 'payload');
 
   const issuer = parseStringClaim(payload.iss);
   const subject = parseStringClaim(payload.sub);
   const email = parseStringClaim(payload.email) ?? null;
   const name = parseStringClaim(payload.name);
   const nonce = parseStringClaim(payload.nonce);
+  const authorizedParty = parseStringClaim(payload.azp);
   const sessionId = parseStringClaim(payload.sid);
   const jwtId = parseStringClaim(payload.jti);
   const expiresAtSeconds = parseNumericClaim(payload.exp);
+  const notBeforeSeconds = parseNumericClaim(payload.nbf);
   const audienceValue = payload.aud;
   const audience = Array.isArray(audienceValue)
     ? audienceValue.filter((value): value is string => typeof value === 'string')
@@ -405,13 +524,14 @@ function decodeIdTokenClaims(idToken: string): IdTokenClaims {
       : [];
 
   if (!issuer || !subject || !expiresAtSeconds) {
-    throw new Error('OIDC id_token is missing iss, sub, or exp');
+    throwIdTokenValidation('OIDC id_token is missing iss, sub, or exp');
   }
 
   return {
     issuer,
     subject,
     audience,
+    authorizedParty,
     sessionId,
     jwtId,
     email,
@@ -419,7 +539,213 @@ function decodeIdTokenClaims(idToken: string): IdTokenClaims {
     name,
     nonce,
     expiresAt: expiresAtSeconds * 1000,
+    notBefore: notBeforeSeconds === undefined ? undefined : notBeforeSeconds * 1000,
   };
+}
+
+function parseJwksKey(value: unknown): JwksKey | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  return typeof record.kty === 'string' ? (record as JwksKey) : null;
+}
+
+async function getOidcJwks(
+  metadata: OidcMetadata,
+  options: { forceRefresh?: boolean } = {}
+): Promise<{ keys: JwksKey[]; fromCache: boolean }> {
+  if (
+    !options.forceRefresh &&
+    jwksCache &&
+    jwksCache.jwksUri === metadata.jwks_uri &&
+    Date.now() - jwksCache.cachedAt < 5 * 60 * 1000
+  ) {
+    return { keys: jwksCache.keys, fromCache: true };
+  }
+
+  const response = await fetch(metadata.jwks_uri, {
+    headers: {
+      Accept: 'application/json',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`OIDC JWKS fetch failed (${response.status}) from ${metadata.jwks_uri}`);
+  }
+
+  const payload = (await response.json()) as unknown;
+  const keysValue =
+    typeof payload === 'object' && payload !== null && 'keys' in payload
+      ? (payload as { keys?: unknown }).keys
+      : undefined;
+  if (!Array.isArray(keysValue)) {
+    throw new Error('OIDC JWKS response is invalid');
+  }
+
+  const keys = keysValue.map(parseJwksKey).filter((key): key is JwksKey => key !== null);
+  if (keys.length === 0) {
+    throw new Error('OIDC JWKS response does not include signing keys');
+  }
+
+  jwksCache = {
+    jwksUri: metadata.jwks_uri,
+    keys,
+    cachedAt: Date.now(),
+  };
+  return { keys, fromCache: false };
+}
+
+function isCompatibleJwksKey(key: JwksKey, algorithm: string): boolean {
+  if (key.use && key.use !== 'sig') {
+    return false;
+  }
+  if (key.alg && key.alg !== algorithm) {
+    return false;
+  }
+  if (algorithm === 'RS256') {
+    return key.kty === 'RSA';
+  }
+  if (algorithm === 'ES256') {
+    return key.kty === 'EC' && key.crv === 'P-256';
+  }
+  return false;
+}
+
+type JwksKeyLookup =
+  | { kind: 'found'; key: JwksKey }
+  | { kind: 'missing' };
+
+function findJwksKeyByHeader(keys: JwksKey[], header: IdTokenHeader): JwksKeyLookup {
+  const compatible = keys.filter(key => isCompatibleJwksKey(key, header.alg));
+  if (header.kid) {
+    const key = compatible.find(candidate => candidate.kid === header.kid);
+    return key ? { kind: 'found', key } : { kind: 'missing' };
+  }
+
+  if (compatible.length === 1) {
+    return { kind: 'found', key: compatible[0] };
+  }
+
+  if (compatible.length === 0) {
+    return { kind: 'missing' };
+  }
+  throwIdTokenValidation('OIDC id_token kid is required when multiple signing keys are published');
+}
+
+async function importVerificationKey(header: IdTokenHeader, key: JwksKey): Promise<CryptoKey> {
+  if (header.alg === 'RS256') {
+    return webcrypto.subtle.importKey(
+      'jwk',
+      key,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['verify']
+    ) as Promise<CryptoKey>;
+  }
+
+  if (header.alg === 'ES256') {
+    return webcrypto.subtle.importKey(
+      'jwk',
+      key,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify']
+    ) as Promise<CryptoKey>;
+  }
+
+  throwIdTokenValidation(`OIDC id_token algorithm ${header.alg} is not supported`);
+}
+
+async function verifyIdTokenSignature(params: {
+  idToken: string;
+  header: IdTokenHeader;
+  key: JwksKey;
+}): Promise<void> {
+  const [encodedHeader, encodedPayload, encodedSignature] = params.idToken.split('.');
+  if (!encodedHeader || !encodedPayload || !encodedSignature) {
+    throwIdTokenValidation('OIDC id_token is malformed');
+  }
+
+  const publicKey = await importVerificationKey(params.header, params.key);
+  const signingInput = new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`);
+  const signature = base64UrlDecode(encodedSignature);
+  const verified =
+    params.header.alg === 'ES256'
+      ? await webcrypto.subtle.verify(
+          { name: 'ECDSA', hash: 'SHA-256' },
+          publicKey,
+          toArrayBuffer(signature),
+          toArrayBuffer(signingInput)
+        )
+      : await webcrypto.subtle.verify(
+          { name: 'RSASSA-PKCS1-v1_5' },
+          publicKey,
+          toArrayBuffer(signature),
+          toArrayBuffer(signingInput)
+        );
+
+  if (!verified) {
+    throwIdTokenValidation('OIDC id_token signature verification failed');
+  }
+}
+
+export async function validateOidcIdToken(
+  idToken: string,
+  metadata: OidcMetadata,
+  options: {
+    expectedNonce?: string;
+    allowExpired?: boolean;
+    nowMs?: number;
+  } = {}
+): Promise<IdTokenClaims> {
+  const header = decodeIdTokenHeader(idToken);
+  const claims = decodeIdTokenClaims(idToken);
+  const config = getOidcRuntimeConfig();
+  const nowMs = options.nowMs ?? Date.now();
+  const clockSkewMs = 60_000;
+
+  if (claims.issuer !== metadata.issuer || claims.issuer !== config.issuer) {
+    throwIdTokenValidation('OIDC id_token issuer is not trusted');
+  }
+
+  if (!claims.audience.includes(config.clientId)) {
+    throwIdTokenValidation('OIDC id_token audience is not trusted');
+  }
+  if (
+    claims.authorizedParty !== undefined &&
+    claims.authorizedParty !== config.clientId
+  ) {
+    throwIdTokenValidation('OIDC id_token is not authorized for this client');
+  }
+
+  if (options.expectedNonce !== undefined && claims.nonce !== options.expectedNonce) {
+    throwIdTokenValidation('Invalid OIDC nonce');
+  }
+
+  if (!options.allowExpired && claims.expiresAt + clockSkewMs <= nowMs) {
+    throwIdTokenValidation('OIDC id_token is expired');
+  }
+  if (claims.notBefore !== undefined && claims.notBefore - clockSkewMs > nowMs) {
+    throwIdTokenValidation('OIDC id_token is not valid yet');
+  }
+
+  let jwks = await getOidcJwks(metadata);
+  let lookup = findJwksKeyByHeader(jwks.keys, header);
+  if (lookup.kind === 'missing' && jwks.fromCache) {
+    jwks = await getOidcJwks(metadata, { forceRefresh: true });
+    lookup = findJwksKeyByHeader(jwks.keys, header);
+  }
+  if (lookup.kind === 'missing') {
+    throwIdTokenValidation('OIDC id_token signing key was not found');
+  }
+  await verifyIdTokenSignature({
+    idToken,
+    header,
+    key: lookup.key,
+  });
+
+  return claims;
 }
 
 function toBrowserSession(session: StoredOidcSession): BrowserAuthSession {
@@ -498,12 +824,20 @@ export function isRecoverableOidcSessionRefreshFailure(error: unknown): boolean 
   );
 }
 
-function normalizeStoredSession(response: AuthorizationCodeTokenResponse): StoredOidcSession {
+async function normalizeStoredSession(
+  response: AuthorizationCodeTokenResponse,
+  metadata: OidcMetadata,
+  options?: {
+    expectedNonce?: string;
+  }
+): Promise<StoredOidcSession> {
   if (!response.id_token) {
     throw new Error('OIDC token response did not include an id_token');
   }
 
-  const claims = decodeIdTokenClaims(response.id_token);
+  const claims = await validateOidcIdToken(response.id_token, metadata, {
+    expectedNonce: options?.expectedNonce,
+  });
   return {
     idToken: response.id_token,
     refreshToken: response.refresh_token,
@@ -519,6 +853,7 @@ async function exchangeAuthorizationCode(params: {
   requestUrl: URL;
   code: string;
   codeVerifier: string;
+  expectedNonce: string;
 }): Promise<StoredOidcSession> {
   const body = new URLSearchParams();
   body.set('grant_type', 'authorization_code');
@@ -536,7 +871,9 @@ async function exchangeAuthorizationCode(params: {
     body,
   });
 
-  return normalizeStoredSession(await parseTokenResponse(response));
+  return normalizeStoredSession(await parseTokenResponse(response), params.metadata, {
+    expectedNonce: params.expectedNonce,
+  });
 }
 
 async function refreshStoredSession(
@@ -566,7 +903,7 @@ async function refreshStoredSession(
     return null;
   }
 
-  const normalized = normalizeStoredSession(refreshed);
+  const normalized = await normalizeStoredSession(refreshed, metadata);
   return {
     ...normalized,
     grantedScopes:
@@ -584,31 +921,43 @@ async function loadSession(request: Request): Promise<{
   cookies: string[];
 }> {
   const requestUrl = new URL(request.url);
-  const stored = readEncryptedCookie<StoredOidcSession>(request, SESSION_COOKIE_NAME);
-  if (!stored) {
+  const stored = readEncryptedCookie<unknown>(request, SESSION_COOKIE_NAME);
+  if (stored === null) {
     return {
       session: null,
       cookies: [],
     };
   }
-
-  try {
-    decodeIdTokenClaims(stored.idToken);
-  } catch {
+  if (!isStoredOidcSession(stored)) {
     return {
       session: null,
       cookies: [clearCookie(SESSION_COOKIE_NAME, request, requestUrl)],
     };
   }
 
-  if (stored.expiresAt - Date.now() > SESSION_REFRESH_WINDOW_MS) {
+  const metadata = await getOidcMetadata();
+  let claims: IdTokenClaims;
+  try {
+    claims = await validateOidcIdToken(stored.idToken, metadata, {
+      allowExpired: true,
+    });
+  } catch (error) {
+    if (!(error instanceof OidcIdTokenValidationError)) {
+      throw error;
+    }
+    return {
+      session: null,
+      cookies: [clearCookie(SESSION_COOKIE_NAME, request, requestUrl)],
+    };
+  }
+
+  if (claims.expiresAt - Date.now() > SESSION_REFRESH_WINDOW_MS) {
     return {
       session: stored,
       cookies: [],
     };
   }
 
-  const metadata = await getOidcMetadata();
   let refreshed: StoredOidcSession | null;
   try {
     refreshed = await refreshStoredSession(stored, metadata);
@@ -788,15 +1137,17 @@ export async function completeOidcLogin(request: Request): Promise<Response> {
   }
 
   const metadata = await getOidcMetadata();
-  const storedSession = await exchangeAuthorizationCode({
-    metadata,
-    requestUrl,
-    code,
-    codeVerifier: flowCookie.codeVerifier,
-  });
-  const claims = decodeIdTokenClaims(storedSession.idToken);
-  if (claims.nonce !== flowCookie.nonce) {
-    return textResponse(400, 'Invalid OIDC nonce', {
+  let storedSession: StoredOidcSession;
+  try {
+    storedSession = await exchangeAuthorizationCode({
+      metadata,
+      requestUrl,
+      code,
+      codeVerifier: flowCookie.codeVerifier,
+      expectedNonce: flowCookie.nonce,
+    });
+  } catch (loginError) {
+    return textResponse(400, loginError instanceof Error ? loginError.message : 'OIDC login failed', {
       cookies: readSetCookieValues(clearFlowHeaders),
     });
   }
@@ -848,7 +1199,7 @@ export async function logoutOidcSession(request: Request): Promise<Response> {
   assertSameOriginUnsafeRequest(request);
 
   const requestUrl = new URL(request.url);
-  const stored = readEncryptedCookie<StoredOidcSession>(request, SESSION_COOKIE_NAME);
+  const stored = readEncryptedCookie<unknown>(request, SESSION_COOKIE_NAME);
 
   const headers = new Headers();
   headers.append('Set-Cookie', clearCookie(FLOW_COOKIE_NAME, request, requestUrl, 'None'));
@@ -870,7 +1221,7 @@ export async function logoutOidcSession(request: Request): Promise<Response> {
     'post_logout_redirect_uri',
     resolvePostLogoutRedirectUri(requestUrl)
   );
-  if (stored?.idToken) {
+  if (isStoredOidcSession(stored)) {
     logoutUrl.searchParams.set('id_token_hint', stored.idToken);
   }
 

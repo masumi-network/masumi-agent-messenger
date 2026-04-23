@@ -376,7 +376,7 @@ describe('generated and source security contracts', () => {
 
     expect(backend).toContain("scheduled: (): any => getScheduledReducer('expireInboxAuthLease')");
     expect(backend).toContain('expireInboxAuthLease,');
-    expect(backend).toContain('isTimestampExpired(lease.expiresAt, Timestamp.now())');
+    expect(backend).not.toContain('Timestamp.now()');
     expect(backend).toContain('!isTimestampExpired(lease.expiresAt, ctx.timestamp)');
     expect(backend).toContain('function isExpectedInboxAuthLeaseRefreshError');
     expect(backend).toContain('const EXPECTED_INBOX_AUTH_LEASE_REFRESH_ERRORS = new Set');

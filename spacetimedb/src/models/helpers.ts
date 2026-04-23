@@ -881,7 +881,7 @@ export function getActiveInboxAuthLease(ctx: ReadDbCtx, inbox: InboxRow) {
   }
   // Expiry is enforced by the scheduled `expireInboxAuthLease` reducer flipping
   // `active = false`. Views cannot access wall-clock time (no `ctx.timestamp`)
-  // and must remain deterministic — do not call `Timestamp.now()` here.
+  // and must remain deterministic — do not read the current time here.
   if (
     lease.authIdentityKey !== buildInboxAuthIdentityKey(inbox.authIssuer, inbox.authSubject) ||
     lease.normalizedEmail !== inbox.normalizedEmail ||

@@ -591,10 +591,11 @@ export async function deregisterMasumiInboxAgentForSession(params: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to deregister inbox agent';
-    throw new Error(
-      isMissingRequiredScopeMessage(message) ? toScopeMessage(message, params.session) : message,
-      { cause: error }
+    const wrapped = new Error(
+      isMissingRequiredScopeMessage(message) ? toScopeMessage(message, params.session) : message
     );
+    (wrapped as { cause?: unknown }).cause = error;
+    throw wrapped;
   }
 }
 

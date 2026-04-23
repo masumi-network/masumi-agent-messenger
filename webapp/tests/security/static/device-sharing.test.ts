@@ -19,6 +19,20 @@ if (!globalThis.crypto) {
   globalThis.crypto = webcrypto as Crypto;
 }
 
+function publicKey(label: string): string {
+  return JSON.stringify({ kty: 'EC', crv: 'P-256', x: `x-${label}`, y: `y-${label}` });
+}
+
+function privateKey(label: string): string {
+  return JSON.stringify({
+    kty: 'EC',
+    crv: 'P-256',
+    x: `x-${label}`,
+    y: `y-${label}`,
+    d: `d-${label}`,
+  });
+}
+
 function buildSampleSnapshot(): DeviceKeyShareSnapshot {
   return {
     version: 1,
@@ -32,14 +46,14 @@ function buildSampleSnapshot(): DeviceKeyShareSnapshot {
         },
         current: {
           encryption: {
-            publicKey: 'enc-public',
-            privateKey: 'enc-private',
+            publicKey: publicKey('enc-current'),
+            privateKey: privateKey('enc-current'),
             keyVersion: 'enc-v1',
             algorithm: 'ecdh-p256-v1',
           },
           signing: {
-            publicKey: 'sig-public',
-            privateKey: 'sig-private',
+            publicKey: publicKey('sig-current'),
+            privateKey: privateKey('sig-current'),
             keyVersion: 'sig-v1',
             algorithm: 'ecdsa-p256-sha256-v1',
           },

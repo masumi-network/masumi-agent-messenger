@@ -4292,6 +4292,9 @@ function AuthenticatedInboxPage() {
     }
 
     event.preventDefault();
+    if (!composerInput.trim()) {
+      return;
+    }
     event.currentTarget.form?.requestSubmit();
   }
 
@@ -4410,6 +4413,10 @@ function AuthenticatedInboxPage() {
 
     setActorActionError(null);
     setActorFeedback(null);
+    if (!composerInput.trim()) {
+      setActorActionError('Add a message before sending.');
+      return;
+    }
     if (composerInput.length > MAX_MESSAGE_BODY_CHARS) {
       setActorActionError(
         `Message text must be ${MAX_MESSAGE_BODY_CHARS.toLocaleString()} characters or fewer.`

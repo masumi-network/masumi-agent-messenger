@@ -5,6 +5,7 @@ import {
   type AgentKeyPair,
   type StoredKeyPair,
 } from './agent-crypto';
+import { normalizeEmail as normalizeSharedEmail, normalizeInboxSlug } from './inbox-slug';
 import {
   DEVICE_VERIFICATION_CODE_ARGON2_ITERATIONS,
   DEVICE_VERIFICATION_CODE_ARGON2_MEMORY_KIB,
@@ -358,6 +359,161 @@ function parseSerializedJwk(serialized: string): JsonWebKey {
   return parsed as JsonWebKey;
 }
 
+function requireRecord(value: unknown, context: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`Invalid device key share snapshot: ${context} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireNonEmptyString(value: unknown, context: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid device key share snapshot: ${context} must be a string`);
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`Invalid device key share snapshot: ${context} must not be empty`);
+  }
+  return trimmed;
+}
+
+function requireOptionalNonEmptyString(value: unknown, context: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return requireNonEmptyString(value, context);
+}
+
+function requireNormalizedEmail(value: unknown, context: string): string {
+  const normalizedEmail = normalizeSharedEmail(requireNonEmptyString(value, context));
+  if (!/^[^\s@]+@[^\s@]+$/u.test(normalizedEmail)) {
+    throw new Error(`Invalid device key share snapshot: ${context} must be a valid email`);
+  }
+  return normalizedEmail;
+}
+
+function requireSlug(value: unknown, context: string): string {
+  const slug = normalizeInboxSlug(requireNonEmptyString(value, context));
+  if (!slug) {
+    throw new Error(`Invalid device key share snapshot: ${context} must be a valid slug`);
+  }
+  return slug;
+}
+
+function requireSerializedP256Jwk(params: {
+  value: unknown;
+  context: string;
+  privateKey: boolean;
+}): string {
+  const serialized = requireNonEmptyString(params.value, params.context);
+  let jwk: JsonWebKey;
+  try {
+    jwk = parseSerializedJwk(serialized);
+  } catch {
+    throw new Error(`Invalid device key share snapshot: ${params.context} must be a serialized JWK`);
+  }
+
+  if (
+    jwk.kty !== 'EC' ||
+    jwk.crv !== 'P-256' ||
+    typeof jwk.x !== 'string' ||
+    typeof jwk.y !== 'string' ||
+    (params.privateKey && typeof jwk.d !== 'string') ||
+    (!params.privateKey && jwk.d !== undefined)
+  ) {
+    throw new Error(`Invalid device key share snapshot: ${params.context} must be a P-256 JWK`);
+  }
+  return serialized;
+}
+
+function parseStoredKeyPair(params: {
+  value: unknown;
+  context: string;
+  expectedAlgorithm: string;
+}): StoredKeyPair {
+  const record = requireRecord(params.value, params.context);
+  const algorithm = requireNonEmptyString(record.algorithm, `${params.context}.algorithm`);
+  if (algorithm !== params.expectedAlgorithm) {
+    throw new Error(`Invalid device key share snapshot: ${params.context}.algorithm is unsupported`);
+  }
+
+  return {
+    publicKey: requireSerializedP256Jwk({
+      value: record.publicKey,
+      context: `${params.context}.publicKey`,
+      privateKey: false,
+    }),
+    privateKey: requireSerializedP256Jwk({
+      value: record.privateKey,
+      context: `${params.context}.privateKey`,
+      privateKey: true,
+    }),
+    keyVersion: requireNonEmptyString(record.keyVersion, `${params.context}.keyVersion`),
+    algorithm,
+  };
+}
+
+function parseAgentKeyPair(value: unknown, context: string): AgentKeyPair {
+  const record = requireRecord(value, context);
+  return {
+    encryption: parseStoredKeyPair({
+      value: record.encryption,
+      context: `${context}.encryption`,
+      expectedAlgorithm: 'ecdh-p256-v1',
+    }),
+    signing: parseStoredKeyPair({
+      value: record.signing,
+      context: `${context}.signing`,
+      expectedAlgorithm: 'ecdsa-p256-sha256-v1',
+    }),
+  };
+}
+
+function parseActorIdentity(value: unknown, context: string): ActorIdentity {
+  const record = requireRecord(value, context);
+  const inboxIdentifier = requireOptionalNonEmptyString(
+    record.inboxIdentifier,
+    `${context}.inboxIdentifier`
+  );
+
+  return {
+    normalizedEmail: requireNormalizedEmail(record.normalizedEmail, `${context}.normalizedEmail`),
+    slug: requireSlug(record.slug, `${context}.slug`),
+    ...(inboxIdentifier === undefined ? {} : { inboxIdentifier }),
+  };
+}
+
+function parseSharedActorKeyMaterial(params: {
+  value: unknown;
+  index: number;
+  expectedEmail: string;
+}): SharedActorKeyMaterial {
+  const context = `actors[${params.index}]`;
+  const record = requireRecord(params.value, context);
+  const identity = parseActorIdentity(record.identity, `${context}.identity`);
+  if (identity.normalizedEmail !== params.expectedEmail) {
+    throw new Error(
+      `Invalid device key share snapshot: ${context}.identity.normalizedEmail must match snapshot.normalizedEmail`
+    );
+  }
+
+  if (!Array.isArray(record.archived)) {
+    throw new Error(`Invalid device key share snapshot: ${context}.archived must be an array`);
+  }
+
+  return {
+    identity,
+    current:
+      record.current === null
+        ? null
+        : parseAgentKeyPair(record.current, `${context}.current`),
+    archived: record.archived.map((keyPair, keyPairIndex) =>
+      parseAgentKeyPair(keyPair, `${context}.archived[${keyPairIndex}]`)
+    ),
+  };
+}
+
 async function exportPublicKey(key: CryptoKey): Promise<string> {
   const jwk = await crypto.subtle.exportKey('jwk', key);
   return canonicalJsonStringify(jwk);
@@ -419,11 +575,7 @@ async function deriveDeviceShareKey(params: {
 }
 
 export function parseDeviceKeyShareSnapshot(parsed: unknown): DeviceKeyShareSnapshot {
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('Invalid device key share snapshot');
-  }
-
-  const snapshot = parsed as Partial<DeviceKeyShareSnapshot>;
+  const snapshot = requireRecord(parsed, 'snapshot');
   if (
     snapshot.version !== 1 ||
     typeof snapshot.normalizedEmail !== 'string' ||
@@ -433,11 +585,39 @@ export function parseDeviceKeyShareSnapshot(parsed: unknown): DeviceKeyShareSnap
     throw new Error('Invalid device key share snapshot');
   }
 
+  const normalizedEmail = requireNormalizedEmail(
+    snapshot.normalizedEmail,
+    'snapshot.normalizedEmail'
+  );
+  const createdAt = requireNonEmptyString(snapshot.createdAt, 'snapshot.createdAt');
+  if (!Number.isFinite(Date.parse(createdAt))) {
+    throw new Error('Invalid device key share snapshot: snapshot.createdAt must be an ISO date');
+  }
+
+  const seenActors = new Set<string>();
+  const actors = snapshot.actors.map((actor, index) => {
+    const parsedActor = parseSharedActorKeyMaterial({
+      value: actor,
+      index,
+      expectedEmail: normalizedEmail,
+    });
+    const identityKey = [
+      parsedActor.identity.normalizedEmail,
+      parsedActor.identity.slug,
+      parsedActor.identity.inboxIdentifier ?? '',
+    ].join(':');
+    if (seenActors.has(identityKey)) {
+      throw new Error(`Invalid device key share snapshot: duplicate actor identity ${identityKey}`);
+    }
+    seenActors.add(identityKey);
+    return parsedActor;
+  });
+
   return {
     version: 1,
-    normalizedEmail: snapshot.normalizedEmail,
-    createdAt: snapshot.createdAt,
-    actors: snapshot.actors as SharedActorKeyMaterial[],
+    normalizedEmail,
+    createdAt,
+    actors,
   };
 }
 

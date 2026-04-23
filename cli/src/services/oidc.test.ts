@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { webcrypto } from 'node:crypto';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MASUMI_DEFAULT_OIDC_ISSUER } from '../../../shared/masumi-default-oidc-issuer';
 import { DEFAULT_MASUMI_OIDC_SCOPES } from '../../../shared/masumi-oidc-scopes';
 import {
@@ -12,8 +13,14 @@ import {
   type OidcMetadata,
 } from './oidc';
 
-function base64UrlEncode(value: string): string {
-  return Buffer.from(value, 'utf8')
+let testSigningKeyPair: CryptoKeyPair;
+let testPublicJwk: JsonWebKey & { alg: 'RS256'; kid: 'test-key'; use: 'sig' };
+let rotatedSigningKeyPair: CryptoKeyPair;
+let rotatedPublicJwk: JsonWebKey & { alg: 'RS256'; kid: 'rotated-key'; use: 'sig' };
+
+function base64UrlEncode(value: string | Uint8Array): string {
+  const buffer = typeof value === 'string' ? Buffer.from(value, 'utf8') : Buffer.from(value);
+  return buffer
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
@@ -28,6 +35,28 @@ function createTestIdToken(payload: Record<string, unknown>): string {
   ].join('.');
 }
 
+async function createSignedTestIdToken(
+  payload: Record<string, unknown>,
+  options: {
+    keyPair?: CryptoKeyPair;
+    kid?: string;
+  } = {}
+): Promise<string> {
+  const keyPair = options.keyPair ?? testSigningKeyPair;
+  const kid = options.kid ?? 'test-key';
+  const encodedHeader = base64UrlEncode(
+    JSON.stringify({ alg: 'RS256', typ: 'JWT', kid })
+  );
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const signature = await webcrypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    keyPair.privateKey,
+    new TextEncoder().encode(signingInput)
+  );
+  return `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`;
+}
+
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -37,11 +66,73 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+function mockOidcFetchResponses(responses: Response[]): void {
+  global.fetch = vi.fn(async input => {
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    if (url === metadata.jwks_uri) {
+      return jsonResponse(200, { keys: [testPublicJwk] });
+    }
+
+    const next = responses.shift();
+    if (!next) {
+      throw new Error(`Unexpected OIDC request to ${url}`);
+    }
+    return next;
+  }) as typeof fetch;
+}
+
 const metadata: OidcMetadata = {
   issuer: MASUMI_DEFAULT_OIDC_ISSUER,
   authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
   token_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
+  jwks_uri: `${MASUMI_DEFAULT_OIDC_ISSUER}/.well-known/jwks.json`,
 };
+
+beforeAll(async () => {
+  testSigningKeyPair = await webcrypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['sign', 'verify']
+  );
+  testPublicJwk = {
+    ...((await webcrypto.subtle.exportKey(
+      'jwk',
+      testSigningKeyPair.publicKey
+    )) as JsonWebKey),
+    alg: 'RS256',
+    kid: 'test-key',
+    use: 'sig',
+  };
+  rotatedSigningKeyPair = await webcrypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['sign', 'verify']
+  );
+  rotatedPublicJwk = {
+    ...((await webcrypto.subtle.exportKey(
+      'jwk',
+      rotatedSigningKeyPair.publicKey
+    )) as JsonWebKey),
+    alg: 'RS256',
+    kid: 'rotated-key',
+    use: 'sig',
+  };
+});
 
 describe('resolveBetterAuthBaseUrl', () => {
   it('trims /oauth2/authorize from the discovered authorization endpoint', () => {
@@ -192,12 +283,12 @@ describe('pollDeviceAuthorization', () => {
       device_authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/device/code`,
     };
 
-    global.fetch = vi.fn(async () =>
+    mockOidcFetchResponses([
       jsonResponse(200, {
         access_token: 'access-token',
         refresh_token: 'refresh-token',
         scope: 'openid profile email',
-        id_token: createTestIdToken({
+        id_token: await createSignedTestIdToken({
           iss: MASUMI_DEFAULT_OIDC_ISSUER,
           sub: 'user-123',
           aud: ['masumi-spacetime-cli'],
@@ -205,8 +296,8 @@ describe('pollDeviceAuthorization', () => {
           email_verified: true,
           exp: Math.floor(Date.now() / 1000) + 3600,
         }),
-      })
-    ) as typeof fetch;
+      }),
+    ]);
 
     const result = await pollDeviceAuthorization({
       metadata: baMetadata,
@@ -215,13 +306,23 @@ describe('pollDeviceAuthorization', () => {
     });
 
     expect(result.kind).toBe('success');
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      1,
       `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({
           'Content-Type': 'application/x-www-form-urlencoded',
+        }),
+      })
+    );
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      2,
+      metadata.jwks_uri,
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Accept: 'application/json',
         }),
       })
     );
@@ -233,29 +334,25 @@ describe('pollDeviceAuthorization', () => {
       device_authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/device/code`,
     };
 
-    global.fetch = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse(400, {
-          error: 'invalid_grant',
-          error_description: 'Failed to exchange device token',
-        })
-      )
-      .mockResolvedValueOnce(
-        jsonResponse(200, {
-          access_token: 'access-token',
-          refresh_token: 'refresh-token',
-          scope: 'openid profile email',
-          id_token: createTestIdToken({
-            iss: MASUMI_DEFAULT_OIDC_ISSUER,
-            sub: 'user-123',
-            aud: ['masumi-spacetime-cli'],
-            email: 'agent@example.com',
-            email_verified: true,
-            exp: Math.floor(Date.now() / 1000) + 3600,
-          }),
-        })
-      ) as typeof fetch;
+    mockOidcFetchResponses([
+      jsonResponse(400, {
+        error: 'invalid_grant',
+        error_description: 'Failed to exchange device token',
+      }),
+      jsonResponse(200, {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        scope: 'openid profile email',
+        id_token: await createSignedTestIdToken({
+          iss: MASUMI_DEFAULT_OIDC_ISSUER,
+          sub: 'user-123',
+          aud: ['masumi-spacetime-cli'],
+          email: 'agent@example.com',
+          email_verified: true,
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+      }),
+    ]);
 
     const debug = vi.fn();
     const result = await pollDeviceAuthorization({
@@ -309,6 +406,137 @@ describe('pollDeviceAuthorization', () => {
       'Device authorization failed: email verification required. Verify your email in Masumi SaaS and try again.'
     );
   });
+
+  it('rejects signed tokens that are not intended for the CLI client', async () => {
+    mockOidcFetchResponses([
+      jsonResponse(200, {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        scope: 'openid profile email',
+        id_token: await createSignedTestIdToken({
+          iss: MASUMI_DEFAULT_OIDC_ISSUER,
+          sub: 'user-123',
+          aud: ['another-client'],
+          email: 'agent@example.com',
+          email_verified: true,
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+      }),
+    ]);
+
+    await expect(
+      pollDeviceAuthorization({
+        metadata,
+        clientId: 'masumi-spacetime-cli',
+        deviceCode: 'device-xyz',
+      })
+    ).rejects.toThrow('OIDC id_token audience is not trusted.');
+  });
+
+  it('rejects signed tokens when azp matches but aud omits the CLI client', async () => {
+    mockOidcFetchResponses([
+      jsonResponse(200, {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        scope: 'openid profile email',
+        id_token: await createSignedTestIdToken({
+          iss: MASUMI_DEFAULT_OIDC_ISSUER,
+          sub: 'user-123',
+          aud: ['another-client'],
+          azp: 'masumi-spacetime-cli',
+          email: 'agent@example.com',
+          email_verified: true,
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+      }),
+    ]);
+
+    await expect(
+      pollDeviceAuthorization({
+        metadata,
+        clientId: 'masumi-spacetime-cli',
+        deviceCode: 'device-xyz',
+      })
+    ).rejects.toThrow('OIDC id_token audience is not trusted.');
+  });
+
+  it('refetches JWKS once when a cached key set misses the token kid', async () => {
+    const rotationMetadata = {
+      ...metadata,
+      jwks_uri: `${metadata.jwks_uri}?rotation=cli`,
+    };
+    let jwksKeys: JsonWebKey[] = [testPublicJwk];
+    let idToken = await createSignedTestIdToken({
+      iss: MASUMI_DEFAULT_OIDC_ISSUER,
+      sub: 'user-123',
+      aud: ['masumi-spacetime-cli'],
+      email: 'agent@example.com',
+      email_verified: true,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const fetchMock = vi.fn(async input => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      if (url === rotationMetadata.jwks_uri) {
+        return jsonResponse(200, { keys: jwksKeys });
+      }
+
+      return jsonResponse(200, {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        scope: 'openid profile email',
+        id_token: idToken,
+      });
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    await expect(
+      pollDeviceAuthorization({
+        metadata: rotationMetadata,
+        clientId: 'masumi-spacetime-cli',
+        deviceCode: 'device-xyz',
+      })
+    ).resolves.toMatchObject({ kind: 'success' });
+
+    jwksKeys = [rotatedPublicJwk];
+    idToken = await createSignedTestIdToken(
+      {
+        iss: MASUMI_DEFAULT_OIDC_ISSUER,
+        sub: 'user-123',
+        aud: ['masumi-spacetime-cli'],
+        email: 'agent@example.com',
+        email_verified: true,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      },
+      {
+        keyPair: rotatedSigningKeyPair,
+        kid: 'rotated-key',
+      }
+    );
+
+    await expect(
+      pollDeviceAuthorization({
+        metadata: rotationMetadata,
+        clientId: 'masumi-spacetime-cli',
+        deviceCode: 'device-xyz',
+      })
+    ).resolves.toMatchObject({ kind: 'success' });
+    expect(
+      fetchMock.mock.calls.filter(([input]) => {
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        return url === rotationMetadata.jwks_uri;
+      })
+    ).toHaveLength(2);
+  });
 });
 
 describe('waitForDeviceAuthorization', () => {
@@ -320,27 +548,23 @@ describe('waitForDeviceAuthorization', () => {
   });
 
   it('keeps polling through pending and slow_down until it receives tokens', async () => {
-    global.fetch = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse(400, { error: 'authorization_pending' })
-      )
-      .mockResolvedValueOnce(jsonResponse(400, { error: 'slow_down' }))
-      .mockResolvedValueOnce(
-        jsonResponse(200, {
-          access_token: 'access-token',
-          refresh_token: 'refresh-token',
-          scope: 'openid profile email offline_access inbox-agents:read:preprod',
-          id_token: createTestIdToken({
-            iss: MASUMI_DEFAULT_OIDC_ISSUER,
-            sub: 'user-123',
-            aud: ['masumi-spacetime-cli'],
-            email: 'agent@example.com',
-            email_verified: true,
-            exp: Math.floor(Date.now() / 1000) + 3600,
-          }),
-        })
-      ) as typeof fetch;
+    mockOidcFetchResponses([
+      jsonResponse(400, { error: 'authorization_pending' }),
+      jsonResponse(400, { error: 'slow_down' }),
+      jsonResponse(200, {
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        scope: 'openid profile email offline_access inbox-agents:read:preprod',
+        id_token: await createSignedTestIdToken({
+          iss: MASUMI_DEFAULT_OIDC_ISSUER,
+          sub: 'user-123',
+          aud: ['masumi-spacetime-cli'],
+          email: 'agent@example.com',
+          email_verified: true,
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        }),
+      }),
+    ]);
 
     const waits: number[] = [];
     const session = await waitForDeviceAuthorization({

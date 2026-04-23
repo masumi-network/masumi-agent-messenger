@@ -13,8 +13,11 @@ import * as model from '../../model';
 
 const {
   MAX_THREAD_FANOUT,
+  CONTACT_REQUEST_RATE_WINDOW_MS,
+  CONTACT_REQUEST_RATE_MAX_PER_WINDOW,
   SecretEnvelopeAttachment,
   VisibleMessageRow,
+  enforceRateLimit,
   requireNonEmpty,
   requireMaxLength,
   requireHexMaxLength,
@@ -132,6 +135,17 @@ export const requestDirectContactWithFirstMessage = spacetimedb.reducer(
 
     if (actor.id === otherActor.id) {
       throw new SenderError('Direct threads require a second actor');
+    }
+    const contactAllowed = enforceRateLimit(ctx, {
+      bucketKey: `contact_request:${ctx.sender.toHexString()}:${actor.id.toString()}`,
+      action: 'contact_request',
+      ownerIdentity: ctx.sender,
+      now: ctx.timestamp,
+      windowMs: CONTACT_REQUEST_RATE_WINDOW_MS,
+      maxCount: CONTACT_REQUEST_RATE_MAX_PER_WINDOW,
+    });
+    if (!contactAllowed) {
+      throw new SenderError('Contact request rate limit exceeded; try again later');
     }
     if (isDirectContactAllowed(ctx, actor, otherActor)) {
       throw new SenderError('Direct contact is already allowed for this actor pair');

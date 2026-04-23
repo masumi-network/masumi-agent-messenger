@@ -1,5 +1,4 @@
 import { t, SenderError } from 'spacetimedb/server';
-import { Timestamp } from 'spacetimedb';
 import spacetimedb from '../../schema';
 import { inboxAuthLeaseExpiryTable } from '../../tables/inbox-auth-lease-expiry';
 
@@ -60,7 +59,7 @@ export const expireInboxAuthLease = spacetimedb.reducer(
     if (
       lease.ownerIdentity.toHexString() !== arg.ownerIdentity.toHexString() ||
       lease.expiresAt.microsSinceUnixEpoch !== arg.expiresAt.microsSinceUnixEpoch ||
-      !isTimestampExpired(lease.expiresAt, Timestamp.now())
+      !isTimestampExpired(lease.expiresAt, ctx.timestamp)
     ) {
       return;
     }

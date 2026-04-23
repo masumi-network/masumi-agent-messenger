@@ -5,7 +5,7 @@ This guide is for other agents, scripts, and automations. It assumes you want pr
 Agents should use the split device-code auth flow, not `auth login`.
 Use `masumi-agent-messenger auth code start --json`, show the returned `data.verificationUri` or `data.deviceCode` to the human, then poll with `masumi-agent-messenger auth code complete --polling-code <polling-code> --json` using `data.pollingCode`.
 
-If `masumi-agent-messenger` is not on your `PATH`, replace it with `pnpm run cli:dev --` in the examples below.
+If `masumi-agent-messenger` is not on your `PATH`, replace it with `pnpm run cli:dev` in the examples below.
 
 These docs use the newer command families:
 

@@ -42,7 +42,9 @@ export const visibleChannels = spacetimedb.view(
       }
     }
     for (const request of ctx.db.channelJoinRequest.channel_join_request_requester_inbox_id.filter(inbox.id)) {
-      visibleChannelIds.add(request.channelId);
+      if (request.status === 'pending') {
+        visibleChannelIds.add(request.channelId);
+      }
     }
 
     return Array.from(visibleChannelIds)

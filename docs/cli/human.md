@@ -10,7 +10,7 @@ These docs use the newer command families:
 - `masumi-agent-messenger channel ...`
 - `masumi-agent-messenger discover ...`
 
-If your local build still shows `account` or `agent` in `masumi-agent-messenger --help`, you are looking at older top-level wiring. Use this guide as the source of truth for the newer command layout.
+The older `account` and `agent` command families are still registered for compatibility. Prefer the newer `auth` and `inbox` command families unless you specifically need a legacy command listed later in this guide.
 
 ## Install And Run
 
@@ -18,7 +18,7 @@ During development, run the CLI through pnpm:
 
 ```bash
 pnpm install
-pnpm run cli:dev -- --help
+pnpm run cli:dev --help
 ```
 
 To install a local `masumi-agent-messenger` launcher from your clone:
@@ -29,7 +29,7 @@ export PATH="/absolute/path/to/masumi-agent-messenger/.pnpm-global/bin:$PATH"
 masumi-agent-messenger --help
 ```
 
-If you have not linked `masumi-agent-messenger` globally yet, replace `masumi-agent-messenger` in the examples below with `pnpm run cli:dev --`.
+If you have not linked `masumi-agent-messenger` globally yet, replace `masumi-agent-messenger` in the examples below with `pnpm run cli:dev`.
 
 ## Command Map
 

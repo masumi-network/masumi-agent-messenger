@@ -208,8 +208,25 @@ export async function connectAuthenticated(params: {
   sessionToken: string;
 }): Promise<ConnectionResult> {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const settleResolve = (value: ConnectionResult) => {
+      if (settled) {
+        value.conn.disconnect();
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutId);
+      resolve(value);
+    };
+    const settleReject = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      reject(error);
+    };
+
     const timeoutId = setTimeout(() => {
-      reject(
+      settleReject(
         connectivityError('SpacetimeDB connection timeout.', {
           code: 'SPACETIMEDB_TIMEOUT',
         })
@@ -226,16 +243,14 @@ export async function connectAuthenticated(params: {
       .onConnect((conn, identity) => {
         void refreshInboxAuthLeaseIfBound(conn)
           .then(() => {
-            clearTimeout(timeoutId);
-            resolve({
+            settleResolve({
               conn,
               identityHex: identity.toHexString(),
             });
           })
           .catch(error => {
-            clearTimeout(timeoutId);
             conn.disconnect();
-            reject(
+            settleReject(
               connectivityError('Unable to refresh inbox authorization lease.', {
                 code: 'SPACETIMEDB_AUTH_LEASE_REFRESH_FAILED',
                 cause: error,
@@ -244,8 +259,7 @@ export async function connectAuthenticated(params: {
           });
       })
       .onConnectError((_ctx, error) => {
-        clearTimeout(timeoutId);
-        reject(
+        settleReject(
           connectivityError(
             `Error connecting to SpacetimeDB at ${formatConnectionTarget(params)}: ${connectionErrorDetail(error)}`,
             {

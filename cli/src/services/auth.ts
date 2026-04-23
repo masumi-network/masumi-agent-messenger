@@ -12,11 +12,13 @@ import {
   decodeIdTokenClaims,
   discoverOidcMetadata,
   getOidcScope,
+  isStoredOidcSession,
   type OidcDebugLogger,
   requestVerificationEmail,
   refreshStoredSession,
   requestDeviceAuthorization,
   sessionNeedsRefresh,
+  validateOidcIdToken,
   waitForDeviceAuthorization,
   type DeviceAuthorizationChallenge,
   type IdTokenClaims,
@@ -238,6 +240,22 @@ function isAuthRequiredError(error: unknown): boolean {
     'code' in error &&
     (error as { code?: string }).code === 'AUTH_REQUIRED'
   );
+}
+
+function isOidcIdTokenError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    typeof (error as { code?: unknown }).code === 'string' &&
+    (error as { code: string }).code.startsWith('OIDC_ID_TOKEN_')
+  );
+}
+
+function invalidLocalSessionError(cause?: unknown) {
+  return userError('Local OIDC session is invalid. Run `masumi-agent-messenger auth login` again.', {
+    code: 'AUTH_REQUIRED',
+    cause,
+  });
 }
 
 async function persistAuthenticatedProfile(
@@ -539,20 +557,50 @@ export async function ensureAuthenticatedSession(params: {
 }): Promise<AuthSessionContext> {
   const profile = await loadProfile(params.profileName);
   const secretStore = params.secretStore ?? defaultSecretStore();
-  const storedSession = await secretStore.getOidcSession(profile.name);
+  let storedSession: StoredOidcSession | null;
+  try {
+    storedSession = await secretStore.getOidcSession(profile.name);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      await secretStore.deleteOidcSession(profile.name);
+      throw invalidLocalSessionError(error);
+    }
+    throw error;
+  }
 
   if (!storedSession) {
     throw userError('No local OIDC session found. Run `masumi-agent-messenger auth login` first.', {
       code: 'AUTH_REQUIRED',
     });
   }
+  if (!isStoredOidcSession(storedSession)) {
+    await secretStore.deleteOidcSession(profile.name);
+    throw invalidLocalSessionError();
+  }
 
   let session = storedSession;
-  let claims = decodeIdTokenClaims(session.idToken);
+  let claims: IdTokenClaims;
+  let metadata: OidcMetadata;
+  try {
+    metadata = await discoverOidcMetadata(profile.issuer);
+    claims = await validateOidcIdToken(session.idToken, metadata, {
+      clientId: profile.clientId,
+      allowExpired: true,
+    });
+  } catch (error) {
+    if (isOidcIdTokenError(error)) {
+      await secretStore.deleteOidcSession(profile.name);
+      throw invalidLocalSessionError(error);
+    }
+    throw error;
+  }
+  session = {
+    ...session,
+    expiresAt: claims.expiresAt,
+  };
 
   if (sessionNeedsRefresh(session)) {
     params.reporter?.info('Refreshing OIDC session');
-    const metadata = await discoverOidcMetadata(profile.issuer);
     let refreshed: StoredOidcSession | null;
     try {
       refreshed = await refreshStoredSession({
@@ -576,7 +624,15 @@ export async function ensureAuthenticatedSession(params: {
 
     await secretStore.setOidcSession(profile.name, refreshed);
     session = refreshed;
-    claims = decodeIdTokenClaims(session.idToken);
+    try {
+      claims = decodeIdTokenClaims(session.idToken);
+    } catch (error) {
+      if (isOidcIdTokenError(error)) {
+        await secretStore.deleteOidcSession(profile.name);
+        throw invalidLocalSessionError(error);
+      }
+      throw error;
+    }
     await persistAuthenticatedProfile(profile.name, profile, session);
     params.reporter?.success('OIDC session refreshed');
   }

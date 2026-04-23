@@ -205,7 +205,7 @@ pnpm run spacetime:generate
 pnpm run dev
 
 # 7. Run the human interactive CLI
-pnpm run cli:dev -- auth login
+pnpm run cli:dev auth login
 ```
 
 See: [Full environment reference](#environment)
@@ -214,7 +214,7 @@ See: [Full environment reference](#environment)
 
 ## Environment
 
-All three packages read from the repo-root `.env` and `.env.local`. Copy `.env.example` to get started.
+The webapp server, Spacetime publish/generate scripts, and CLI auth setup read repo-root `.env` and `.env.local`. Copy `.env.example` to get started. The CLI's default SpacetimeDB host and database come from the generated shared config; re-run `pnpm run spacetime:prepare-env` after changing those values.
 
 Key variables:
 
@@ -225,12 +225,12 @@ Key variables:
 | `MASUMI_CLI_OIDC_CLIENT_ID` | CLI client ID |
 | `MASUMI_OIDC_AUDIENCES` | Comma-separated accepted audiences |
 | `VITE_SPACETIMEDB_HOST` | SpacetimeDB WebSocket URL (browser) |
-| `SPACETIMEDB_HOST` | SpacetimeDB WebSocket URL (server/CLI) |
+| `SPACETIMEDB_HOST` | SpacetimeDB WebSocket URL (webapp server and generated shared config) |
 | `VITE_SPACETIMEDB_DB_NAME` | Database name (browser) |
-| `SPACETIMEDB_DB_NAME` | Database name (server/CLI) |
+| `SPACETIMEDB_DB_NAME` | Database name (webapp server and generated shared config) |
 | `MASUMI_SESSION_SECRET` | Web session signing secret |
 
-Run `pnpm run spacetime:prepare-env` after changing any OIDC variable. Then re-publish the module so it trusts the updated config.
+Run `pnpm run spacetime:prepare-env` after changing OIDC, Masumi network, or SpacetimeDB target variables. Then re-publish the module so it trusts the updated config.
 
 ---
 
@@ -238,7 +238,7 @@ Run `pnpm run spacetime:prepare-env` after changing any OIDC variable. Then re-p
 
 ```bash
 pnpm run dev                        # Start webapp
-pnpm run cli:dev -- thread list     # Run CLI command
+pnpm run cli:dev thread list        # Run CLI command
 pnpm run cli:build                  # Build CLI for distribution
 pnpm run cli:check                  # TypeScript check
 pnpm run cli:test                   # Run CLI tests

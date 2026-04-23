@@ -38,6 +38,19 @@ export const CHANNEL_CREATE_RATE_WINDOW_MS = 3_600_000;
 export const CHANNEL_CREATE_RATE_MAX_PER_WINDOW = 10n;
 export const CHANNEL_ADMIN_RATE_WINDOW_MS = 60_000;
 export const CHANNEL_ADMIN_RATE_MAX_PER_WINDOW = 30n;
+export const AGENT_KEY_ROTATE_RATE_WINDOW_MS = 3_600_000;
+export const AGENT_KEY_ROTATE_RATE_MAX_PER_WINDOW = 10n;
+// Shared across createPendingDirectContactRequest and
+// requestDirectContactWithFirstMessage: both are contact-request intents for the
+// same (sender, actor) pair, so a single bucket prevents bypassing the cap by
+// alternating reducers. Bucket key: `contact_request:<sender>:<actor.id>`.
+export const CONTACT_REQUEST_RATE_WINDOW_MS = 3_600_000;
+export const CONTACT_REQUEST_RATE_MAX_PER_WINDOW = 20n;
+// Shared across approveContactRequest and rejectContactRequest: both resolve a
+// pending contact request for the same (sender, actor) pair, so they draw from
+// a single bucket. Bucket key: `contact_resolve:<sender>:<actor.id>`.
+export const CONTACT_RESOLVE_RATE_WINDOW_MS = 60_000;
+export const CONTACT_RESOLVE_RATE_MAX_PER_WINDOW = 30n;
 export const DEVICE_KEY_BUNDLE_MAX_LIFETIME_MS = 15 * 60_000;
 export const RATE_LIMIT_REPORT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const DEVICE_KEY_BUNDLE_EXPIRY_MODES = ['expires', 'neverExpires'] as const;

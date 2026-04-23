@@ -6,6 +6,20 @@ import {
 } from '../../../shared/key-backup';
 import type { DeviceKeyShareSnapshot } from '../../../shared/device-sharing';
 
+function publicKey(label: string): string {
+  return JSON.stringify({ kty: 'EC', crv: 'P-256', x: `x-${label}`, y: `y-${label}` });
+}
+
+function privateKey(label: string): string {
+  return JSON.stringify({
+    kty: 'EC',
+    crv: 'P-256',
+    x: `x-${label}`,
+    y: `y-${label}`,
+    d: `d-${label}`,
+  });
+}
+
 function createSnapshot(): DeviceKeyShareSnapshot {
   return {
     version: 1,
@@ -19,14 +33,14 @@ function createSnapshot(): DeviceKeyShareSnapshot {
         },
         current: {
           encryption: {
-            publicKey: 'enc-pub-current',
-            privateKey: 'enc-priv-current',
+            publicKey: publicKey('enc-current'),
+            privateKey: privateKey('enc-current'),
             keyVersion: 'enc-v2',
             algorithm: 'ecdh-p256-v1',
           },
           signing: {
-            publicKey: 'sig-pub-current',
-            privateKey: 'sig-priv-current',
+            publicKey: publicKey('sig-current'),
+            privateKey: privateKey('sig-current'),
             keyVersion: 'sig-v2',
             algorithm: 'ecdsa-p256-sha256-v1',
           },
@@ -34,14 +48,14 @@ function createSnapshot(): DeviceKeyShareSnapshot {
         archived: [
           {
             encryption: {
-              publicKey: 'enc-pub-archived',
-              privateKey: 'enc-priv-archived',
+              publicKey: publicKey('enc-archived'),
+              privateKey: privateKey('enc-archived'),
               keyVersion: 'enc-v1',
               algorithm: 'ecdh-p256-v1',
             },
             signing: {
-              publicKey: 'sig-pub-archived',
-              privateKey: 'sig-priv-archived',
+              publicKey: publicKey('sig-archived'),
+              privateKey: privateKey('sig-archived'),
               keyVersion: 'sig-v1',
               algorithm: 'ecdsa-p256-sha256-v1',
             },
@@ -56,14 +70,14 @@ function createSnapshot(): DeviceKeyShareSnapshot {
         },
         current: {
           encryption: {
-            publicKey: 'support-enc-pub',
-            privateKey: 'support-enc-priv',
+            publicKey: publicKey('support-enc'),
+            privateKey: privateKey('support-enc'),
             keyVersion: 'enc-v1',
             algorithm: 'ecdh-p256-v1',
           },
           signing: {
-            publicKey: 'support-sig-pub',
-            privateKey: 'support-sig-priv',
+            publicKey: publicKey('support-sig'),
+            privateKey: privateKey('support-sig'),
             keyVersion: 'sig-v1',
             algorithm: 'ecdsa-p256-sha256-v1',
           },

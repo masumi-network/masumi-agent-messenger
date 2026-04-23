@@ -8,8 +8,11 @@ const {
   MAX_THREAD_FANOUT,
   DEFAULT_AGENT_ENCRYPTION_ALGORITHM,
   DEFAULT_AGENT_SIGNING_ALGORITHM,
+  AGENT_KEY_ROTATE_RATE_WINDOW_MS,
+  AGENT_KEY_ROTATE_RATE_MAX_PER_WINDOW,
   DeviceKeyBundleAttachment,
   VisibleAgentKeyBundleRow,
+  enforceRateLimit,
   requireNonEmpty,
   normalizePublicKey,
   normalizeDeviceId,
@@ -72,6 +75,17 @@ export const rotateAgentKeys = spacetimedb.reducer(
 
     const { actor, inbox } = getOwnedActorWithInbox(ctx, agentDbId);
     refreshInboxAuthLeaseForInbox(ctx, inbox);
+    const rotateAllowed = enforceRateLimit(ctx, {
+      bucketKey: `agent_key_rotate:${ctx.sender.toHexString()}:${actor.id.toString()}`,
+      action: 'agent_key_rotate',
+      ownerIdentity: ctx.sender,
+      now: ctx.timestamp,
+      windowMs: AGENT_KEY_ROTATE_RATE_WINDOW_MS,
+      maxCount: AGENT_KEY_ROTATE_RATE_MAX_PER_WINDOW,
+    });
+    if (!rotateAllowed) {
+      throw new SenderError('Agent key rotation rate limit exceeded; try again later');
+    }
     const normalizedEncryptionKey = normalizePublicKey(
       encryptionPublicKey,
       'encryptionPublicKey'

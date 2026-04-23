@@ -56,6 +56,8 @@ describe('security helpers', () => {
     expect(sanitizeReturnTo('/safe/path')).toBe('/safe/path');
     expect(sanitizeReturnTo('https://evil.example/steal')).toBe('/');
     expect(sanitizeReturnTo('//evil.example')).toBe('/');
+    expect(sanitizeReturnTo('/\\evil.example/steal')).toBe('/');
+    expect(sanitizeReturnTo('/safe\nSet-Cookie:evil')).toBe('/');
     expect(sanitizeReturnTo('javascript:alert(1)')).toBe('/');
     expect(sanitizeReturnTo(null)).toBe('/');
   });

@@ -110,6 +110,7 @@ type PaginatedInboxAgentParams = {
   filterStatuses?: MasumiRegistryInboxAgentStatus[];
   agentSlug?: string;
   includeDeregistered?: boolean;
+  reporter?: TaskReporter;
 };
 
 function discoveryStatuses(params: {
@@ -294,6 +295,7 @@ async function refreshPendingMasumiInboxAgentEntries(params: {
   issuer: string;
   session: StoredOidcSession;
   entries: MasumiInboxAgentEntry[];
+  reporter?: TaskReporter;
 }): Promise<MasumiInboxAgentEntry[]> {
   return Promise.all(
     params.entries.map(async entry => {
@@ -321,7 +323,12 @@ async function refreshPendingMasumiInboxAgentEntries(params: {
             slug,
           }) ?? entry
         );
-      } catch {
+      } catch (error) {
+        params.reporter?.verbose?.(
+          `Failed to refresh pending Masumi inbox agent entry for ${slug}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
         return entry;
       }
     })
@@ -338,6 +345,7 @@ async function fetchMasumiInboxAgentRegistrations(
       issuer: params.issuer,
       session: params.session,
       entries: result.agents,
+      reporter: params.reporter,
     }),
   };
 }

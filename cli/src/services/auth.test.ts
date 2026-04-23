@@ -1,8 +1,9 @@
+import { webcrypto } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MASUMI_DEFAULT_OIDC_ISSUER } from '../../../shared/masumi-default-oidc-issuer';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_OIDC_ISSUER as MASUMI_DEFAULT_OIDC_ISSUER } from './env';
 
 vi.mock('./inbox-bootstrap', () => ({
   bootstrapAuthenticatedInbox: vi.fn(async (params: { profile: { name: string } }) => ({
@@ -35,8 +36,12 @@ import {
 } from './auth';
 import type { SecretStore } from './secret-store';
 
-function base64UrlEncode(value: string): string {
-  return Buffer.from(value, 'utf8')
+let testSigningKeyPair: CryptoKeyPair;
+let testPublicJwk: JsonWebKey & { alg: 'RS256'; kid: 'test-key'; use: 'sig' };
+
+function base64UrlEncode(value: string | Uint8Array): string {
+  const buffer = typeof value === 'string' ? Buffer.from(value, 'utf8') : Buffer.from(value);
+  return buffer
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
@@ -51,6 +56,20 @@ function createTestIdToken(payload: Record<string, unknown>): string {
   ].join('.');
 }
 
+async function createSignedTestIdToken(payload: Record<string, unknown>): Promise<string> {
+  const encodedHeader = base64UrlEncode(
+    JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'test-key' })
+  );
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const signature = await webcrypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    testSigningKeyPair.privateKey,
+    new TextEncoder().encode(signingInput)
+  );
+  return `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`;
+}
+
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -58,6 +77,38 @@ function jsonResponse(status: number, body: unknown): Response {
       'Content-Type': 'application/json',
     },
   });
+}
+
+function fetchInputUrl(input: string | URL | Request): string {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.toString();
+  return input.url;
+}
+
+function mockAuthIssuerFetch(params: {
+  tokenResponse?: Response;
+} = {}): void {
+  const discoveryUrl = `${MASUMI_DEFAULT_OIDC_ISSUER}/.well-known/openid-configuration`;
+  const tokenEndpoint = `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`;
+  const jwksUri = `${MASUMI_DEFAULT_OIDC_ISSUER}/.well-known/jwks.json`;
+  global.fetch = vi.fn(async input => {
+    const url = fetchInputUrl(input);
+    if (url === discoveryUrl) {
+      return jsonResponse(200, {
+        issuer: MASUMI_DEFAULT_OIDC_ISSUER,
+        authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
+        token_endpoint: tokenEndpoint,
+        jwks_uri: jwksUri,
+      });
+    }
+    if (url === jwksUri) {
+      return jsonResponse(200, { keys: [testPublicJwk] });
+    }
+    if (url === tokenEndpoint && params.tokenResponse) {
+      return params.tokenResponse;
+    }
+    throw new Error(`Unexpected auth issuer request to ${url}`);
+  }) as typeof fetch;
 }
 
 function createReporter() {
@@ -83,6 +134,28 @@ function createSecretStoreStub(): SecretStore {
     deleteNamespaceKeyVault: vi.fn(async () => true),
   };
 }
+
+beforeAll(async () => {
+  testSigningKeyPair = await webcrypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['sign', 'verify']
+  );
+  testPublicJwk = {
+    ...((await webcrypto.subtle.exportKey(
+      'jwk',
+      testSigningKeyPair.publicKey
+    )) as JsonWebKey),
+    alg: 'RS256',
+    kid: 'test-key',
+    use: 'sig',
+  };
+});
 
 describe('auth service', () => {
   let tempDir: string;
@@ -115,6 +188,7 @@ describe('auth service', () => {
           issuer: MASUMI_DEFAULT_OIDC_ISSUER,
           authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
           token_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
+          jwks_uri: `${MASUMI_DEFAULT_OIDC_ISSUER}/.well-known/jwks.json`,
         })
       )
       .mockResolvedValueOnce(
@@ -161,6 +235,7 @@ describe('auth service', () => {
           issuer,
           authorization_endpoint: `${issuer}/api/auth/oauth2/authorize`,
           token_endpoint: `${issuer}/api/auth/oauth2/token`,
+          jwks_uri: `${issuer}/.well-known/jwks.json`,
         })
       )
       .mockResolvedValueOnce(
@@ -194,6 +269,7 @@ describe('auth service', () => {
           issuer: MASUMI_DEFAULT_OIDC_ISSUER,
           authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
           token_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
+          jwks_uri: `${MASUMI_DEFAULT_OIDC_ISSUER}/.well-known/jwks.json`,
           device_authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/device/code`,
         })
       )
@@ -235,6 +311,7 @@ describe('auth service', () => {
           issuer: MASUMI_DEFAULT_OIDC_ISSUER,
           authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
           token_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
+          jwks_uri: `${MASUMI_DEFAULT_OIDC_ISSUER}/.well-known/jwks.json`,
         })
       )
       .mockResolvedValueOnce(
@@ -278,6 +355,7 @@ describe('auth service', () => {
           issuer: MASUMI_DEFAULT_OIDC_ISSUER,
           authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
           token_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
+          jwks_uri: `${MASUMI_DEFAULT_OIDC_ISSUER}/.well-known/jwks.json`,
         })
       )
       .mockResolvedValueOnce(
@@ -296,7 +374,7 @@ describe('auth service', () => {
           access_token: 'access-token',
           refresh_token: 'refresh-token',
           scope: 'openid profile email offline_access inbox-agents:read:preprod',
-          id_token: createTestIdToken({
+          id_token: await createSignedTestIdToken({
             iss: MASUMI_DEFAULT_OIDC_ISSUER,
             sub: 'user-123',
             aud: ['masumi-spacetime-cli'],
@@ -305,7 +383,8 @@ describe('auth service', () => {
             exp: Math.floor(Date.now() / 1000) + 3600,
           }),
         })
-      ) as typeof fetch;
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { keys: [testPublicJwk] })) as typeof fetch;
 
     const calls: string[] = [];
     const reporter = createReporter();
@@ -348,6 +427,7 @@ describe('auth service', () => {
           issuer: MASUMI_DEFAULT_OIDC_ISSUER,
           authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
           token_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
+          jwks_uri: `${MASUMI_DEFAULT_OIDC_ISSUER}/.well-known/jwks.json`,
         })
       )
       .mockResolvedValueOnce(
@@ -355,7 +435,7 @@ describe('auth service', () => {
           access_token: 'access-token',
           refresh_token: 'refresh-token',
           scope: 'openid profile email offline_access inbox-agents:write:mainnet',
-          id_token: createTestIdToken({
+          id_token: await createSignedTestIdToken({
             iss: MASUMI_DEFAULT_OIDC_ISSUER,
             sub: 'user-123',
             aud: ['masumi-spacetime-cli'],
@@ -364,7 +444,8 @@ describe('auth service', () => {
             exp: Math.floor(Date.now() / 1000) + 3600,
           }),
         })
-      ) as typeof fetch;
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { keys: [testPublicJwk] })) as typeof fetch;
 
     const reporter = createReporter();
     const secretStore = createSecretStoreStub();
@@ -395,7 +476,7 @@ describe('auth service', () => {
 
   it('clears the local session and requests re-login when the refresh token is invalid', async () => {
     const expiringSession = {
-      idToken: createTestIdToken({
+      idToken: await createSignedTestIdToken({
         iss: MASUMI_DEFAULT_OIDC_ISSUER,
         sub: 'user-123',
         aud: ['masumi-spacetime-cli'],
@@ -410,21 +491,12 @@ describe('auth service', () => {
       createdAt: Date.now() - 60_000,
     };
 
-    global.fetch = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse(200, {
-          issuer: MASUMI_DEFAULT_OIDC_ISSUER,
-          authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
-          token_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
-        })
-      )
-      .mockResolvedValueOnce(
-        jsonResponse(400, {
-          error: 'invalid_grant',
-          error_description: 'invalid refresh token',
-        })
-      ) as typeof fetch;
+    mockAuthIssuerFetch({
+      tokenResponse: jsonResponse(400, {
+        error: 'invalid_grant',
+        error_description: 'invalid refresh token',
+      }),
+    });
 
     const reporter = createReporter();
     const secretStore = createSecretStoreStub();
@@ -444,9 +516,120 @@ describe('auth service', () => {
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
   });
 
+  it('clears a persisted unsigned id_token and requests re-login', async () => {
+    const storedSession = {
+      idToken: createTestIdToken({
+        iss: MASUMI_DEFAULT_OIDC_ISSUER,
+        sub: 'user-123',
+        aud: ['masumi-spacetime-cli'],
+        email: 'agent@example.com',
+        email_verified: true,
+        exp: Math.floor((Date.now() + 3_600_000) / 1000),
+      }),
+      refreshToken: 'refresh-token',
+      accessToken: 'access-token',
+      grantedScopes: ['openid', 'profile', 'email', 'offline_access'],
+      expiresAt: Date.now() + 3_600_000,
+      createdAt: Date.now() - 60_000,
+    };
+
+    mockAuthIssuerFetch();
+
+    const reporter = createReporter();
+    const secretStore = createSecretStoreStub();
+    vi.mocked(secretStore.getOidcSession).mockResolvedValueOnce(storedSession);
+
+    await expect(
+      ensureAuthenticatedSession({
+        profileName: 'default',
+        reporter,
+        secretStore,
+      })
+    ).rejects.toMatchObject({
+      code: 'AUTH_REQUIRED',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger auth login` again.',
+    });
+
+    expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
+  });
+
+  it('clears a malformed local session and requests re-login', async () => {
+    const reporter = createReporter();
+    const secretStore = createSecretStoreStub();
+    vi.mocked(secretStore.getOidcSession).mockResolvedValueOnce({
+      refreshToken: 'refresh-token',
+      accessToken: 'access-token',
+      grantedScopes: ['openid'],
+      expiresAt: Date.now() + 60_000,
+      createdAt: Date.now() - 60_000,
+    } as unknown as Awaited<ReturnType<SecretStore['getOidcSession']>>);
+
+    await expect(
+      ensureAuthenticatedSession({
+        profileName: 'default',
+        reporter,
+        secretStore,
+      })
+    ).rejects.toMatchObject({
+      code: 'AUTH_REQUIRED',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger auth login` again.',
+    });
+
+    expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
+  });
+
+  it('clears an unreadable local session entry and requests re-login', async () => {
+    const reporter = createReporter();
+    const secretStore = createSecretStoreStub();
+    vi.mocked(secretStore.getOidcSession).mockRejectedValueOnce(new SyntaxError('bad JSON'));
+
+    await expect(
+      ensureAuthenticatedSession({
+        profileName: 'default',
+        reporter,
+        secretStore,
+      })
+    ).rejects.toMatchObject({
+      code: 'AUTH_REQUIRED',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger auth login` again.',
+    });
+
+    expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
+  });
+
+  it('treats a malformed local session as signed out in auth status', async () => {
+    const reporter = createReporter();
+    const secretStore = createSecretStoreStub();
+    vi.mocked(secretStore.getOidcSession).mockResolvedValueOnce({
+      idToken: 42,
+      refreshToken: 'refresh-token',
+      accessToken: 'access-token',
+      grantedScopes: ['openid'],
+      expiresAt: Date.now() + 60_000,
+      createdAt: Date.now() - 60_000,
+    } as unknown as Awaited<ReturnType<SecretStore['getOidcSession']>>);
+
+    const result = await authStatus({
+      profileName: 'default',
+      reporter,
+      secretStore,
+    });
+
+    expect(result).toMatchObject({
+      authenticated: false,
+      profile: 'default',
+      expiresAt: null,
+      email: null,
+      subject: null,
+      issuer: null,
+      grantedScopes: [],
+    });
+    expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
+  });
+
   it('treats an invalid refresh token as signed out in auth status', async () => {
     const expiringSession = {
-      idToken: createTestIdToken({
+      idToken: await createSignedTestIdToken({
         iss: MASUMI_DEFAULT_OIDC_ISSUER,
         sub: 'user-123',
         aud: ['masumi-spacetime-cli'],
@@ -461,21 +644,12 @@ describe('auth service', () => {
       createdAt: Date.now() - 60_000,
     };
 
-    global.fetch = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse(200, {
-          issuer: MASUMI_DEFAULT_OIDC_ISSUER,
-          authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
-          token_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
-        })
-      )
-      .mockResolvedValueOnce(
-        jsonResponse(400, {
-          error: 'invalid_grant',
-          error_description: 'invalid refresh token',
-        })
-      ) as typeof fetch;
+    mockAuthIssuerFetch({
+      tokenResponse: jsonResponse(400, {
+        error: 'invalid_grant',
+        error_description: 'invalid refresh token',
+      }),
+    });
 
     const reporter = createReporter();
     const secretStore = createSecretStoreStub();
