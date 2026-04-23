@@ -1110,8 +1110,6 @@ export async function deregisterMasumiInboxAgentRegistration(params: {
   const accessToken = hasMasumiAccessToken(params.session)
     ? params.session.accessToken.trim()
     : null;
-  let currentMetadata = readActorRegistrationMetadata(params.actor);
-
   if (!accessToken) {
     throw userError(
       toScopeMessage(
@@ -1130,7 +1128,7 @@ export async function deregisterMasumiInboxAgentRegistration(params: {
     accessToken,
     slug: params.actor.slug,
   });
-  currentMetadata = discovered ? registrationMetadataFromEntry(discovered) : null;
+  let currentMetadata = discovered ? registrationMetadataFromEntry(discovered) : null;
 
   if (!isDeregisterableRegistrationMetadata(currentMetadata)) {
     const state = currentMetadata?.masumiRegistrationState ?? 'not registered';
