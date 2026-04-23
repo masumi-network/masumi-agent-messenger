@@ -222,10 +222,13 @@ export function selectUnreadIncomingMessages(
     });
   }
 
-  const inboxOwnActorIds = new Set(
-    snapshot.actors
-      .filter(actor => actor.inboxId === recipientActor.inboxId)
-      .map(actor => actor.id)
+  const selectedActorIds = new Set([recipientActor.id]);
+  const recipientThreadIds = new Set(
+    snapshot.participants
+      .filter(participant => {
+        return participant.agentDbId === recipientActor.id && participant.active;
+      })
+      .map(participant => participant.threadId)
   );
   const archivedThreadIds = new Set(
     snapshot.readStates
@@ -241,8 +244,9 @@ export function selectUnreadIncomingMessages(
   }
 
   const unreadMessages = snapshot.messages
+    .filter(message => recipientThreadIds.has(message.threadId))
     .filter(message => !archivedThreadIds.has(message.threadId))
-    .filter(message => !inboxOwnActorIds.has(message.senderAgentDbId))
+    .filter(message => message.senderAgentDbId !== recipientActor.id)
     .filter(message => message.threadSeq > (lastReadByThreadId.get(message.threadId) ?? 0n))
     .sort((left, right) => {
       if (left.createdAt.microsSinceUnixEpoch < right.createdAt.microsSinceUnixEpoch) return 1;
@@ -252,7 +256,7 @@ export function selectUnreadIncomingMessages(
 
   return {
     defaultActor: recipientActor,
-    ownActorIds: inboxOwnActorIds,
+    ownActorIds: selectedActorIds,
     unreadMessages,
   };
 }
