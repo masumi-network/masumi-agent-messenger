@@ -94,6 +94,22 @@ Successful commands return a JSON object. Failures return:
 
 **Always branch on `code`, never parse human-formatted text.**
 
+### Common Error Codes
+
+| Code | Meaning | Agent Action |
+|---|---|---|
+| `KEYCHAIN_SET_FAILED` | Could not write secret to OS keyring | Set `MASUMI_FORCE_FILE_BACKEND=1` and retry |
+| `KEYCHAIN_GET_FAILED` | Could not read secret from OS keyring | Check `doctor --verbose`; use file backend if needed |
+| `AUTH_LOGIN_INTERACTIVE_REQUIRED` | Tried `auth login` in non-interactive shell | Use `auth code start` + `auth code complete` instead |
+| `OIDC_DEVICE_POLL_FAILED` | Device code expired or was denied | Start a new `auth code start` flow |
+| `LOCAL_SECRET_STORE_BUSY` | File-based secret store locked by another process | Wait and retry |
+| `LOCAL_SECRET_STORE_INVALID` | `secrets.json` corrupted | Back up and remove the file, then re-authenticate |
+| `AUTH_LOGOUT_CANCELLED` | Logout requires `--yes` in non-JSON mode | Use `--yes` or `--json` |
+| `DEREGISTRATION_CANCELLED` | Deregister requires `--yes` in non-JSON mode | Use `--yes` or `--json` |
+| `BACKUP_PASSPHRASE_REQUIRED` | Missing passphrase for backup export/import | Provide `--passphrase` or `--passphrase-file` |
+| `BACKUP_PASSPHRASE_MISMATCH` | Passphrase confirmation did not match | Retry with matching passphrases |
+| `CONNECTIVITY_ERROR` | WebSocket or HTTP connection failed | Check network, retry later |
+
 ---
 
 ## Quick Start — Five Essential Operations
@@ -234,6 +250,48 @@ masumi-agent-messenger auth status --json
 masumi-agent-messenger inbox status --json
 masumi-agent-messenger inbox list --json
 ```
+
+---
+
+## Troubleshooting — Headless Linux / KEYCHAIN_SET_FAILED
+
+On headless Linux (servers, containers, remote VMs), `auth code complete` may fail with:
+
+```
+[fail] Unable to write secret to libsecret.
+  code: KEYCHAIN_SET_FAILED
+```
+
+**Root cause:** The CLI prefers `libsecret` / `secret-tool` when it is installed, but the Secret Service collection is locked without a desktop session. The CLI has a fallback to a local `secrets.json` file (in the CLI config directory, `0600` perms), but it only triggers when `secret-tool` is completely unavailable or returns specific known errors — not when the collection is merely locked.
+
+**Fix — force file-based fallback:**
+
+```bash
+export MASUMI_FORCE_FILE_BACKEND=1
+```
+
+Then run auth normally. This forces the CLI to use a local `secrets.json` file (in the CLI config directory, `0600` perms) instead of the system keyring. Private keys still stay local.
+
+You can also set it per-command:
+
+```bash
+MASUMI_FORCE_FILE_BACKEND=1 masumi-agent-messenger auth code complete --polling-code "$POLLING_CODE" --json
+```
+
+**Verification that file fallback is active:** After successful auth, `doctor --verbose` should show `Namespace vault: yes` and `Device key material: yes` even though libsecret was bypassed.
+
+---
+
+## Environment Variables
+
+| Variable | Purpose |
+|---|---|
+| `MASUMI_FORCE_FILE_BACKEND` | Set to `1` or `true` to force file-based secret storage instead of the OS keyring. Required for headless Linux where libsecret is installed but the collection is locked. |
+| `MASUMI_CLI_OIDC_CLIENT_ID` | Override the OIDC client ID used for the device-code flow. Defaults to `masumi-spacetime-cli`. |
+| `MASUMI_OIDC_ISSUER` | Override the OIDC issuer URL. |
+| `MASUMI_OIDC_REDIRECT_URI` | Override the OIDC redirect URI. |
+| `MASUMI_OIDC_SCOPES` | Override OIDC scopes (space-separated). |
+| `XDG_CONFIG_HOME` | Override the base directory for CLI config and the file-based secret store. |
 
 ---
 

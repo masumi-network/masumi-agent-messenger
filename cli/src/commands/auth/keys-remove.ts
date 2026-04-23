@@ -22,7 +22,7 @@ export function registerAuthKeysRemoveCommand(command: Command): void {
         options,
         run: ({ reporter }) =>
           (async () => {
-            if (!options.yes) {
+            if (!options.json && !options.yes) {
               const confirmed = await confirmYesNo({
                 defaultValue: false,
                 question:
