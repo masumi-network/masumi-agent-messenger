@@ -279,3 +279,134 @@ describe('runCommandAction prompt mode', () => {
     expect(latestState?.final?.summary).not.toContain('code: UNEXPECTED_ERROR');
   });
 });
+
+describe('runCommandAction --headless flag', () => {
+  it('uses plain output instead of Ink when --headless is set, even in TTY', async () => {
+    const restoreStdinTTY = stubIsTTY(process.stdin, true);
+    const restoreStdoutTTY = stubIsTTY(process.stdout, true);
+    const restoreStderrTTY = stubIsTTY(process.stderr, true);
+    const stdoutWrite = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const previousNoColor = process.env.NO_COLOR;
+    const previousForceColor = process.env.FORCE_COLOR;
+    const renderSpy = vi.fn((tree: MockRenderTree) => ({
+      rerender: vi.fn((_nextTree: MockRenderTree) => {}),
+      unmount: vi.fn(),
+      waitUntilExit: vi.fn(async () => {}),
+      tree,
+    }));
+
+    try {
+      vi.resetModules();
+      vi.doMock('ink', () => ({
+        render: renderSpy,
+        Box: () => null,
+        Static: () => null,
+        Text: () => null,
+        useApp: () => ({ exit: vi.fn() }),
+        useInput: vi.fn(),
+      }));
+
+      const { runCommandAction: runCommandActionWithMockedInk } = await import('./command-runtime');
+
+      await runCommandActionWithMockedInk({
+        title: 'Headless mode test',
+        options: {
+          json: false,
+          headless: true,
+          profile: 'default',
+          color: false,
+          verbose: false,
+        },
+        run: async () => 'done',
+        toHuman: () => ({
+          summary: 'Headless works.',
+          details: [],
+        }),
+      });
+    } finally {
+      if (previousNoColor === undefined) {
+        delete process.env.NO_COLOR;
+      } else {
+        process.env.NO_COLOR = previousNoColor;
+      }
+      if (previousForceColor === undefined) {
+        delete process.env.FORCE_COLOR;
+      } else {
+        process.env.FORCE_COLOR = previousForceColor;
+      }
+      restoreStderrTTY();
+      restoreStdoutTTY();
+      restoreStdinTTY();
+      vi.resetModules();
+    }
+
+    expect(renderSpy).not.toHaveBeenCalled();
+    expect(stdoutWrite).toHaveBeenCalledWith(expect.stringContaining('[done] Headless works.'));
+  });
+
+  it('still emits JSON when --json is used with --headless', async () => {
+    const restoreStdinTTY = stubIsTTY(process.stdin, true);
+    const restoreStdoutTTY = stubIsTTY(process.stdout, true);
+    const restoreStderrTTY = stubIsTTY(process.stderr, true);
+    const stdoutWrite = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const previousNoColor = process.env.NO_COLOR;
+    const previousForceColor = process.env.FORCE_COLOR;
+    const renderSpy = vi.fn((tree: MockRenderTree) => ({
+      rerender: vi.fn((_nextTree: MockRenderTree) => {}),
+      unmount: vi.fn(),
+      waitUntilExit: vi.fn(async () => {}),
+      tree,
+    }));
+
+    try {
+      vi.resetModules();
+      vi.doMock('ink', () => ({
+        render: renderSpy,
+        Box: () => null,
+        Static: () => null,
+        Text: () => null,
+        useApp: () => ({ exit: vi.fn() }),
+        useInput: vi.fn(),
+      }));
+
+      const { runCommandAction: runCommandActionWithMockedInk } = await import('./command-runtime');
+
+      await runCommandActionWithMockedInk({
+        title: 'Headless JSON test',
+        options: {
+          json: true,
+          headless: true,
+          profile: 'default',
+          color: false,
+          verbose: false,
+        },
+        run: async () => ({ value: 42 }),
+        toHuman: () => ({
+          summary: 'Should not appear.',
+          details: [],
+        }),
+      });
+    } finally {
+      if (previousNoColor === undefined) {
+        delete process.env.NO_COLOR;
+      } else {
+        process.env.NO_COLOR = previousNoColor;
+      }
+      if (previousForceColor === undefined) {
+        delete process.env.FORCE_COLOR;
+      } else {
+        process.env.FORCE_COLOR = previousForceColor;
+      }
+      restoreStderrTTY();
+      restoreStdoutTTY();
+      restoreStdinTTY();
+      vi.resetModules();
+    }
+
+    expect(renderSpy).not.toHaveBeenCalled();
+    const lastCall = stdoutWrite.mock.calls.at(-1)?.[0] as string;
+    const parsed = JSON.parse(lastCall);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data).toEqual({ value: 42 });
+  });
+});
