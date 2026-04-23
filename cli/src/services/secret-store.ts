@@ -57,7 +57,8 @@ function isLibsecretUnavailableError(error: unknown): boolean {
     message.includes('failed to execute child process "dbus-launch"') ||
     message.includes('could not connect') ||
     message.includes("couldn't connect") ||
-    message.includes('name is not activatable')
+    message.includes('name is not activatable') ||
+    message.includes('cannot create an item in a locked collection')
   );
 }
 
@@ -430,6 +431,10 @@ function createLibsecretBackend(): KeychainBackend {
 }
 
 function createDefaultBackend(): KeychainBackend {
+  if (process.env.MASUMI_FORCE_FILE_BACKEND === '1' || process.env.MASUMI_FORCE_FILE_BACKEND === 'true') {
+    return createFileBackend();
+  }
+
   if (process.platform === 'darwin') {
     return createMacOsBackend();
   }

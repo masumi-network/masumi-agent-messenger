@@ -26,6 +26,10 @@ function createMissingSecretToolError(): NodeJS.ErrnoException {
   return error;
 }
 
+function createLockedCollectionError(): Error {
+  return new Error('secret-tool: Cannot create an item in a locked collection');
+}
+
 describe('secret-store', () => {
   it('serializes and restores structured secrets through backend', async () => {
     const backend = createMemoryBackend();
@@ -152,6 +156,53 @@ describe('secret-store', () => {
     expect(libsecretValues.get('default:oidc')).toBe('fresh-session-json');
     expect(await fileBackend.get('default:oidc')).toBeNull();
     expect(await backend.get('default:oidc')).toBeNull();
+  });
+
+  it('falls back to file backend when libsecret collection is locked', async () => {
+    const fileBackend = createMemoryBackend();
+    const libsecretBackend: KeychainBackend = {
+      async get() {
+        throw createLockedCollectionError();
+      },
+      async set() {
+        throw createLockedCollectionError();
+      },
+      async delete() {
+        return false;
+      },
+    };
+    const backend = createLinuxBackend({ libsecretBackend, fileBackend });
+
+    await backend.set('default:oidc', 'session-json');
+
+    expect(await fileBackend.get('default:oidc')).toBe('session-json');
+    expect(await backend.get('default:oidc')).toBe('session-json');
+  });
+
+  it('forces file backend via MASUMI_FORCE_FILE_BACKEND env var', async () => {
+    const original = process.env.MASUMI_FORCE_FILE_BACKEND;
+    process.env.MASUMI_FORCE_FILE_BACKEND = '1';
+    try {
+      const tempDir = await mkdtemp(path.join(os.tmpdir(), 'masumi-cli-secrets-'));
+      const filePath = path.join(tempDir, 'secrets.json');
+      try {
+        // Dynamically import to pick up the env var
+        const { createSecretStore: createStore } = await import('./secret-store');
+        const store = createStore();
+        await store.setOidcSession('default', { idToken: 't', refreshToken: 'r', expiresAt: 1, createdAt: 1 });
+        const stored = await store.getOidcSession('default');
+        expect(stored).not.toBeNull();
+        expect(stored?.idToken).toBe('t');
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    } finally {
+      if (original === undefined) {
+        delete process.env.MASUMI_FORCE_FILE_BACKEND;
+      } else {
+        process.env.MASUMI_FORCE_FILE_BACKEND = original;
+      }
+    }
   });
 
   it('serializes concurrent fallback writes without losing entries', async () => {
