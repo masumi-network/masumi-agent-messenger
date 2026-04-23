@@ -431,6 +431,10 @@ function createLibsecretBackend(): KeychainBackend {
 }
 
 function createDefaultBackend(): KeychainBackend {
+  if (process.env.MASUMI_FORCE_FILE_BACKEND === '1' || process.env.MASUMI_FORCE_FILE_BACKEND === 'true') {
+    return createFileBackend();
+  }
+
   if (process.platform === 'darwin') {
     return createMacOsBackend();
   }
