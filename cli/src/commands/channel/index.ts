@@ -14,6 +14,7 @@ import {
   sendChannelMessage,
   setChannelMemberPermission,
   showPublicChannel,
+  updateChannelSettings,
 } from '../../services/channel';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
 import { userError } from '../../services/errors';
@@ -26,9 +27,11 @@ type ChannelOptions = GlobalOptions & {
   title?: string;
   description?: string;
   approvalRequired?: boolean;
+  public?: boolean;
   discoverable?: boolean;
   permission?: string;
   publicJoinPermission?: string;
+  defaultJoinPermission?: string;
   contentType?: string;
   authenticated?: boolean;
   beforeChannelSeq?: string;
@@ -55,6 +58,34 @@ function formatChannelPermission(permission: string): string {
   if (permission === 'read_write') return 'read/write';
   if (permission === 'admin') return 'admin';
   return permission;
+}
+
+function resolveAccessModeOption(options: ChannelOptions): 'public' | 'approval_required' | undefined {
+  if (options.public && options.approvalRequired) {
+    throw userError('Use either --public or --approval-required, not both.', {
+      code: 'CHANNEL_ACCESS_MODE_CONFLICT',
+    });
+  }
+  if (options.approvalRequired) return 'approval_required';
+  if (options.public) return 'public';
+  return undefined;
+}
+
+function resolvePublicJoinPermissionOption(
+  options: ChannelOptions,
+  fallback?: string
+): string | undefined {
+  if (
+    options.publicJoinPermission !== undefined &&
+    options.defaultJoinPermission !== undefined &&
+    options.publicJoinPermission !== options.defaultJoinPermission
+  ) {
+    throw userError(
+      'Use either --public-join-permission or --default-join-permission, not both.',
+      { code: 'CHANNEL_JOIN_PERMISSION_CONFLICT' }
+    );
+  }
+  return options.publicJoinPermission ?? options.defaultJoinPermission ?? fallback;
 }
 
 export function registerChannelCommands(program: Command): void {
@@ -243,10 +274,12 @@ export function registerChannelCommands(program: Command): void {
     .option('--title <title>', 'Channel title')
     .option('--description <text>', 'Channel description')
     .option('--approval-required', 'Require admin approval to join')
-    .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write', 'read')
+    .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write')
+    .option('--default-join-permission <permission>', 'Alias for --public-join-permission')
     .option('--no-discoverable', 'Hide from discovery/search surfaces')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
+      const publicJoinPermission = resolvePublicJoinPermissionOption(options, 'read');
       await runCommandAction({
         title: 'Masumi channel create',
         options,
@@ -258,7 +291,7 @@ export function registerChannelCommands(program: Command): void {
             title: options.title,
             description: options.description,
             accessMode: options.approvalRequired ? 'approval_required' : 'public',
-            publicJoinPermission: options.publicJoinPermission,
+            publicJoinPermission,
             discoverable: options.discoverable !== false,
             reporter,
           }),
@@ -277,10 +310,12 @@ export function registerChannelCommands(program: Command): void {
     .option('--title <title>', 'Channel title')
     .option('--description <text>', 'Channel description')
     .option('--approval-required', 'Require admin approval to join')
-    .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write', 'read')
+    .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write')
+    .option('--default-join-permission <permission>', 'Alias for --public-join-permission')
     .option('--no-discoverable', 'Hide from discovery/search surfaces')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
+      const publicJoinPermission = resolvePublicJoinPermissionOption(options, 'read');
       await runCommandAction({
         title: 'Masumi channel add',
         options,
@@ -292,7 +327,7 @@ export function registerChannelCommands(program: Command): void {
             title: options.title,
             description: options.description,
             accessMode: options.approvalRequired ? 'approval_required' : 'public',
-            publicJoinPermission: options.publicJoinPermission,
+            publicJoinPermission,
             discoverable: options.discoverable !== false,
             reporter,
           }),
@@ -325,6 +360,58 @@ export function registerChannelCommands(program: Command): void {
             result.permission ? ` with ${formatChannelPermission(result.permission)} access` : ''
           }.`,
           details: [],
+        }),
+      });
+    });
+
+  channel
+    .command('update')
+    .description('Update channel access and discovery settings')
+    .argument('<slug>', 'Channel slug')
+    .option('--agent <slug>', 'Admin agent slug')
+    .option('--public', 'Allow direct public joins')
+    .option('--approval-required', 'Require admin approval to join')
+    .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write')
+    .option('--default-join-permission <permission>', 'Alias for --public-join-permission')
+    .option('--discoverable', 'Show in discovery/search surfaces')
+    .option('--no-discoverable', 'Hide from discovery/search surfaces')
+    .action(async function (this: Command, slug: string) {
+      const options = this.optsWithGlobals() as ChannelOptions;
+      const accessMode = resolveAccessModeOption(options);
+      const publicJoinPermission = resolvePublicJoinPermissionOption(options);
+      if (
+        accessMode === undefined &&
+        publicJoinPermission === undefined &&
+        options.discoverable === undefined
+      ) {
+        throw userError('Pass at least one channel setting to update.', {
+          code: 'CHANNEL_SETTING_REQUIRED',
+        });
+      }
+      await runCommandAction({
+        title: 'Masumi channel update',
+        options,
+        run: ({ reporter }) =>
+          updateChannelSettings({
+            profileName: options.profile,
+            actorSlug: options.agent,
+            slug,
+            accessMode,
+            publicJoinPermission,
+            discoverable: options.discoverable,
+            reporter,
+          }),
+        toHuman: result => ({
+          summary: `Channel ${result.slug ?? slug} settings updated.`,
+          details: renderKeyValue([
+            ...(result.accessMode ? [{ key: 'Access mode', value: result.accessMode }] : []),
+            ...(result.publicJoinPermission
+              ? [{ key: 'Public join permission', value: result.publicJoinPermission }]
+              : []),
+            ...(result.discoverable !== undefined
+              ? [{ key: 'Discoverable', value: result.discoverable ? 'yes' : 'no' }]
+              : []),
+          ]),
         }),
       });
     });

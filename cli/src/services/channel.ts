@@ -121,7 +121,9 @@ export type ChannelMutationResult = {
   slug?: string;
   channelId?: string;
   permission?: string;
+  accessMode?: string;
   publicJoinPermission?: string;
+  discoverable?: boolean;
   status: string;
 };
 
@@ -801,6 +803,69 @@ export async function createChannel(params: {
       slug: normalizedSlug,
       publicJoinPermission: params.publicJoinPermission ?? 'read',
       status: 'created',
+    };
+  } finally {
+    subscription.unsubscribe();
+    disconnectConnection(conn);
+  }
+}
+
+export async function updateChannelSettings(params: {
+  profileName: string;
+  actorSlug?: string;
+  slug: string;
+  accessMode?: 'public' | 'approval_required';
+  publicJoinPermission?: string;
+  discoverable?: boolean;
+  reporter: TaskReporter;
+}): Promise<ChannelMutationResult> {
+  if (
+    params.accessMode === undefined &&
+    params.publicJoinPermission === undefined &&
+    params.discoverable === undefined
+  ) {
+    throw userError('Pass at least one channel setting to update.', {
+      code: 'CHANNEL_SETTING_REQUIRED',
+    });
+  }
+
+  const connected = await connectForAuthenticatedChannels(params);
+  const { profile, normalizedEmail, conn, subscription } = connected;
+  try {
+    const snapshot = readChannelSnapshot(conn);
+    const normalizedSlug = normalizeChannelSlugInput(params.slug);
+    const channel =
+      snapshot.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
+    if (!channel) {
+      throw userError(`Channel \`${params.slug}\` is not visible.`, {
+        code: 'CHANNEL_NOT_FOUND',
+      });
+    }
+    const adminActor = requireChannelAdminActor({
+      actors: snapshot.actors,
+      memberships: snapshot.memberships,
+      normalizedEmail,
+      channelId: channel.id,
+      actorSlug: params.actorSlug,
+    });
+
+    await conn.reducers.updateChannelSettings({
+      agentDbId: adminActor.id,
+      channelId: channel.id,
+      channelSlug: undefined,
+      accessMode: params.accessMode,
+      publicJoinPermission: params.publicJoinPermission,
+      discoverable: params.discoverable,
+    });
+    params.reporter.success(`Updated channel settings for ${params.slug}`);
+    return {
+      profile: profile.name,
+      slug: channel.slug,
+      channelId: channel.id.toString(),
+      accessMode: params.accessMode,
+      publicJoinPermission: params.publicJoinPermission,
+      discoverable: params.discoverable,
+      status: 'settings-updated',
     };
   } finally {
     subscription.unsubscribe();

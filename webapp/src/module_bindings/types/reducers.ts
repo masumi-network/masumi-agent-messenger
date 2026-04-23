@@ -43,6 +43,7 @@ import SetChannelMemberPermissionReducer from "../set_channel_member_permission_
 import SetThreadArchivedReducer from "../set_thread_archived_reducer";
 import SetThreadParticipantAdminReducer from "../set_thread_participant_admin_reducer";
 import UpdateAgentProfileReducer from "../update_agent_profile_reducer";
+import UpdateChannelSettingsReducer from "../update_channel_settings_reducer";
 import UpsertInboxFromOidcIdentityReducer from "../upsert_inbox_from_oidc_identity_reducer";
 import UpsertMasumiInboxAgentRegistrationReducer from "../upsert_masumi_inbox_agent_registration_reducer";
 
@@ -83,6 +84,7 @@ export type SetChannelMemberPermissionParams = __Infer<typeof SetChannelMemberPe
 export type SetThreadArchivedParams = __Infer<typeof SetThreadArchivedReducer>;
 export type SetThreadParticipantAdminParams = __Infer<typeof SetThreadParticipantAdminReducer>;
 export type UpdateAgentProfileParams = __Infer<typeof UpdateAgentProfileReducer>;
+export type UpdateChannelSettingsParams = __Infer<typeof UpdateChannelSettingsReducer>;
 export type UpsertInboxFromOidcIdentityParams = __Infer<typeof UpsertInboxFromOidcIdentityReducer>;
 export type UpsertMasumiInboxAgentRegistrationParams = __Infer<typeof UpsertMasumiInboxAgentRegistrationReducer>;
 

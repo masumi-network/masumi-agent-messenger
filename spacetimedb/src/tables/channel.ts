@@ -27,7 +27,6 @@ export const channelTable = table(
       title: t.string().optional(),
       description: t.string().optional(),
       accessMode: t.string(),
-      publicJoinPermission: t.string().optional(),
       discoverable: t.bool(),
       creatorAgentDbId: t.u64(),
       nextChannelSeq: t.u64(),
@@ -35,5 +34,6 @@ export const channelTable = table(
       createdAt: t.timestamp(),
       updatedAt: t.timestamp(),
       lastMessageAt: t.timestamp(),
+      publicJoinPermission: t.string().default('read'),
     }
 );

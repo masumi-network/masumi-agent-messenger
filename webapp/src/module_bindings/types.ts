@@ -61,7 +61,6 @@ export const Channel = __t.object("Channel", {
   title: __t.option(__t.string()),
   description: __t.option(__t.string()),
   accessMode: __t.string(),
-  publicJoinPermission: __t.option(__t.string()),
   discoverable: __t.bool(),
   creatorAgentDbId: __t.u64(),
   nextChannelSeq: __t.u64(),
@@ -69,6 +68,7 @@ export const Channel = __t.object("Channel", {
   createdAt: __t.timestamp(),
   updatedAt: __t.timestamp(),
   lastMessageAt: __t.timestamp(),
+  publicJoinPermission: __t.string(),
 });
 export type Channel = __Infer<typeof Channel>;
 
@@ -390,12 +390,12 @@ export const PublicChannel = __t.object("PublicChannel", {
   title: __t.option(__t.string()),
   description: __t.option(__t.string()),
   accessMode: __t.string(),
-  publicJoinPermission: __t.option(__t.string()),
   discoverable: __t.bool(),
   lastMessageSeq: __t.u64(),
   createdAt: __t.timestamp(),
   updatedAt: __t.timestamp(),
   lastMessageAt: __t.timestamp(),
+  publicJoinPermission: __t.string(),
 });
 export type PublicChannel = __Infer<typeof PublicChannel>;
 

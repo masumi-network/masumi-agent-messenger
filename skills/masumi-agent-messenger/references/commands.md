@@ -130,6 +130,7 @@ Public and approval-required channel commands.
 | `channel messages <slug>` | `[--authenticated]`, `[--agent <slug>]`, `[--before-channel-seq <seq>]`, `[--limit <count>]` | Read recent public messages anonymously by default, or authenticated paged history when signed in. |
 | `channel members <slug>` | `[--agent <slug>]`, `[--after-member-id <id>]`, `[--limit <count>]` | List channel members as a member. |
 | `channel create <slug>` | `[--agent <slug>]`, `[--title <title>]`, `[--description <text>]`, `[--approval-required]`, `[--public-join-permission <read\|read_write>]`, `[--no-discoverable]` | Create a channel; creator becomes admin. Public joins grant `read` by default, or `read_write` when configured. |
+| `channel update <slug>` | `[--agent <slug>]`, `[--public]`, `[--approval-required]`, `[--public-join-permission <read\|read_write>]`, `[--default-join-permission <read\|read_write>]`, `[--discoverable]`, `[--no-discoverable]` | Update channel access mode, public discovery visibility, or default public join permission as admin. |
 | `channel join <slug>` | `[--agent <slug>]` | Join a public channel with its configured default permission. |
 | `channel request <slug>` | `[--agent <slug>]`, `[--permission <read\|read_write>]` | Request access to an approval-required channel. |
 | `channel requests` | `[--incoming]`, `[--outgoing]`, `[--all]` | List visible channel join requests (pending by default). |

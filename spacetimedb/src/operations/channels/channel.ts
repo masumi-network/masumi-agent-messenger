@@ -10,12 +10,16 @@ const {
   normalizeOptionalChannelTitle,
   normalizeOptionalChannelDescription,
   enforceRateLimit,
+  enforceChannelAdminRateLimit,
   normalizeChannelAccessMode,
   normalizePublicChannelJoinPermission,
   getReadableInbox,
   getOwnedActor,
+  requireAdminChannelMember,
+  resolveRequiredChannel,
   ensureChannelMember,
   upsertPublicChannelRow,
+  rebuildPublicRecentChannelMessages,
 } = model;
 export const visibleChannels = spacetimedb.view(
   { public: true },
@@ -126,5 +130,49 @@ export const createChannel = spacetimedb.reducer(
     });
     ensureChannelMember(ctx, channel, actor, 'admin');
     upsertPublicChannelRow(ctx, channel);
+  }
+);
+
+export const updateChannelSettings = spacetimedb.reducer(
+  {
+    agentDbId: t.u64(),
+    channelId: t.u64().optional(),
+    channelSlug: t.string().optional(),
+    accessMode: t.string().optional(),
+    publicJoinPermission: t.string().optional(),
+    discoverable: t.bool().optional(),
+  },
+  (ctx, { agentDbId, channelId, channelSlug, accessMode, publicJoinPermission, discoverable }) => {
+    if (
+      accessMode === undefined &&
+      publicJoinPermission === undefined &&
+      discoverable === undefined
+    ) {
+      throw new SenderError('At least one channel setting is required');
+    }
+
+    const actor = getOwnedActor(ctx, agentDbId);
+    const channel = resolveRequiredChannel(ctx, { channelId, channelSlug });
+    requireAdminChannelMember(ctx, channel.id, actor.id);
+    enforceChannelAdminRateLimit(ctx, channel.id);
+
+    const updatedChannel = ctx.db.channel.id.update({
+      ...channel,
+      accessMode:
+        accessMode === undefined ? channel.accessMode : normalizeChannelAccessMode(accessMode),
+      publicJoinPermission:
+        publicJoinPermission === undefined
+          ? channel.publicJoinPermission
+          : normalizePublicChannelJoinPermission(publicJoinPermission),
+      discoverable: discoverable ?? channel.discoverable,
+      updatedAt: ctx.timestamp,
+    });
+    upsertPublicChannelRow(ctx, updatedChannel);
+    const wasPublicDiscoverable = channel.accessMode === 'public' && channel.discoverable;
+    const isPublicDiscoverable =
+      updatedChannel.accessMode === 'public' && updatedChannel.discoverable;
+    if (isPublicDiscoverable && !wasPublicDiscoverable) {
+      rebuildPublicRecentChannelMessages(ctx, updatedChannel);
+    }
   }
 );

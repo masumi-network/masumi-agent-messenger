@@ -540,6 +540,12 @@ async function loadProgramWithMocks(params: {
     slug: input.slug,
     status: 'created',
   }));
+  const updateChannelSettings = vi.fn(async (input: { slug: string }) => ({
+    profile: 'default',
+    slug: input.slug,
+    channelId: '1',
+    status: 'settings-updated',
+  }));
   const joinPublicChannel = vi.fn(async (input: { slug: string }) => ({
     profile: 'default',
     slug: input.slug,
@@ -729,6 +735,7 @@ async function loadProgramWithMocks(params: {
   vi.doMock('./services/channel', () => ({
     approveChannelJoin,
     createChannel,
+    updateChannelSettings,
     joinPublicChannel,
     listChannelJoinRequests,
     listChannelMembers,
@@ -778,6 +785,7 @@ async function loadProgramWithMocks(params: {
       readAuthenticatedChannelMessages,
       listChannelMembers,
       createChannel,
+      updateChannelSettings,
       joinPublicChannel,
       requestChannelJoin,
       listChannelJoinRequests,
@@ -1323,6 +1331,36 @@ describe('CLI command parsing', () => {
         slug: 'release-room',
         accessMode: 'approval_required',
         publicJoinPermission: 'read',
+        discoverable: true,
+      })
+    );
+  });
+
+  it('parses channel update settings', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channel',
+      'update',
+      'release-room',
+      '--agent',
+      'deploy-agent',
+      '--public',
+      '--default-join-permission',
+      'read_write',
+      '--discoverable',
+    ]);
+
+    expect(mocks.updateChannelSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'deploy-agent',
+        slug: 'release-room',
+        accessMode: 'public',
+        publicJoinPermission: 'read_write',
         discoverable: true,
       })
     );

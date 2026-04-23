@@ -17,10 +17,10 @@ export default __t.row({
   title: __t.option(__t.string()),
   description: __t.option(__t.string()),
   accessMode: __t.string().name("access_mode"),
-  publicJoinPermission: __t.option(__t.string()).name("public_join_permission"),
   discoverable: __t.bool(),
   lastMessageSeq: __t.u64().name("last_message_seq"),
   createdAt: __t.timestamp().name("created_at"),
   updatedAt: __t.timestamp().name("updated_at"),
   lastMessageAt: __t.timestamp().name("last_message_at"),
+  publicJoinPermission: __t.string().name("public_join_permission"),
 });

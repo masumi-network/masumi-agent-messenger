@@ -2824,14 +2824,17 @@ export function deletePublicChannelRow(ctx: ModuleCtx, channelId: bigint) {
   }
 }
 
-export function deletePublicChannelMirrorRows(ctx: ModuleCtx, channelId: bigint) {
-  deletePublicChannelRow(ctx, channelId);
-
+export function deletePublicRecentChannelMessageRows(ctx: ModuleCtx, channelId: bigint) {
   for (const message of Array.from(
     ctx.db.publicRecentChannelMessage.public_recent_channel_message_channel_id.filter(channelId)
   )) {
     ctx.db.publicRecentChannelMessage.id.delete(message.id);
   }
+}
+
+export function deletePublicChannelMirrorRows(ctx: ModuleCtx, channelId: bigint) {
+  deletePublicChannelRow(ctx, channelId);
+  deletePublicRecentChannelMessageRows(ctx, channelId);
 }
 
 export function deleteChannelAndDependents(ctx: ModuleCtx, channelId: bigint) {
@@ -2893,6 +2896,44 @@ export function upsertPublicChannelRow(ctx: ModuleCtx, channel: ChannelRow) {
     id: 0n,
     ...row,
   });
+}
+
+export function rebuildPublicRecentChannelMessages(ctx: ModuleCtx, channel: ChannelRow) {
+  deletePublicRecentChannelMessageRows(ctx, channel.id);
+
+  if (channel.accessMode !== 'public' || !channel.discoverable) {
+    return;
+  }
+
+  const recentMessages = Array.from(
+    ctx.db.channelMessage.channel_message_channel_id.filter(channel.id)
+  )
+    .sort((left, right) => {
+      if (left.channelSeq > right.channelSeq) return -1;
+      if (left.channelSeq < right.channelSeq) return 1;
+      if (right.id > left.id) return 1;
+      if (right.id < left.id) return -1;
+      return 0;
+    })
+    .slice(0, MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)
+    .reverse();
+
+  for (const message of recentMessages) {
+    ctx.db.publicRecentChannelMessage.insert({
+      id: 0n,
+      channelId: message.channelId,
+      channelSeq: message.channelSeq,
+      channelSeqKey: message.channelSeqKey,
+      senderAgentDbId: message.senderAgentDbId,
+      senderPublicIdentity: message.senderPublicIdentity,
+      senderSeq: message.senderSeq,
+      senderSigningKeyVersion: message.senderSigningKeyVersion,
+      plaintext: message.plaintext,
+      signature: message.signature,
+      replyToMessageId: message.replyToMessageId,
+      createdAt: message.createdAt,
+    });
+  }
 }
 
 export function getActorSigningPublicKeyForVersion(

@@ -71,6 +71,7 @@ import SetChannelMemberPermissionReducer from "./set_channel_member_permission_r
 import SetThreadArchivedReducer from "./set_thread_archived_reducer";
 import SetThreadParticipantAdminReducer from "./set_thread_participant_admin_reducer";
 import UpdateAgentProfileReducer from "./update_agent_profile_reducer";
+import UpdateChannelSettingsReducer from "./update_channel_settings_reducer";
 import UpsertInboxFromOidcIdentityReducer from "./upsert_inbox_from_oidc_identity_reducer";
 import UpsertMasumiInboxAgentRegistrationReducer from "./upsert_masumi_inbox_agent_registration_reducer";
 
@@ -302,6 +303,7 @@ const reducersSchema = __reducers(
   __reducerSchema("set_thread_archived", SetThreadArchivedReducer),
   __reducerSchema("set_thread_participant_admin", SetThreadParticipantAdminReducer),
   __reducerSchema("update_agent_profile", UpdateAgentProfileReducer),
+  __reducerSchema("update_channel_settings", UpdateChannelSettingsReducer),
   __reducerSchema("upsert_inbox_from_oidc_identity", UpsertInboxFromOidcIdentityReducer),
   __reducerSchema("upsert_masumi_inbox_agent_registration", UpsertMasumiInboxAgentRegistrationReducer),
 );

@@ -6,6 +6,7 @@ import {
   CaretDown,
   ChatText,
   DotsThreeVertical,
+  GearSix,
   Hash,
   Lock,
   SignIn,
@@ -33,6 +34,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Label } from '@/components/ui/label';
 import {
   Select,
   SelectContent,
@@ -116,11 +118,14 @@ type ChannelPageDetails = {
   slug: string;
   title?: string;
   description?: string;
-  accessMode: string;
-  publicJoinPermission: string;
+  accessMode: ChannelAccessMode;
+  publicJoinPermission: PublicJoinPermission;
   discoverable: boolean;
   lastMessageSeq: bigint;
 };
+
+type ChannelAccessMode = 'public' | 'approval_required';
+type PublicJoinPermission = 'read' | 'read_write';
 
 type CombinedChannelMessage =
   | ChannelMessageRow
@@ -158,14 +163,22 @@ function describeAccessMode(accessMode: string): string {
   return accessMode;
 }
 
+function normalizeAccessMode(accessMode: string): ChannelAccessMode {
+  return accessMode === 'approval_required' ? 'approval_required' : 'public';
+}
+
+function normalizePublicJoinPermission(permission: string | null | undefined): PublicJoinPermission {
+  return permission === 'read_write' ? 'read_write' : 'read';
+}
+
 function toPublicChannelDetails(channel: PublicChannel): ChannelPageDetails {
   return {
     channelId: channel.channelId,
     slug: channel.slug,
     title: channel.title,
     description: channel.description,
-    accessMode: channel.accessMode,
-    publicJoinPermission: channel.publicJoinPermission ?? 'read',
+    accessMode: normalizeAccessMode(channel.accessMode),
+    publicJoinPermission: normalizePublicJoinPermission(channel.publicJoinPermission),
     discoverable: channel.discoverable,
     lastMessageSeq: channel.lastMessageSeq,
   };
@@ -630,6 +643,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const sendChannelMessageReducer = useReducer(reducers.sendChannelMessage);
   const requestChannelJoinReducer = useReducer(reducers.requestChannelJoin);
   const setChannelMemberPermissionReducer = useReducer(reducers.setChannelMemberPermission);
+  const updateChannelSettingsReducer = useReducer(reducers.updateChannelSettings);
   const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannel>(
     tables.publicChannel,
     'publicChannel'
@@ -665,8 +679,8 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         slug: visibleChannel.slug,
         title: visibleChannel.title,
         description: visibleChannel.description,
-        accessMode: visibleChannel.accessMode,
-        publicJoinPermission: visibleChannel.publicJoinPermission,
+        accessMode: normalizeAccessMode(visibleChannel.accessMode),
+        publicJoinPermission: normalizePublicJoinPermission(visibleChannel.publicJoinPermission),
         discoverable: visibleChannel.discoverable,
         lastMessageSeq: visibleChannel.lastMessageSeq,
       };
@@ -677,8 +691,8 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         slug: publicChannel.slug,
         title: publicChannel.title,
         description: publicChannel.description,
-        accessMode: publicChannel.accessMode,
-        publicJoinPermission: publicChannel.publicJoinPermission ?? 'read',
+        accessMode: normalizeAccessMode(publicChannel.accessMode),
+        publicJoinPermission: normalizePublicJoinPermission(publicChannel.publicJoinPermission),
         discoverable: publicChannel.discoverable,
         lastMessageSeq: publicChannel.lastMessageSeq,
       };
@@ -717,6 +731,8 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   const [requestsOpen, setRequestsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
 
   const feedScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef<boolean>(true);
@@ -1084,6 +1100,37 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
       setActionFeedback('Updated member permission.');
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Unable to update permission');
+    }
+  }
+
+  async function handleUpdateChannelSettings(settings: {
+    accessMode: ChannelAccessMode;
+    publicJoinPermission: PublicJoinPermission;
+    discoverable: boolean;
+  }) {
+    if (!channel || !activeActor || !canManage) {
+      return;
+    }
+    setSavingSettings(true);
+    setActionError(null);
+    setActionFeedback(null);
+    try {
+      await Promise.resolve(
+        updateChannelSettingsReducer({
+          agentDbId: activeActor.id,
+          channelId: channel.channelId,
+          channelSlug: undefined,
+          accessMode: settings.accessMode,
+          publicJoinPermission: settings.publicJoinPermission,
+          discoverable: settings.discoverable,
+        })
+      );
+      setSettingsOpen(false);
+      setActionFeedback('Updated channel settings.');
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Unable to update channel settings');
+    } finally {
+      setSavingSettings(false);
     }
   }
 
@@ -1459,6 +1506,17 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="w-52">
                           <DropdownMenuLabel>Channel</DropdownMenuLabel>
+                          {canManage ? (
+                            <DropdownMenuItem
+                              onSelect={event => {
+                                event.preventDefault();
+                                setSettingsOpen(true);
+                              }}
+                            >
+                              <GearSix size={14} />
+                              Settings
+                            </DropdownMenuItem>
+                          ) : null}
                           <DropdownMenuItem
                             onSelect={event => {
                               event.preventDefault();
@@ -1680,6 +1738,16 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
             )}
           </div>
 
+          {settingsOpen ? (
+            <ChannelSettingsDialog
+              open={settingsOpen}
+              onOpenChange={setSettingsOpen}
+              channel={channel}
+              saving={savingSettings}
+              onSave={handleUpdateChannelSettings}
+            />
+          ) : null}
+
           <MembersDialog
             open={membersOpen}
             onOpenChange={open => {
@@ -1809,6 +1877,108 @@ function ChannelFooterCta({
         {requesting ? 'Requesting…' : 'Request access'}
       </Button>
     </div>
+  );
+}
+
+function ChannelSettingsDialog({
+  open,
+  onOpenChange,
+  channel,
+  saving,
+  onSave,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  channel: ChannelPageDetails;
+  saving: boolean;
+  onSave: (settings: {
+    accessMode: ChannelAccessMode;
+    publicJoinPermission: PublicJoinPermission;
+    discoverable: boolean;
+  }) => void | Promise<void>;
+}) {
+  const [accessMode, setAccessMode] = useState<ChannelAccessMode>(channel.accessMode);
+  const [publicJoinPermission, setPublicJoinPermission] = useState<PublicJoinPermission>(
+    channel.publicJoinPermission
+  );
+  const [discoverable, setDiscoverable] = useState(channel.discoverable);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <GearSix size={18} />
+            Channel settings
+          </DialogTitle>
+          <DialogDescription>/{channel.slug}</DialogDescription>
+        </DialogHeader>
+        <form
+          className="grid gap-4"
+          onSubmit={event => {
+            event.preventDefault();
+            void onSave({ accessMode, publicJoinPermission, discoverable });
+          }}
+        >
+          <div className="space-y-2">
+            <Label>Access</Label>
+            <Select
+              value={accessMode}
+              onValueChange={value =>
+                setAccessMode(value === 'approval_required' ? 'approval_required' : 'public')
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="public">Public</SelectItem>
+                <SelectItem value="approval_required">Approval required</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <Label>Default public join</Label>
+            <Select
+              value={publicJoinPermission}
+              onValueChange={value =>
+                setPublicJoinPermission(value === 'read_write' ? 'read_write' : 'read')
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="read">Read only</SelectItem>
+                <SelectItem value="read_write">Read/write</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <label className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm">
+            <input
+              type="checkbox"
+              checked={discoverable}
+              onChange={event => setDiscoverable(event.currentTarget.checked)}
+              className="h-4 w-4"
+            />
+            Discoverable
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              disabled={saving}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 

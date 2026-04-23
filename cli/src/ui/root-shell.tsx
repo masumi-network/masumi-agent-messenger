@@ -55,6 +55,7 @@ import {
   rejectChannelJoin,
   sendChannelMessage,
   setChannelMemberPermission,
+  updateChannelSettings,
   verifyChannelMessages,
   type ChannelMemberListItem,
   type ChannelMessageItem,
@@ -3794,6 +3795,97 @@ export function RootShell({
     });
   };
 
+  const openUpdateChannelSettingsTask = () => {
+    if (!selectedChannel?.isAdmin || !model) {
+      setTask(current => ({
+        ...current,
+        notice: selectedChannel
+          ? `Only channel admins can update /${selectedChannel.slug}.`
+          : 'Select a channel before updating settings.',
+      }));
+      return;
+    }
+
+    openTaskPanel({
+      title: `Edit /${selectedChannel.slug}`,
+      help: 'Update channel access, public join defaults, and discovery visibility.',
+      submitLabel: 'Save',
+      fields: [
+        {
+          key: 'accessMode',
+          label: 'Access',
+          value: normalizeChannelAccessModeInput(selectedChannel.accessMode) ?? 'public',
+          choices: [
+            { value: 'public', label: 'Public' },
+            { value: 'approval_required', label: 'Approval required' },
+          ],
+          validate: value =>
+            normalizeChannelAccessModeInput(value)
+              ? null
+              : 'Use public or approval_required.',
+        },
+        {
+          key: 'publicJoinPermission',
+          label: 'Public join',
+          value:
+            normalizePublicJoinPermissionInput(selectedChannel.publicJoinPermission) ?? 'read',
+          choices: [
+            { value: 'read', label: 'Read only' },
+            { value: 'read_write', label: 'Read/write' },
+          ],
+          validate: value =>
+            normalizePublicJoinPermissionInput(value) ? null : 'Use read or read_write.',
+        },
+        {
+          key: 'discoverable',
+          label: 'Discoverable',
+          value: selectedChannel.discoverable ? 'yes' : 'no',
+          placeholder: 'yes or no',
+          validate: value =>
+            parseYesNoInput(value, true) === null ? 'Use yes or no.' : null,
+        },
+      ],
+      onSubmit: async values => {
+        setTaskPanel(null);
+        if (!model || !selectedChannel) {
+          return;
+        }
+        const accessMode = normalizeChannelAccessModeInput(values.accessMode);
+        const publicJoinPermission = normalizePublicJoinPermissionInput(
+          values.publicJoinPermission
+        );
+        const discoverable = parseYesNoInput(values.discoverable, true);
+        if (!accessMode || !publicJoinPermission || discoverable === null) {
+          setTask(current => ({
+            ...current,
+            error: 'Channel access, public join permission, or discoverability is invalid.',
+          }));
+          return;
+        }
+        await performTask(
+          `Updating /${selectedChannel.slug}`,
+          reporter =>
+            updateChannelSettings({
+              profileName: options.profile,
+              actorSlug: model.activeInbox.slug,
+              slug: selectedChannel.slug,
+              accessMode,
+              publicJoinPermission,
+              discoverable,
+              reporter,
+            }),
+          () => {
+            setLiveInboxRefreshToken(token => token + 1);
+            setTask(current => ({
+              ...current,
+              notice: `Updated settings for /${selectedChannel.slug}.`,
+            }));
+          }
+        );
+      },
+    });
+  };
+
   const openSendChannelMessageTask = () => {
     if (!selectedChannel || !canSendSelectedChannel) {
       setTask(current => ({
@@ -5586,6 +5678,11 @@ export function RootShell({
         return;
       }
 
+      if (lowerInput === 'e' && selectedChannel.isAdmin) {
+        openUpdateChannelSettingsTask();
+        return;
+      }
+
       if (key.leftArrow || key.rightArrow) {
         const currentIndex = channelTabs.findIndex(tab => tab.key === channelTab);
         const direction = key.leftArrow ? -1 : 1;
@@ -6237,6 +6334,7 @@ export function RootShell({
           detail: selectedChannel ? `#${selectedChannel.slug}` : undefined,
           items: [
             ...(channelTabs.length > 1 ? [{ key: '←/→', label: 'switch tab' }] : []),
+            ...(selectedChannel?.isAdmin ? [{ key: 'E', label: 'settings' }] : []),
             ...(selectedChannelMemberItems.length > 1
               ? [{ key: '↑/↓', label: 'select member' }]
               : []),
@@ -6260,6 +6358,7 @@ export function RootShell({
             ...(selectedChannelApprovals.length > 1
               ? [{ key: '↑/↓', label: 'select request' }]
               : []),
+            { key: 'E', label: 'settings' },
             ...(selectedChannelApproval ? [{ key: 'A/Enter', label: 'approve' }] : []),
             ...(selectedChannelApproval ? [{ key: 'X', label: 'reject' }] : []),
             ...(channelTabs.length > 1 ? [{ key: '←/→', label: 'switch tab' }] : []),
@@ -6274,6 +6373,7 @@ export function RootShell({
         detail: selectedChannel ? `#${selectedChannel.slug}` : undefined,
         items: [
           ...(channelTabs.length > 1 ? [{ key: '←/→', label: 'switch tab' }] : []),
+          ...(selectedChannel?.isAdmin ? [{ key: 'E', label: 'settings' }] : []),
           ...(canSendSelectedChannel ? [{ key: 'S', label: 'send text' }] : []),
           ...(canPageChannelMessagesNewer || canPageChannelMessagesOlder
             ? [{ key: '↑/↓', label: 'page messages' }]
@@ -6739,6 +6839,21 @@ export function RootShell({
                   }${selectedChannel.isAdmin ? ' · admin' : ''} · messages ${
                     selectedChannel.lastMessageSeq
                   }`}
+                  width={contentListWidth}
+                  color="gray"
+                />
+                <FixedLine
+                  text={`${
+                    selectedChannel.accessMode === 'approval_required'
+                      ? 'approval required'
+                      : selectedChannel.accessMode
+                  }${
+                    selectedChannel.accessMode === 'public'
+                      ? ` · join ${describeChannelPermission(
+                          selectedChannel.publicJoinPermission
+                        )}`
+                      : ''
+                  } · ${selectedChannel.discoverable ? 'discoverable' : 'hidden'}`}
                   width={contentListWidth}
                   color="gray"
                 />

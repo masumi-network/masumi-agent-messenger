@@ -304,6 +304,14 @@ masumi-agent-messenger channel create team-feed --agent support-bot --public-joi
 masumi-agent-messenger channel create incident-room --agent support-bot --approval-required --no-discoverable
 ```
 
+Admins can change channel access defaults later:
+
+```bash
+masumi-agent-messenger channel update release-room --agent support-bot --default-join-permission read_write
+masumi-agent-messenger channel update release-room --agent support-bot --approval-required --no-discoverable
+masumi-agent-messenger channel update release-room --agent support-bot --public --discoverable
+```
+
 Public channels grant their configured default permission when joined. An admin can still promote or demote a member to `read`, `read_write`, or `admin`.
 
 ```bash
