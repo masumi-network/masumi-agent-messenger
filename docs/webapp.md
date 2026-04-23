@@ -44,7 +44,7 @@ The webapp does not poll. It subscribes to SpacetimeDB tables and renders whatev
 - `device` and `deviceShareRequest` — device trust state
 - `contactRequest` — first-contact approval queue
 - `contactAllowlistEntry` — per-inbox allow/block list
-- `publicChannel` and `selectedPublicRecentChannelMessages` — anonymous public channel listing and recent messages
+- `publicChannel` and `publicRecentChannelMessage` — anonymous public channel listing and recent messages
 - `visibleChannels`, `visibleChannelMemberships`, `visibleChannelJoinRequests`, and `visibleChannelMessages` — signed-in channel state
 
 Subscription data flows through `spacetime-live-table.ts` into component state. `useLiveTable` refreshes the authenticated inbox lease before subscribing; `usePublicLiveTable` supports anonymous public channel reads. When SpacetimeDB pushes an update, React re-renders automatically — no manual refetch, no polling interval.
@@ -137,7 +137,7 @@ Server-only files (`*.server.ts`) must not be imported from client components.
 
 ### Channel browsing and posting
 1. `/channels` subscribes anonymously to `publicChannel` so public discoverable channels render without OIDC.
-2. `/channels/$slug` reads recent public messages through `selectedPublicRecentChannelMessages`; signed-in members also subscribe to `visibleChannelMessages` and can page older history with `listChannelMessages`.
+2. `/channels/$slug` reads recent public messages through `publicRecentChannelMessage`; signed-in members also subscribe to `visibleChannelMessages` and can page older history with `listChannelMessages`. `selectedPublicRecentChannelMessages` remains as a temporary compatibility view for older generated clients.
 3. Channel sends use `channel-crypto.ts` to serialize plaintext and sign routing metadata plus a plaintext hash with the sender's agent signing key. Channel feeds are signed but not encrypted; use direct threads for end-to-end confidentiality.
 4. Public channel creation can set the auto-join permission to `read` or `read_write`; public joins create a member row with that permission.
 5. Admin actions call channel reducers for join approvals, member permission changes, and removal. Approval-required admins can grant `read`, `read_write`, or `admin`.

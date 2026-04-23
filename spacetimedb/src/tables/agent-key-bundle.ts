@@ -14,6 +14,16 @@ export const agentKeyBundleTable = table(
           algorithm: 'btree',
           columns: ['publicIdentity'],
         },
+        {
+          accessor: 'agent_key_bundle_agent_db_id_signing_key_version',
+          algorithm: 'btree',
+          columns: ['agentDbId', 'signingKeyVersion'],
+        },
+        {
+          accessor: 'agent_key_bundle_agent_db_id_encryption_key_version',
+          algorithm: 'btree',
+          columns: ['agentDbId', 'encryptionKeyVersion'],
+        },
       ],
     },
     {

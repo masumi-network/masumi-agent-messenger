@@ -8,15 +8,14 @@ const {
   SelectedPublicRecentChannelMessageRow,
   toSelectedPublicRecentChannelMessageRow,
 } = model;
+
+// Compatibility view for older generated clients. New clients should subscribe
+// directly to publicRecentChannelMessage with a channelId filter.
 export const selectedPublicRecentChannelMessages = spacetimedb.view(
   { public: true },
   t.array(SelectedPublicRecentChannelMessageRow),
   ctx => {
     return Array.from(ctx.db.publicRecentChannelMessage.iter())
-      .filter(message => {
-        const channel = ctx.db.channel.id.find(message.channelId);
-        return Boolean(channel && channel.accessMode === 'public' && channel.discoverable);
-      })
       .sort((left, right) => {
         if (left.channelId < right.channelId) return -1;
         if (left.channelId > right.channelId) return 1;

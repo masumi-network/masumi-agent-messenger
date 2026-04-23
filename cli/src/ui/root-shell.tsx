@@ -1443,6 +1443,7 @@ function useLiveChannelMessages(params: {
 
     setLoading(true);
     void verifyChannelMessages(
+      null,
       rows.map(message => ({
         ...message,
         replyToMessageId: message.replyToMessageId ?? null,

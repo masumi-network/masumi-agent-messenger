@@ -7,6 +7,7 @@ import {
 import type { AgentKeyPair } from '../../../shared/agent-crypto';
 import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
+import { LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY } from '../../../shared/message-limits';
 import {
   formatEncryptedMessageBody,
   isJsonContentType,
@@ -18,7 +19,7 @@ import type {
   Agent,
   ChannelMemberListRow,
   PublicChannel,
-  SelectedPublicRecentChannelMessageRow,
+  PublicRecentChannelMessage,
   VisibleChannelJoinRequestRow,
   VisibleChannelMembershipRow,
   VisibleChannelRow,
@@ -272,11 +273,84 @@ function toMessageSignatureInput(message: {
   };
 }
 
+function buildChannelSigningKey(agentDbId: bigint, signingKeyVersion: string): string {
+  return `${agentDbId.toString()}:${signingKeyVersion}`;
+}
+
+function readStoredChannelSigningPublicKey(value: string): string | null {
+  const normalized = value.trim();
+  if (normalized === LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY) {
+    return null;
+  }
+  return normalized ? normalized : null;
+}
+
+async function resolveChannelMessageSigningKeys(
+  conn: DbConnection | null,
+  messages: Array<{
+    senderAgentDbId?: bigint;
+    senderSigningKeyVersion: string;
+    senderSigningPublicKey: string;
+  }>
+): Promise<Map<string, string>> {
+  const resolved = new Map<string, string>();
+  if (!conn) {
+    return resolved;
+  }
+
+  const requests = Array.from(
+    new Map(
+      messages
+        .filter(
+          (
+            message
+          ): message is {
+            senderAgentDbId: bigint;
+            senderSigningKeyVersion: string;
+            senderSigningPublicKey: string;
+          } =>
+            message.senderAgentDbId !== undefined &&
+            !readStoredChannelSigningPublicKey(message.senderSigningPublicKey)
+        )
+        .map(message => [
+          buildChannelSigningKey(message.senderAgentDbId, message.senderSigningKeyVersion),
+          {
+            agentDbId: message.senderAgentDbId,
+            signingKeyVersion: message.senderSigningKeyVersion,
+          },
+        ])
+    ).values()
+  );
+
+  if (requests.length === 0) {
+    return resolved;
+  }
+
+  const rows = (await conn.procedures.lookupPublishedAgentSigningKeys({
+    requests,
+  })) as Array<{
+    agentDbId: bigint;
+    signingKeyVersion: string;
+    signingPublicKey: string;
+  }>;
+
+  for (const row of rows) {
+    resolved.set(
+      buildChannelSigningKey(row.agentDbId, row.signingKeyVersion),
+      row.signingPublicKey
+    );
+  }
+
+  return resolved;
+}
+
 export async function verifyChannelMessages(
+  conn: DbConnection | null,
   messages: Array<{
     id: bigint;
     channelId: bigint;
     channelSeq: bigint;
+    senderAgentDbId?: bigint;
     senderPublicIdentity: string;
     senderSeq: bigint;
     senderSigningPublicKey: string;
@@ -287,13 +361,26 @@ export async function verifyChannelMessages(
     createdAt?: { toDate(): Date } | null;
   }>
 ): Promise<ChannelMessageItem[]> {
+  const resolvedSigningKeys = await resolveChannelMessageSigningKeys(conn, messages);
   return Promise.all(
     messages.map(async message => {
+      const senderSigningPublicKey =
+        readStoredChannelSigningPublicKey(message.senderSigningPublicKey) ??
+        (message.senderAgentDbId !== undefined
+          ? resolvedSigningKeys.get(
+              buildChannelSigningKey(message.senderAgentDbId, message.senderSigningKeyVersion)
+            ) ?? null
+          : null);
+
       try {
+        if (!senderSigningPublicKey) {
+          throw new Error('Unable to resolve sender signing key');
+        }
+
         const verified = await verifySignedChannelMessage({
           input: toMessageSignatureInput(message),
           signature: message.signature,
-          senderSigningPublicKey: message.senderSigningPublicKey,
+          senderSigningPublicKey,
         });
         return {
           id: message.id.toString(),
@@ -587,9 +674,10 @@ export async function readPublicChannelMessages(params: {
     databaseName: profile.spacetimeDbName,
   });
   try {
+    const publicChannelQuery = tables.publicChannel.where(row => row.slug.eq(normalizedSlug));
     const channelSubscription = await subscribeQueries(
       conn,
-      [tables.publicChannel, tables.selectedPublicRecentChannelMessages],
+      [publicChannelQuery],
       'Live public channel subscription failed.'
     );
     try {
@@ -602,29 +690,40 @@ export async function readPublicChannelMessages(params: {
           code: 'CHANNEL_NOT_FOUND',
         });
       }
-      const rows = (Array.from(
-        conn.db.selectedPublicRecentChannelMessages.iter()
-      ) as SelectedPublicRecentChannelMessageRow[])
-        .filter(message => message.channelId === channel.channelId)
-        .sort((left, right) => {
+      const publicRecentQuery = tables.publicRecentChannelMessage.where(row =>
+        row.channelId.eq(channel.channelId)
+      );
+      const publicRecentSubscription = await subscribeQueries(
+        conn,
+        [publicRecentQuery],
+        'Live public channel message subscription failed.'
+      );
+      try {
+        const rows = (Array.from(
+          conn.db.publicRecentChannelMessage.iter()
+        ) as PublicRecentChannelMessage[]).sort((left, right) => {
           if (left.channelSeq < right.channelSeq) return -1;
           if (left.channelSeq > right.channelSeq) return 1;
           return Number(left.id - right.id);
         });
-      const messages = await verifyChannelMessages(
-        rows.map(message => ({
-          ...message,
-          replyToMessageId: message.replyToMessageId ?? null,
-        }))
-      );
-      params.reporter.success(`Loaded ${messages.length.toString()} recent channel message${messages.length === 1 ? '' : 's'}`);
-      return {
-        profile: profile.name,
-        slug: channel.slug,
-        anonymous: true,
-        cappedToRecent: true,
-        messages,
-      };
+        const messages = await verifyChannelMessages(
+          conn,
+          rows.map(message => ({
+            ...message,
+            replyToMessageId: message.replyToMessageId ?? null,
+          }))
+        );
+        params.reporter.success(`Loaded ${messages.length.toString()} recent channel message${messages.length === 1 ? '' : 's'}`);
+        return {
+          profile: profile.name,
+          slug: channel.slug,
+          anonymous: true,
+          cappedToRecent: true,
+          messages,
+        };
+      } finally {
+        publicRecentSubscription.unsubscribe();
+      }
     } finally {
       channelSubscription.unsubscribe();
     }
@@ -645,9 +744,10 @@ export async function showPublicChannel(params: {
     databaseName: profile.spacetimeDbName,
   });
   try {
+    const publicChannelQuery = tables.publicChannel.where(row => row.slug.eq(normalizedSlug));
     const subscription = await subscribeQueries(
       conn,
-      [tables.publicChannel],
+      [publicChannelQuery],
       'Live public channel subscription failed.'
     );
     try {
@@ -709,7 +809,7 @@ export async function readAuthenticatedChannelMessages(params: {
       if (left.channelSeq > right.channelSeq) return 1;
       return Number(left.id - right.id);
     });
-    const messages = await verifyChannelMessages(sortedRows);
+    const messages = await verifyChannelMessages(conn, sortedRows);
     params.reporter.success(`Loaded ${messages.length.toString()} channel message${messages.length === 1 ? '' : 's'}`);
     return {
       profile: profile.name,

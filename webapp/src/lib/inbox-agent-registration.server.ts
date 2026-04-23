@@ -745,7 +745,7 @@ export async function registerMasumiInboxAgentForSession(params: {
 }): Promise<SerializedMasumiRegistrationResponse> {
   const metadata = deserializeMasumiRegistrationMetadata(params.subject.registration);
   const result = registrationResultFromMetadata(metadata);
-  let discovered: MasumiInboxAgentEntry | null = null;
+  let discovered: MasumiInboxAgentEntry | null;
 
   try {
     discovered = await discoverOwnedBlockingPayInboxAgentBySlug({

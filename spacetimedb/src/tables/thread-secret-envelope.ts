@@ -19,6 +19,16 @@ export const threadSecretEnvelopeTable = table(
           algorithm: 'btree',
           columns: ['senderAgentDbId'],
         },
+        {
+          accessor: 'thread_secret_envelope_thread_id_membership_version_sender_agent_db_id_secret_version',
+          algorithm: 'btree',
+          columns: ['threadId', 'membershipVersion', 'senderAgentDbId', 'secretVersion'],
+        },
+        {
+          accessor: 'thread_secret_envelope_thread_id_sender_agent_db_id_secret_version',
+          algorithm: 'btree',
+          columns: ['threadId', 'senderAgentDbId', 'secretVersion'],
+        },
       ],
     },
     {

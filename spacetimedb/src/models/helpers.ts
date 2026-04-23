@@ -26,6 +26,7 @@ import {
   MAX_MESSAGE_VERSION_CHARS,
   MAX_WRAPPED_SECRET_CIPHERTEXT_HEX_CHARS,
   MAX_WRAPPED_SECRET_IV_HEX_CHARS,
+  LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY,
 } from '../../../shared/message-limits';
 import {
   TRUSTED_OIDC_AUDIENCES,
@@ -2288,12 +2289,14 @@ export function getSecretEnvelopesForVersion(
   senderAgentDbId: bigint,
   secretVersion: string
 ) {
-  return getSecretEnvelopesForSenderSecretVersion(
-    ctx,
-    threadId,
-    senderAgentDbId,
-    secretVersion
-  ).filter(envelope => envelope.membershipVersion === membershipVersion);
+  return Array.from(
+    ctx.db.threadSecretEnvelope.thread_secret_envelope_thread_id_membership_version_sender_agent_db_id_secret_version.filter([
+      threadId,
+      membershipVersion,
+      senderAgentDbId,
+      secretVersion,
+    ])
+  );
 }
 
 export function getSecretEnvelopesForSenderSecretVersion(
@@ -2303,14 +2306,12 @@ export function getSecretEnvelopesForSenderSecretVersion(
   secretVersion: string
 ) {
   return Array.from(
-    ctx.db.threadSecretEnvelope.thread_secret_envelope_sender_agent_db_id.filter(senderAgentDbId)
-  ).filter(envelope => {
-    return (
-      envelope.threadId === threadId &&
-      envelope.senderAgentDbId === senderAgentDbId &&
-      envelope.secretVersion === secretVersion
-    );
-  });
+    ctx.db.threadSecretEnvelope.thread_secret_envelope_thread_id_sender_agent_db_id_secret_version.filter([
+      threadId,
+      senderAgentDbId,
+      secretVersion,
+    ])
+  );
 }
 
 export function senderHasMessageWithSecretVersion(
@@ -2319,15 +2320,15 @@ export function senderHasMessageWithSecretVersion(
   senderAgentDbId: bigint,
   secretVersion: string
 ) {
-  return Array.from(
-    ctx.db.message.message_sender_agent_db_id.filter(senderAgentDbId)
-  ).some(message => {
-    return (
-      message.threadId === threadId &&
-      message.senderAgentDbId === senderAgentDbId &&
-      message.secretVersion === secretVersion
-    );
-  });
+  return (
+    Array.from(
+      ctx.db.message.message_sender_agent_db_id_thread_id_secret_version.filter([
+        senderAgentDbId,
+        threadId,
+        secretVersion,
+      ])
+    ).length > 0
+  );
 }
 
 export function senderHasMessageForMembershipSecretVersion(
@@ -2337,16 +2338,16 @@ export function senderHasMessageForMembershipSecretVersion(
   senderAgentDbId: bigint,
   secretVersion: string
 ) {
-  return Array.from(
-    ctx.db.message.message_sender_agent_db_id.filter(senderAgentDbId)
-  ).some(message => {
-    return (
-      message.threadId === threadId &&
-      message.membershipVersion === membershipVersion &&
-      message.senderAgentDbId === senderAgentDbId &&
-      message.secretVersion === secretVersion
-    );
-  });
+  return (
+    Array.from(
+      ctx.db.message.message_sender_agent_db_id_thread_id_membership_version_secret_version.filter([
+        senderAgentDbId,
+        threadId,
+        membershipVersion,
+        secretVersion,
+      ])
+    ).length > 0
+  );
 }
 
 export function canAgentReadMessage(ctx: ReadDbCtx, agentDbId: bigint, message: MessageRow) {
@@ -2850,8 +2851,8 @@ export function deleteChannelAndDependents(ctx: ModuleCtx, channelId: bigint) {
   )) {
     ctx.db.channelJoinRequest.id.delete(request.id);
   }
-  for (const member of Array.from(ctx.db.channelMember.iter()).filter(
-    row => row.channelId === channelId
+  for (const member of Array.from(
+    ctx.db.channelMember.channel_member_channel_id_id.filter(channelId)
   )) {
     ctx.db.channelMember.id.delete(member.id);
   }
@@ -2927,6 +2928,7 @@ export function rebuildPublicRecentChannelMessages(ctx: ModuleCtx, channel: Chan
       senderAgentDbId: message.senderAgentDbId,
       senderPublicIdentity: message.senderPublicIdentity,
       senderSeq: message.senderSeq,
+      senderSigningPublicKey: message.senderSigningPublicKey,
       senderSigningKeyVersion: message.senderSigningKeyVersion,
       plaintext: message.plaintext,
       signature: message.signature,
@@ -2946,9 +2948,13 @@ export function getActorSigningPublicKeyForVersion(
     return actor.currentSigningPublicKey;
   }
 
-  const bundle = Array.from(
-    ctx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(agentDbId)
-  ).find(row => row.signingKeyVersion === signingKeyVersion);
+  const bundle =
+    Array.from(
+      ctx.db.agentKeyBundle.agent_key_bundle_agent_db_id_signing_key_version.filter([
+        agentDbId,
+        signingKeyVersion,
+      ])
+    )[0] ?? null;
   if (!bundle) {
     throw new SenderError('Sender signing key version was not found');
   }
@@ -2965,9 +2971,13 @@ export function getActorEncryptionPublicKeyForVersion(
     return actor.currentEncryptionPublicKey;
   }
 
-  const bundle = Array.from(
-    ctx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(agentDbId)
-  ).find(row => row.encryptionKeyVersion === encryptionKeyVersion);
+  const bundle =
+    Array.from(
+      ctx.db.agentKeyBundle.agent_key_bundle_agent_db_id_encryption_key_version.filter([
+        agentDbId,
+        encryptionKeyVersion,
+      ])
+    )[0] ?? null;
   if (!bundle) {
     throw new SenderError('Sender encryption key version was not found');
   }
@@ -2978,6 +2988,10 @@ export function toChannelMessageRow(
   ctx: ReadDbCtx,
   message: ChannelMessageRecordRow
 ) {
+  const senderSigningPublicKey =
+    message.senderSigningPublicKey === LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY
+      ? ''
+      : message.senderSigningPublicKey;
   return {
     id: message.id,
     channelId: message.channelId,
@@ -2985,11 +2999,9 @@ export function toChannelMessageRow(
     senderAgentDbId: message.senderAgentDbId,
     senderPublicIdentity: message.senderPublicIdentity,
     senderSeq: message.senderSeq,
-    senderSigningPublicKey: getActorSigningPublicKeyForVersion(
-      ctx,
-      message.senderAgentDbId,
-      message.senderSigningKeyVersion
-    ),
+    senderSigningPublicKey:
+      senderSigningPublicKey ||
+      getActorSigningPublicKeyForVersion(ctx, message.senderAgentDbId, message.senderSigningKeyVersion),
     senderSigningKeyVersion: message.senderSigningKeyVersion,
     plaintext: message.plaintext,
     signature: message.signature,
@@ -3002,6 +3014,10 @@ export function toSelectedPublicRecentChannelMessageRow(
   ctx: ReadDbCtx,
   row: PublicRecentChannelMessageRecordRow
 ) {
+  const senderSigningPublicKey =
+    row.senderSigningPublicKey === LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY
+      ? ''
+      : row.senderSigningPublicKey;
   return {
     id: row.id,
     channelId: row.channelId,
@@ -3009,11 +3025,9 @@ export function toSelectedPublicRecentChannelMessageRow(
     senderAgentDbId: row.senderAgentDbId,
     senderPublicIdentity: row.senderPublicIdentity,
     senderSeq: row.senderSeq,
-    senderSigningPublicKey: getActorSigningPublicKeyForVersion(
-      ctx,
-      row.senderAgentDbId,
-      row.senderSigningKeyVersion
-    ),
+    senderSigningPublicKey:
+      senderSigningPublicKey ||
+      getActorSigningPublicKeyForVersion(ctx, row.senderAgentDbId, row.senderSigningKeyVersion),
     senderSigningKeyVersion: row.senderSigningKeyVersion,
     plaintext: row.plaintext,
     signature: row.signature,
@@ -3036,6 +3050,7 @@ export function insertPublicRecentChannelMessage(ctx: ModuleCtx, message: Channe
     senderAgentDbId: message.senderAgentDbId,
     senderPublicIdentity: message.senderPublicIdentity,
     senderSeq: message.senderSeq,
+    senderSigningPublicKey: message.senderSigningPublicKey,
     senderSigningKeyVersion: message.senderSigningKeyVersion,
     plaintext: message.plaintext,
     signature: message.signature,

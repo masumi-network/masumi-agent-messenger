@@ -10,6 +10,7 @@ import * as ClaimDeviceKeyBundleProcedure from "../claim_device_key_bundle_proce
 import * as ListChannelMembersProcedure from "../list_channel_members_procedure";
 import * as ListChannelMessagesProcedure from "../list_channel_messages_procedure";
 import * as LookupPublishedAgentBySlugProcedure from "../lookup_published_agent_by_slug_procedure";
+import * as LookupPublishedAgentSigningKeysProcedure from "../lookup_published_agent_signing_keys_procedure";
 import * as LookupPublishedAgentsByEmailProcedure from "../lookup_published_agents_by_email_procedure";
 import * as LookupPublishedPublicRouteBySlugProcedure from "../lookup_published_public_route_by_slug_procedure";
 import * as ResolveDeviceShareRequestByCodeProcedure from "../resolve_device_share_request_by_code_procedure";
@@ -22,6 +23,8 @@ export type ListChannelMessagesArgs = __Infer<typeof ListChannelMessagesProcedur
 export type ListChannelMessagesResult = __Infer<typeof ListChannelMessagesProcedure.returnType>;
 export type LookupPublishedAgentBySlugArgs = __Infer<typeof LookupPublishedAgentBySlugProcedure.params>;
 export type LookupPublishedAgentBySlugResult = __Infer<typeof LookupPublishedAgentBySlugProcedure.returnType>;
+export type LookupPublishedAgentSigningKeysArgs = __Infer<typeof LookupPublishedAgentSigningKeysProcedure.params>;
+export type LookupPublishedAgentSigningKeysResult = __Infer<typeof LookupPublishedAgentSigningKeysProcedure.returnType>;
 export type LookupPublishedAgentsByEmailArgs = __Infer<typeof LookupPublishedAgentsByEmailProcedure.params>;
 export type LookupPublishedAgentsByEmailResult = __Infer<typeof LookupPublishedAgentsByEmailProcedure.returnType>;
 export type LookupPublishedPublicRouteBySlugArgs = __Infer<typeof LookupPublishedPublicRouteBySlugProcedure.params>;

@@ -131,6 +131,7 @@ export const ChannelMessage = __t.object("ChannelMessage", {
   signature: __t.string(),
   replyToMessageId: __t.option(__t.u64()),
   createdAt: __t.timestamp(),
+  senderSigningPublicKey: __t.string(),
 });
 export type ChannelMessage = __Infer<typeof ChannelMessage>;
 
@@ -412,6 +413,7 @@ export const PublicRecentChannelMessage = __t.object("PublicRecentChannelMessage
   signature: __t.string(),
   replyToMessageId: __t.option(__t.u64()),
   createdAt: __t.timestamp(),
+  senderSigningPublicKey: __t.string(),
 });
 export type PublicRecentChannelMessage = __Infer<typeof PublicRecentChannelMessage>;
 
@@ -429,6 +431,20 @@ export const PublishedAgentLookupRow = __t.object("PublishedAgentLookupRow", {
   signingPublicKey: __t.string(),
 });
 export type PublishedAgentLookupRow = __Infer<typeof PublishedAgentLookupRow>;
+
+export const PublishedAgentSigningKeyLookupRequest = __t.object("PublishedAgentSigningKeyLookupRequest", {
+  agentDbId: __t.u64(),
+  signingKeyVersion: __t.string(),
+});
+export type PublishedAgentSigningKeyLookupRequest = __Infer<typeof PublishedAgentSigningKeyLookupRequest>;
+
+export const PublishedAgentSigningKeyLookupRow = __t.object("PublishedAgentSigningKeyLookupRow", {
+  agentDbId: __t.u64(),
+  publicIdentity: __t.string(),
+  signingKeyVersion: __t.string(),
+  signingPublicKey: __t.string(),
+});
+export type PublishedAgentSigningKeyLookupRow = __Infer<typeof PublishedAgentSigningKeyLookupRow>;
 
 export const PublishedContactPolicyRow = __t.object("PublishedContactPolicyRow", {
   mode: __t.string(),

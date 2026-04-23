@@ -36,6 +36,10 @@ import { EmptyState } from '@/components/inbox/empty-state';
 import { formatDayLabel } from '@/lib/format-relative-time';
 import { computeDayBoundaries, computeGroupedFlags } from '@/lib/group-messages';
 import { formatTimestamp } from '@/lib/thread-format';
+import {
+  getChannelMessageSigningPublicKey,
+  resolveChannelMessageSigningKeys,
+} from '@/lib/channel-signing-keys';
 import { AgentsPage } from './agents';
 import {
   clearPendingBootstrapKeyPair,
@@ -63,7 +67,7 @@ import type {
   Agent,
   Inbox as InboxRow,
   PublicChannel,
-  SelectedPublicRecentChannelMessageRow,
+  PublicRecentChannelMessage,
 } from '@/module_bindings/types';
 import {
   verifySignedChannelMessage,
@@ -948,23 +952,25 @@ function SignedOutHome() {
 }
 
 function PublicRootChannel({ channelId }: { channelId: bigint }) {
+  const connectionState = useSpacetimeDB();
+  const connection = connectionState.getConnection?.() as DbConnection | null;
   const channelQuery = useMemo(
     () => tables.publicChannel.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
   const messageQuery = useMemo(
-    () => tables.selectedPublicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
+    () => tables.publicRecentChannelMessage.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
   const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannel>(
     channelQuery,
     'publicChannel'
   );
-  const [messages, messagesReady, messagesError] =
-    usePublicLiveTable<SelectedPublicRecentChannelMessageRow>(
-      messageQuery,
-      'selectedPublicRecentChannelMessages'
-    );
+  const [messages, messagesReady, messagesError] = usePublicLiveTable<PublicRecentChannelMessage>(
+    messageQuery,
+    'publicRecentChannelMessage',
+    { enabled: channel !== null }
+  );
   const [decryptedByKey, setDecryptedByKey] = useState<
     Record<string, DecryptedPublicChannelMessage>
   >({});
@@ -1000,44 +1006,70 @@ function PublicRootChannel({ channelId }: { channelId: bigint }) {
       };
     }
 
-    void Promise.all(
-      sortedMessages.map(async message => {
-        try {
-          const verified = await verifySignedChannelMessage({
-            input: toPublicChannelSignatureInput(message),
-            signature: message.signature,
-            senderSigningPublicKey: message.senderSigningPublicKey,
-          });
-          return [
-            publicChannelMessageKey(message),
-            {
-              status: 'ok',
-              text: formatEncryptedMessageBody(verified.payload),
-            } satisfies DecryptedPublicChannelMessage,
-          ] as const;
-        } catch (messageError) {
-          return [
-            publicChannelMessageKey(message),
-            {
-              status: 'failed',
-              error:
-                messageError instanceof Error
-                  ? messageError.message
-                  : 'Unable to verify message',
-            } satisfies DecryptedPublicChannelMessage,
-          ] as const;
-        }
-      })
-    ).then(entries => {
+    void (async () => {
+      const resolvedSigningKeys = await resolveChannelMessageSigningKeys(connection, sortedMessages);
+      const entries = await Promise.all(
+        sortedMessages.map(async message => {
+          try {
+            const senderSigningPublicKey = getChannelMessageSigningPublicKey(
+              message,
+              resolvedSigningKeys
+            );
+            if (!senderSigningPublicKey) {
+              throw new Error('Unable to resolve sender signing key');
+            }
+
+            const verified = await verifySignedChannelMessage({
+              input: toPublicChannelSignatureInput(message),
+              signature: message.signature,
+              senderSigningPublicKey,
+            });
+            return [
+              publicChannelMessageKey(message),
+              {
+                status: 'ok',
+                text: formatEncryptedMessageBody(verified.payload),
+              } satisfies DecryptedPublicChannelMessage,
+            ] as const;
+          } catch (messageError) {
+            return [
+              publicChannelMessageKey(message),
+              {
+                status: 'failed',
+                error:
+                  messageError instanceof Error
+                    ? messageError.message
+                    : 'Unable to verify message',
+              } satisfies DecryptedPublicChannelMessage,
+            ] as const;
+          }
+        })
+      );
       if (!cancelled) {
         setDecryptedByKey(Object.fromEntries(entries));
+      }
+    })().catch(error => {
+      if (!cancelled) {
+        try {
+          const message = error instanceof Error ? error.message : 'Unable to verify message';
+          setDecryptedByKey(
+            Object.fromEntries(
+              sortedMessages.map(item => [
+                publicChannelMessageKey(item),
+                { status: 'failed', error: message } satisfies DecryptedPublicChannelMessage,
+              ])
+            )
+          );
+        } catch {
+          setDecryptedByKey({});
+        }
       }
     });
 
     return () => {
       cancelled = true;
     };
-  }, [channel, sortedMessages]);
+  }, [channel, connection, sortedMessages]);
 
   if (error) {
     return (

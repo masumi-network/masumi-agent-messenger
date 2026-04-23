@@ -50,6 +50,10 @@ import { MessageComposer } from '@/components/inbox/message-composer';
 import { MessageItem } from '@/components/inbox/message-item';
 import { loadStoredAgentKeyPair } from '@/lib/agent-session';
 import { buildLoginHref, useAuthSession } from '@/lib/auth-session';
+import {
+  getChannelMessageSigningPublicKey,
+  resolveChannelMessageSigningKeys,
+} from '@/lib/channel-signing-keys';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { formatDayLabel } from '@/lib/format-relative-time';
 import { computeDayBoundaries, computeGroupedFlags } from '@/lib/group-messages';
@@ -69,7 +73,7 @@ import type {
   ChannelMemberListRow,
   ChannelMessageRow,
   PublicChannel,
-  SelectedPublicRecentChannelMessageRow,
+  PublicRecentChannelMessage,
   VisibleChannelJoinRequestRow,
   VisibleChannelMessageRow,
   VisibleChannelMembershipRow,
@@ -129,7 +133,7 @@ type PublicJoinPermission = 'read' | 'read_write';
 
 type CombinedChannelMessage =
   | ChannelMessageRow
-  | SelectedPublicRecentChannelMessageRow
+  | PublicRecentChannelMessage
   | VisibleChannelMessageRow;
 
 function compareBigint(left: bigint, right: bigint): number {
@@ -338,8 +342,12 @@ function AuthenticatedChannelPage({ slug }: { slug: string }) {
 }
 
 function PublicChannelPageContent({ slug }: { slug: string }) {
+  const publicChannelQuery = useMemo(
+    () => tables.publicChannel.where(row => row.slug.eq(slug)),
+    [slug]
+  );
   const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannel>(
-    tables.publicChannel,
+    publicChannelQuery,
     'publicChannel'
   );
   const publicChannel = useMemo(
@@ -352,15 +360,17 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
   );
   const channelId = channel?.channelId ?? 0n;
   const messageQuery = useMemo(
-    () => tables.selectedPublicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
+    () => tables.publicRecentChannelMessage.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
-  const [messages, messagesReady, messagesError] =
-    usePublicLiveTable<SelectedPublicRecentChannelMessageRow>(
-      messageQuery,
-      'selectedPublicRecentChannelMessages'
-    );
+  const [messages, messagesReady, messagesError] = usePublicLiveTable<PublicRecentChannelMessage>(
+    messageQuery,
+    'publicRecentChannelMessage',
+    { enabled: channel !== null }
+  );
   const [decryptedByKey, setDecryptedByKey] = useState<Record<string, DecryptedChannelMessage>>({});
+  const connectionState = useSpacetimeDB();
+  const connection = connectionState.getConnection?.() as DbConnection | null;
 
   const sortedMessages = useMemo(
     () =>
@@ -395,13 +405,22 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
     }
 
     void (async () => {
+      const resolvedSigningKeys = await resolveChannelMessageSigningKeys(connection, sortedMessages);
       const entries = await Promise.all(
         sortedMessages.map(async message => {
           try {
+            const senderSigningPublicKey = getChannelMessageSigningPublicKey(
+              message,
+              resolvedSigningKeys
+            );
+            if (!senderSigningPublicKey) {
+              throw new Error('Unable to resolve sender signing key');
+            }
+
             const verified = await verifySignedChannelMessage({
               input: toSignatureInput(message),
               signature: message.signature,
-              senderSigningPublicKey: message.senderSigningPublicKey,
+              senderSigningPublicKey,
             });
             const normalized = normalizeEncryptedMessagePayload(verified.payload);
             return [
@@ -444,7 +463,7 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
     return () => {
       cancelled = true;
     };
-  }, [channel, sortedMessages]);
+  }, [channel, connection, sortedMessages]);
 
   const timelineMeta = useMemo(
     () =>
@@ -644,25 +663,25 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const requestChannelJoinReducer = useReducer(reducers.requestChannelJoin);
   const setChannelMemberPermissionReducer = useReducer(reducers.setChannelMemberPermission);
   const updateChannelSettingsReducer = useReducer(reducers.updateChannelSettings);
+  const publicChannelQuery = useMemo(
+    () => tables.publicChannel.where(row => row.slug.eq(slug)),
+    [slug]
+  );
   const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannel>(
-    tables.publicChannel,
+    publicChannelQuery,
     'publicChannel'
   );
+  const visibleChannelQuery = useMemo(
+    () => tables.visibleChannels.where(row => row.slug.eq(slug)),
+    [slug]
+  );
   const [visibleChannels, visibleChannelsReady, visibleChannelsError] = useLiveTable<VisibleChannelRow>(
-    tables.visibleChannels,
+    visibleChannelQuery,
     'visibleChannels'
   );
   const [actors, actorsReady, actorsError] = useLiveTable<Agent>(
     tables.visibleAgents,
     'visibleAgents'
-  );
-  const [memberships, membershipsReady, membershipsError] = useLiveTable<VisibleChannelMembershipRow>(
-    tables.visibleChannelMemberships,
-    'visibleChannelMemberships'
-  );
-  const [joinRequests, joinRequestsReady, joinRequestsError] = useLiveTable<VisibleChannelJoinRequestRow>(
-    tables.visibleChannelJoinRequests,
-    'visibleChannelJoinRequests'
   );
   const publicChannel = useMemo(
     () => channels.find(row => row.slug === slug) ?? null,
@@ -700,15 +719,33 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     return null;
   }, [publicChannel, visibleChannel]);
   const channelId = channel?.channelId ?? 0n;
-  const messageQuery = useMemo(
-    () => tables.selectedPublicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
+  const membershipQuery = useMemo(
+    () => tables.visibleChannelMemberships.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
-  const [messages, messagesReady, messagesError] =
-    usePublicLiveTable<SelectedPublicRecentChannelMessageRow>(
-      messageQuery,
-      'selectedPublicRecentChannelMessages'
-    );
+  const [memberships, membershipsReady, membershipsError] = useLiveTable<VisibleChannelMembershipRow>(
+    membershipQuery,
+    'visibleChannelMemberships',
+    { enabled: channel !== null }
+  );
+  const joinRequestQuery = useMemo(
+    () => tables.visibleChannelJoinRequests.where(row => row.channelId.eq(channelId)),
+    [channelId]
+  );
+  const [joinRequests, joinRequestsReady, joinRequestsError] = useLiveTable<VisibleChannelJoinRequestRow>(
+    joinRequestQuery,
+    'visibleChannelJoinRequests',
+    { enabled: channel !== null }
+  );
+  const messageQuery = useMemo(
+    () => tables.publicRecentChannelMessage.where(row => row.channelId.eq(channelId)),
+    [channelId]
+  );
+  const [messages, messagesReady, messagesError] = usePublicLiveTable<PublicRecentChannelMessage>(
+    messageQuery,
+    'publicRecentChannelMessage',
+    { enabled: channel !== null }
+  );
   const liveMessageQuery = useMemo(
     () => tables.visibleChannelMessages.where(row => row.channelId.eq(channelId)),
     [channelId]
@@ -716,7 +753,8 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const [liveMessages, liveMessagesReady, liveMessagesError] =
     useLiveTable<VisibleChannelMessageRow>(
       liveMessageQuery,
-      'visibleChannelMessages'
+      'visibleChannelMessages',
+      { enabled: channel !== null }
     );
   const [historyMessages, setHistoryMessages] = useState<ChannelMessageRow[]>([]);
   const [memberRows, setMemberRows] = useState<ChannelMemberListRow[]>([]);
@@ -871,13 +909,22 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     }
 
     void (async () => {
+      const resolvedSigningKeys = await resolveChannelMessageSigningKeys(connection, combinedMessages);
       const entries = await Promise.all(
         combinedMessages.map(async message => {
           try {
+            const senderSigningPublicKey = getChannelMessageSigningPublicKey(
+              message,
+              resolvedSigningKeys
+            );
+            if (!senderSigningPublicKey) {
+              throw new Error('Unable to resolve sender signing key');
+            }
+
             const verified = await verifySignedChannelMessage({
               input: toSignatureInput(message),
               signature: message.signature,
-              senderSigningPublicKey: message.senderSigningPublicKey,
+              senderSigningPublicKey,
             });
             const normalized = normalizeEncryptedMessagePayload(verified.payload);
             return [
@@ -920,7 +967,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     return () => {
       cancelled = true;
     };
-  }, [channel, combinedMessages]);
+  }, [channel, combinedMessages, connection]);
 
   const latestMessageKey = combinedMessages[combinedMessages.length - 1]
     ? channelMessageKey(combinedMessages[combinedMessages.length - 1]!)

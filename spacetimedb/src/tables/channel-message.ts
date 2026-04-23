@@ -1,4 +1,5 @@
 import { table, t } from 'spacetimedb/server';
+import { LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY } from '../../../shared/message-limits';
 
 export const channelMessageTable = table(
     {
@@ -34,5 +35,6 @@ export const channelMessageTable = table(
       signature: t.string(),
       replyToMessageId: t.u64().optional(),
       createdAt: t.timestamp(),
+      senderSigningPublicKey: t.string().default(LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY),
     }
 );

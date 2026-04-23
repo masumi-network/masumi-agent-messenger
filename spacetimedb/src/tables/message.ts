@@ -14,6 +14,21 @@ export const messageTable = table(
           algorithm: 'btree',
           columns: ['senderAgentDbId'],
         },
+        {
+          accessor: 'message_thread_id_thread_seq',
+          algorithm: 'btree',
+          columns: ['threadId', 'threadSeq'],
+        },
+        {
+          accessor: 'message_sender_agent_db_id_thread_id_secret_version',
+          algorithm: 'btree',
+          columns: ['senderAgentDbId', 'threadId', 'secretVersion'],
+        },
+        {
+          accessor: 'message_sender_agent_db_id_thread_id_membership_version_secret_version',
+          algorithm: 'btree',
+          columns: ['senderAgentDbId', 'threadId', 'membershipVersion', 'secretVersion'],
+        },
       ],
     },
     {

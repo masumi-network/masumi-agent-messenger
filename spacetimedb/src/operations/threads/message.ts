@@ -57,26 +57,23 @@ export const visibleMessages = spacetimedb.view(
 
     const ownActorIds = getOwnActorIdsForInbox(ctx, inbox.id);
     const visibleThreadIds = buildVisibleThreadIdsForInbox(ctx, inbox.id);
-
-    return Array.from(visibleThreadIds).flatMap(threadId => {
-      const ownSenderVersionKeys = new Set(
-        Array.from(ownActorIds).flatMap(agentDbId =>
-          Array.from(
-            ctx.db.threadSecretEnvelope.thread_secret_envelope_recipient_agent_db_id.filter(
-              agentDbId
-            )
+    const ownSenderVersionKeys = new Set(
+      Array.from(ownActorIds).flatMap(agentDbId =>
+        Array.from(
+          ctx.db.threadSecretEnvelope.thread_secret_envelope_recipient_agent_db_id.filter(agentDbId)
+        )
+      )
+        .filter(envelope => visibleThreadIds.has(envelope.threadId))
+        .map(envelope =>
+          buildSenderSecretVisibilityKey(
+            envelope.membershipVersion,
+            envelope.senderAgentDbId,
+            envelope.secretVersion
           )
         )
-          .filter(envelope => envelope.threadId === threadId)
-          .map(envelope =>
-            buildSenderSecretVisibilityKey(
-              envelope.membershipVersion,
-              envelope.senderAgentDbId,
-              envelope.secretVersion
-            )
-          )
-      );
+    );
 
+    return Array.from(visibleThreadIds).flatMap(threadId => {
       return Array.from(
         ctx.db.message.message_thread_id.filter(threadId)
       ).filter(

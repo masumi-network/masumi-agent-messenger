@@ -377,6 +377,21 @@ export const PublishedAgentLookupRow = t.object('PublishedAgentLookupRow', {
   signingPublicKey: t.string(),
 });
 
+export const PublishedAgentSigningKeyLookupRequest = t.object(
+  'PublishedAgentSigningKeyLookupRequest',
+  {
+    agentDbId: t.u64(),
+    signingKeyVersion: t.string(),
+  }
+);
+
+export const PublishedAgentSigningKeyLookupRow = t.object('PublishedAgentSigningKeyLookupRow', {
+  agentDbId: t.u64(),
+  publicIdentity: t.string(),
+  signingKeyVersion: t.string(),
+  signingPublicKey: t.string(),
+});
+
 export const PublishedPublicRouteRow = t.object('PublishedPublicRouteRow', {
   agentIdentifier: t.string().optional(),
   linkedEmail: t.string().optional(),

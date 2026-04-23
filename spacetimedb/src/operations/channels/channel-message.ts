@@ -1,4 +1,4 @@
-import { t, SenderError } from 'spacetimedb/server';
+import { Range, t, SenderError } from 'spacetimedb/server';
 
 import spacetimedb from '../../schema';
 import {
@@ -62,8 +62,15 @@ export const visibleChannelMessages = spacetimedb.view(
             ? upperBound - BigInt(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)
             : 1n;
 
-        return Array.from(ctx.db.channelMessage.channel_message_channel_id.filter(channel.id))
-          .filter(message => message.channelSeq >= lowerBound && message.channelSeq < upperBound)
+        return Array.from(
+          ctx.db.channelMessage.channel_message_channel_id_channel_seq.filter([
+            channel.id,
+            new Range(
+              { tag: 'included', value: lowerBound },
+              { tag: 'excluded', value: upperBound }
+            ),
+          ])
+        )
           .sort((left, right) => {
             if (left.channelSeq > right.channelSeq) return -1;
             if (left.channelSeq < right.channelSeq) return 1;
@@ -109,8 +116,15 @@ export const listChannelMessages = spacetimedb.procedure(
       const lowerBound =
         upperBound > BigInt(pageSize) ? upperBound - BigInt(pageSize) : 1n;
 
-      return Array.from(tx.db.channelMessage.channel_message_channel_id.filter(channel.id))
-        .filter(message => message.channelSeq >= lowerBound && message.channelSeq < upperBound)
+      return Array.from(
+        tx.db.channelMessage.channel_message_channel_id_channel_seq.filter([
+          channel.id,
+          new Range(
+            { tag: 'included', value: lowerBound },
+            { tag: 'excluded', value: upperBound }
+          ),
+        ])
+      )
         .sort((left, right) => {
           if (left.channelSeq > right.channelSeq) return -1;
           if (left.channelSeq < right.channelSeq) return 1;
@@ -195,6 +209,7 @@ export const sendChannelMessage = spacetimedb.reducer(
       senderAgentDbId: senderAgent.id,
       senderPublicIdentity: senderAgent.publicIdentity,
       senderSeq,
+      senderSigningPublicKey: senderAgent.currentSigningPublicKey,
       senderSigningKeyVersion: normalizedSigningKeyVersion,
       plaintext: normalizedPlaintext,
       signature: normalizedSignature,

@@ -979,7 +979,7 @@ export async function syncMasumiInboxAgentRegistration(params: {
     return { registration: result, metadata: currentMetadata };
   }
 
-  let discoveredOwned: MasumiInboxAgentEntry | null = null;
+  let discoveredOwned: MasumiInboxAgentEntry | null;
   try {
     discoveredOwned = await discoverOwnedBlockingPayInboxAgentBySlug({
       issuer: params.profile.issuer,

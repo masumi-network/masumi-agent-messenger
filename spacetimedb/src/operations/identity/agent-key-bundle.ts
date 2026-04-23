@@ -1,19 +1,24 @@
 import { t, SenderError } from 'spacetimedb/server';
 
 import spacetimedb from '../../schema';
+import { MAX_MESSAGE_VERSION_CHARS } from '../../../../shared/message-limits';
 
 import * as model from '../../model';
 
 const {
   MAX_THREAD_FANOUT,
+  MAX_CHANNEL_MESSAGE_PAGE_SIZE,
   DEFAULT_AGENT_ENCRYPTION_ALGORITHM,
   DEFAULT_AGENT_SIGNING_ALGORITHM,
   AGENT_KEY_ROTATE_RATE_WINDOW_MS,
   AGENT_KEY_ROTATE_RATE_MAX_PER_WINDOW,
   DeviceKeyBundleAttachment,
+  PublishedAgentSigningKeyLookupRequest,
+  PublishedAgentSigningKeyLookupRow,
   VisibleAgentKeyBundleRow,
   enforceRateLimit,
   requireNonEmpty,
+  requireMaxLength,
   normalizePublicKey,
   normalizeDeviceId,
   normalizeDeviceStatus,
@@ -41,6 +46,68 @@ export const visibleAgentKeyBundles = spacetimedb.view(
     return Array.from(buildVisibleAgentIdsForInbox(ctx, inbox.id)).flatMap(agentDbId =>
       Array.from(ctx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(agentDbId))
     );
+  }
+);
+
+export const lookupPublishedAgentSigningKeys = spacetimedb.procedure(
+  {
+    requests: t.array(PublishedAgentSigningKeyLookupRequest),
+  },
+  t.array(PublishedAgentSigningKeyLookupRow),
+  (ctx, { requests }) => {
+    return ctx.withTx(tx => {
+      requireMaxArrayLength(requests, MAX_CHANNEL_MESSAGE_PAGE_SIZE, 'requests');
+
+      const seen = new Set<string>();
+      const resolved: Array<{
+        agentDbId: bigint;
+        publicIdentity: string;
+        signingKeyVersion: string;
+        signingPublicKey: string;
+      }> = [];
+
+      for (const request of requests) {
+        const signingKeyVersion = requireNonEmpty(request.signingKeyVersion, 'signingKeyVersion');
+        requireMaxLength(signingKeyVersion, MAX_MESSAGE_VERSION_CHARS, 'signingKeyVersion');
+
+        const requestKey = `${request.agentDbId.toString()}:${signingKeyVersion}`;
+        if (seen.has(requestKey)) {
+          continue;
+        }
+        seen.add(requestKey);
+
+        const actor = tx.db.agent.id.find(request.agentDbId);
+        if (actor && actor.currentSigningKeyVersion === signingKeyVersion) {
+          resolved.push({
+            agentDbId: actor.id,
+            publicIdentity: actor.publicIdentity,
+            signingKeyVersion,
+            signingPublicKey: actor.currentSigningPublicKey,
+          });
+          continue;
+        }
+
+        const bundle =
+          Array.from(
+            tx.db.agentKeyBundle.agent_key_bundle_agent_db_id_signing_key_version.filter([
+              request.agentDbId,
+              signingKeyVersion,
+            ])
+          )[0] ?? null;
+        if (!bundle) {
+          continue;
+        }
+
+        resolved.push({
+          agentDbId: bundle.agentDbId,
+          publicIdentity: bundle.publicIdentity,
+          signingKeyVersion: bundle.signingKeyVersion,
+          signingPublicKey: bundle.signingPublicKey,
+        });
+      }
+
+      return resolved;
+    });
   }
 );
 
