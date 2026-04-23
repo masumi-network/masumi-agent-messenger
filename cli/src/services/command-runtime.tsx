@@ -19,6 +19,7 @@ import { TaskScreen, type TaskBanner, type TaskPrompt, type TaskRenderState } fr
 
 export type GlobalOptions = {
   json: boolean;
+  headless: boolean;
   profile: string;
   color: boolean;
   verbose: boolean;
@@ -532,7 +533,7 @@ function createNoopReporter(): TaskReporter {
 }
 
 function isInteractive(options: GlobalOptions): boolean {
-  return !options.json && Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
+  return !options.json && !options.headless && Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
 }
 
 function isPlainHumanMode(options: GlobalOptions): boolean {
