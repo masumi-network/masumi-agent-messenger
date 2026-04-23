@@ -43,6 +43,7 @@ export type ChannelListItem = {
   slug: string;
   title: string | null;
   description: string | null;
+  publicJoinPermission: string;
   discoverable: boolean;
   lastMessageSeq: string;
 };
@@ -119,8 +120,12 @@ export type ChannelMutationResult = {
   profile: string;
   slug?: string;
   channelId?: string;
+  permission?: string;
+  publicJoinPermission?: string;
   status: string;
 };
+
+export type ChannelApprovalPermissionPrompt = (request: ChannelJoinRequestItem) => Promise<string>;
 
 type ChannelSnapshot = {
   actors: Agent[];
@@ -173,8 +178,26 @@ function publicChannelToListItem(channel: PublicChannel): ChannelListItem {
     slug: channel.slug,
     title: channel.title ?? null,
     description: channel.description ?? null,
+    publicJoinPermission: channel.publicJoinPermission ?? 'read',
     discoverable: channel.discoverable,
     lastMessageSeq: channel.lastMessageSeq.toString(),
+  };
+}
+
+function channelJoinRequestToItem(request: VisibleChannelJoinRequestRow): ChannelJoinRequestItem {
+  return {
+    id: request.id.toString(),
+    channelId: request.channelId.toString(),
+    channelSlug: request.channelSlug,
+    channelTitle: request.channelTitle ?? null,
+    requesterAgentDbId: request.requesterAgentDbId.toString(),
+    requesterSlug: request.requesterSlug,
+    requesterDisplayName: request.requesterDisplayName ?? null,
+    permission: request.permission,
+    status: request.status,
+    direction: request.direction,
+    createdAt: formatTimestamp(request.createdAt),
+    updatedAt: formatTimestamp(request.updatedAt),
   };
 }
 
@@ -750,6 +773,7 @@ export async function createChannel(params: {
   title?: string;
   description?: string;
   accessMode: 'public' | 'approval_required';
+  publicJoinPermission?: string;
   discoverable: boolean;
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
@@ -768,12 +792,14 @@ export async function createChannel(params: {
       title: params.title?.trim() || undefined,
       description: params.description?.trim() || undefined,
       accessMode: params.accessMode,
+      publicJoinPermission: params.publicJoinPermission,
       discoverable: params.discoverable,
     });
     params.reporter.success(`Created channel ${params.slug}`);
     return {
       profile: profile.name,
       slug: normalizedSlug,
+      publicJoinPermission: params.publicJoinPermission ?? 'read',
       status: 'created',
     };
   } finally {
@@ -796,15 +822,36 @@ export async function joinPublicChannel(params: {
       normalizedEmail,
       actorSlug: params.actorSlug,
     });
+    const normalizedSlug = normalizeChannelSlugInput(params.slug);
     await conn.reducers.joinPublicChannel({
       agentDbId: actor.id,
       channelId: undefined,
-      channelSlug: normalizeChannelSlugInput(params.slug),
+      channelSlug: normalizedSlug,
     });
+    const updatedSnapshot = readChannelSnapshot(conn);
+    const joinedChannel =
+      updatedSnapshot.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
+    const joinedMembership = joinedChannel
+      ? updatedSnapshot.memberships.find(
+          membership =>
+            membership.channelId === joinedChannel.id &&
+            membership.agentDbId === actor.id &&
+            membership.active
+        ) ?? null
+      : null;
+    const publicChannel =
+      updatedSnapshot.publicChannels.find(row => row.slug === normalizedSlug) ?? null;
+    const permission =
+      joinedMembership?.permission ??
+      joinedChannel?.publicJoinPermission ??
+      publicChannel?.publicJoinPermission ??
+      'read';
     params.reporter.success(`Joined public channel ${params.slug}`);
     return {
       profile: profile.name,
-      slug: normalizeChannelSlugInput(params.slug),
+      slug: normalizedSlug,
+      channelId: joinedChannel?.id.toString() ?? publicChannel?.channelId.toString(),
+      permission,
       status: 'joined',
     };
   } finally {
@@ -1004,20 +1051,7 @@ export async function listChannelJoinRequests(params: {
         if (left.createdAt.microsSinceUnixEpoch > right.createdAt.microsSinceUnixEpoch) return -1;
         return 0;
       })
-      .map(request => ({
-        id: request.id.toString(),
-        channelId: request.channelId.toString(),
-        channelSlug: request.channelSlug,
-        channelTitle: request.channelTitle ?? null,
-        requesterAgentDbId: request.requesterAgentDbId.toString(),
-        requesterSlug: request.requesterSlug,
-        requesterDisplayName: request.requesterDisplayName ?? null,
-        permission: request.permission,
-        status: request.status,
-        direction: request.direction,
-        createdAt: formatTimestamp(request.createdAt),
-        updatedAt: formatTimestamp(request.updatedAt),
-      }));
+      .map(channelJoinRequestToItem);
     params.reporter.success(
       `Loaded ${requests.length.toString()} channel join request${requests.length === 1 ? '' : 's'}`
     );
@@ -1036,6 +1070,7 @@ export async function approveChannelJoin(params: {
   actorSlug?: string;
   requestId: string;
   permission?: string;
+  selectPermission?: ChannelApprovalPermissionPrompt;
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
   const connected = await connectForAuthenticatedChannels(params);
@@ -1061,15 +1096,21 @@ export async function approveChannelJoin(params: {
         code: 'CHANNEL_NOT_FOUND',
       });
     }
+    const permission =
+      params.permission ??
+      (params.selectPermission
+        ? await params.selectPermission(channelJoinRequestToItem(request))
+        : request.permission || 'read');
     await conn.reducers.approveChannelJoin({
       agentDbId: adminActor.id,
       requestId,
-      permission: params.permission,
+      permission,
     });
     params.reporter.success(`Approved channel join request ${params.requestId}`);
     return {
       profile: profile.name,
       channelId: request.channelId.toString(),
+      permission,
       status: 'approved',
     };
   } finally {

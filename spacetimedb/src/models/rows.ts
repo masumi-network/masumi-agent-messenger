@@ -251,6 +251,7 @@ export const VisibleChannelRow = t.object('VisibleChannelRow', {
   title: t.string().optional(),
   description: t.string().optional(),
   accessMode: t.string(),
+  publicJoinPermission: t.string(),
   discoverable: t.bool(),
   creatorAgentDbId: t.u64(),
   lastMessageSeq: t.u64(),

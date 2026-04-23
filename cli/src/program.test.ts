@@ -1282,6 +1282,8 @@ describe('CLI command parsing', () => {
       '--description',
       'Deployment handoffs',
       '--approval-required',
+      '--public-join-permission',
+      'read_write',
       '--no-discoverable',
     ]);
 
@@ -1293,6 +1295,7 @@ describe('CLI command parsing', () => {
         title: 'Release Room',
         description: 'Deployment handoffs',
         accessMode: 'approval_required',
+        publicJoinPermission: 'read_write',
         discoverable: false,
       })
     );
@@ -1319,6 +1322,7 @@ describe('CLI command parsing', () => {
         actorSlug: 'deploy-agent',
         slug: 'release-room',
         accessMode: 'approval_required',
+        publicJoinPermission: 'read',
         discoverable: true,
       })
     );
@@ -1377,6 +1381,27 @@ describe('CLI command parsing', () => {
       })
     );
     expect(call).not.toHaveProperty('secretEnvelope');
+  });
+
+  it('does not prompt for channel approve permission in json mode', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channel',
+      'approve',
+      '42',
+      '--agent',
+      'deploy-agent',
+    ]);
+
+    expect(mocks.approveChannelJoin).toHaveBeenCalledWith(
+      expect.not.objectContaining({
+        selectPermission: expect.any(Function),
+      })
+    );
   });
 
   it('parses the plural channels alias for sending', async () => {

@@ -117,6 +117,7 @@ type ChannelPageDetails = {
   title?: string;
   description?: string;
   accessMode: string;
+  publicJoinPermission: string;
   discoverable: boolean;
   lastMessageSeq: bigint;
 };
@@ -146,6 +147,11 @@ function describePermission(permission: string): string {
   return permission;
 }
 
+function describePublicJoinPermission(permission: string): string {
+  if (permission === 'read_write') return 'Join grants write access';
+  return 'Join grants read-only access';
+}
+
 function describeAccessMode(accessMode: string): string {
   if (accessMode === 'public') return 'Public';
   if (accessMode === 'approval_required') return 'Approval required';
@@ -159,6 +165,7 @@ function toPublicChannelDetails(channel: PublicChannel): ChannelPageDetails {
     title: channel.title,
     description: channel.description,
     accessMode: channel.accessMode,
+    publicJoinPermission: channel.publicJoinPermission ?? 'read',
     discoverable: channel.discoverable,
     lastMessageSeq: channel.lastMessageSeq,
   };
@@ -496,6 +503,11 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
                     {channel.accessMode === 'approval_required' ? <Lock size={11} /> : null}
                     {accessModeLabel}
                   </Badge>
+                  {channel.accessMode === 'public' ? (
+                    <Badge variant="outline">
+                      {describePublicJoinPermission(channel.publicJoinPermission)}
+                    </Badge>
+                  ) : null}
                 </div>
                 <p className="mt-1 font-mono text-xs text-muted-foreground">/{channel.slug}</p>
                 {channel.description ? (
@@ -654,6 +666,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         title: visibleChannel.title,
         description: visibleChannel.description,
         accessMode: visibleChannel.accessMode,
+        publicJoinPermission: visibleChannel.publicJoinPermission,
         discoverable: visibleChannel.discoverable,
         lastMessageSeq: visibleChannel.lastMessageSeq,
       };
@@ -665,6 +678,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         title: publicChannel.title,
         description: publicChannel.description,
         accessMode: publicChannel.accessMode,
+        publicJoinPermission: publicChannel.publicJoinPermission ?? 'read',
         discoverable: publicChannel.discoverable,
         lastMessageSeq: publicChannel.lastMessageSeq,
       };
@@ -947,7 +961,11 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
           channelSlug: channel ? undefined : slug,
         })
       );
-      setActionFeedback('Joined channel.');
+      setActionFeedback(
+        `Joined channel with ${
+          channel?.publicJoinPermission === 'read_write' ? 'read/write' : 'read-only'
+        } access.`
+      );
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Unable to join channel');
     } finally {
@@ -1392,6 +1410,11 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
                         ? `${accessModeLabel} · Requested`
                         : accessModeLabel}
                   </Badge>
+                  {channel.accessMode === 'public' && !membership ? (
+                    <Badge variant="outline">
+                      {describePublicJoinPermission(channel.publicJoinPermission)}
+                    </Badge>
+                  ) : null}
                 </div>
                 {channel.description ? (
                   <p className="mt-1 max-w-3xl text-xs text-muted-foreground">{channel.description}</p>
@@ -1709,7 +1732,7 @@ function ChannelFooterCta({
   if (!authenticated) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-md border bg-muted/30 px-4 py-4 text-center">
-        <p className="text-sm font-medium">Sign in to post in this channel</p>
+        <p className="text-sm font-medium">Sign in to join this channel</p>
         <p className="text-xs text-muted-foreground">
           Anyone can read public channels without an account.
         </p>
@@ -1757,7 +1780,10 @@ function ChannelFooterCta({
   if (channel.accessMode === 'public') {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-md border bg-muted/30 px-4 py-4 text-center">
-        <p className="text-sm font-medium">Join to post in this channel</p>
+        <p className="text-sm font-medium">Join this channel</p>
+        <p className="text-xs text-muted-foreground">
+          {describePublicJoinPermission(channel.publicJoinPermission)}.
+        </p>
         <Button type="button" size="sm" onClick={onJoin} disabled={joining}>
           {joining ? 'Joining…' : 'Join channel'}
         </Button>
@@ -1937,54 +1963,89 @@ function RequestsDialog({
           ) : (
             <ul className="space-y-2">
               {requests.map(request => (
-                <li
+                <RequestApprovalItem
                   key={request.id.toString()}
-                  className="flex flex-col gap-2 rounded-md border p-3"
-                >
-                  <div className="flex items-center gap-3">
-                    <AgentAvatar
-                      name={request.requesterSlug}
-                      identity={request.requesterPublicIdentity}
-                      size="md"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{request.requesterSlug}</p>
-                      <p className="truncate font-mono text-xs text-muted-foreground">
-                        {request.requesterPublicIdentity}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void onResolve(request.id, 'approve', 'read')}
-                    >
-                      Approve read
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={() => void onResolve(request.id, 'approve', 'read_write')}
-                    >
-                      Approve write
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => void onResolve(request.id, 'reject')}
-                    >
-                      Reject
-                    </Button>
-                  </div>
-                </li>
+                  request={request}
+                  onResolve={onResolve}
+                />
               ))}
             </ul>
           )}
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function RequestApprovalItem({
+  request,
+  onResolve,
+}: {
+  request: VisibleChannelJoinRequestRow;
+  onResolve: (
+    requestId: bigint,
+    action: 'approve' | 'reject',
+    permission?: string
+  ) => void | Promise<void>;
+}) {
+  const [permission, setPermission] = useState(
+    request.permission === 'read_write' ? 'read_write' : 'read'
+  );
+
+  return (
+    <li className="flex flex-col gap-3 rounded-md border p-3">
+      <div className="flex items-center gap-3">
+        <AgentAvatar
+          name={request.requesterSlug}
+          identity={request.requesterPublicIdentity}
+          size="md"
+        />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{request.requesterSlug}</p>
+          <p className="truncate font-mono text-xs text-muted-foreground">
+            {request.requesterPublicIdentity}
+          </p>
+        </div>
+        <Badge variant="outline" className="text-[10px]">
+          requested {describePermission(request.permission)}
+        </Badge>
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <Select
+          value={permission}
+          onValueChange={value =>
+            setPermission(
+              value === 'admin' || value === 'read_write' ? value : 'read'
+            )
+          }
+        >
+          <SelectTrigger className="h-9 sm:w-36">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="read">Read only</SelectItem>
+            <SelectItem value="read_write">Write</SelectItem>
+            <SelectItem value="admin">Admin</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => void onResolve(request.id, 'approve', permission)}
+          >
+            Approve
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => void onResolve(request.id, 'reject')}
+          >
+            Reject
+          </Button>
+        </div>
+      </div>
+    </li>
   );
 }

@@ -579,6 +579,16 @@ export function normalizeChannelPermission(
   return normalized as (typeof CHANNEL_PERMISSIONS)[number];
 }
 
+export function normalizePublicChannelJoinPermission(
+  value: string | undefined
+): Extract<(typeof CHANNEL_PERMISSIONS)[number], 'read' | 'read_write'> {
+  const normalized = normalizeChannelPermission(value ?? 'read', { allowAdmin: false });
+  if (normalized !== 'read' && normalized !== 'read_write') {
+    throw new SenderError('publicJoinPermission is invalid');
+  }
+  return normalized;
+}
+
 export function normalizeChannelJoinRequestStatus(
   value: string
 ): (typeof CHANNEL_JOIN_REQUEST_STATUSES)[number] {
@@ -2863,6 +2873,7 @@ export function upsertPublicChannelRow(ctx: ModuleCtx, channel: ChannelRow) {
     title: channel.title,
     description: channel.description,
     accessMode: channel.accessMode,
+    publicJoinPermission: normalizePublicChannelJoinPermission(channel.publicJoinPermission),
     discoverable: channel.discoverable,
     lastMessageSeq: channel.lastMessageSeq,
     createdAt: channel.createdAt,

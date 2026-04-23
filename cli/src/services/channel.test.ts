@@ -163,4 +163,35 @@ describe('channel mutations', () => {
     expect(mocks.unsubscribe).toHaveBeenCalledOnce();
     expect(mocks.disconnectConnection).toHaveBeenCalledOnce();
   });
+
+  it('passes public auto-join permission when creating a channel', async () => {
+    mocks.iterVisibleAgents.mockReturnValue([
+      actor({
+        id: 1n,
+        inboxId: 10n,
+        slug: 'owner',
+      }),
+    ]);
+
+    await createChannel({
+      profileName: 'default',
+      slug: 'ops',
+      accessMode: 'public',
+      publicJoinPermission: 'read_write',
+      discoverable: true,
+      reporter: {
+        info() {},
+        success() {},
+        verbose() {},
+      },
+    });
+
+    expect(mocks.createChannel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        slug: 'ops',
+        accessMode: 'public',
+        publicJoinPermission: 'read_write',
+      })
+    );
+  });
 });

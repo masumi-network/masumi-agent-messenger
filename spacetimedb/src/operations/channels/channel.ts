@@ -11,6 +11,7 @@ const {
   normalizeOptionalChannelDescription,
   enforceRateLimit,
   normalizeChannelAccessMode,
+  normalizePublicChannelJoinPermission,
   getReadableInbox,
   getOwnedActor,
   ensureChannelMember,
@@ -52,6 +53,9 @@ export const visibleChannels = spacetimedb.view(
           title: channel.title,
           description: channel.description,
           accessMode: channel.accessMode,
+          publicJoinPermission: normalizePublicChannelJoinPermission(
+            channel.publicJoinPermission
+          ),
           discoverable: channel.discoverable,
           creatorAgentDbId: exposeActivity ? channel.creatorAgentDbId : 0n,
           lastMessageSeq: exposeActivity ? channel.lastMessageSeq : 0n,
@@ -70,6 +74,7 @@ export const createChannel = spacetimedb.reducer(
     title: t.string().optional(),
     description: t.string().optional(),
     accessMode: t.string(),
+    publicJoinPermission: t.string().optional(),
     discoverable: t.bool(),
   },
   (
@@ -80,6 +85,7 @@ export const createChannel = spacetimedb.reducer(
       title,
       description,
       accessMode,
+      publicJoinPermission,
       discoverable,
     }
   ) => {
@@ -100,6 +106,8 @@ export const createChannel = spacetimedb.reducer(
       throw new SenderError('channelSlug is already registered');
     }
     const normalizedAccessMode = normalizeChannelAccessMode(accessMode);
+    const normalizedPublicJoinPermission =
+      normalizePublicChannelJoinPermission(publicJoinPermission);
 
     const channel = ctx.db.channel.insert({
       id: 0n,
@@ -107,6 +115,7 @@ export const createChannel = spacetimedb.reducer(
       title: normalizeOptionalChannelTitle(title),
       description: normalizeOptionalChannelDescription(description),
       accessMode: normalizedAccessMode,
+      publicJoinPermission: normalizedPublicJoinPermission,
       discoverable,
       creatorAgentDbId: actor.id,
       nextChannelSeq: 1n,
