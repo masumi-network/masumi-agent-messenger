@@ -158,9 +158,7 @@ export const approveChannelJoin = spacetimedb.reducer(
       throw new SenderError('Only pending channel join requests can be approved');
     }
     const requester = getRequiredActorByDbId(ctx, request.requesterAgentDbId);
-    const grantedPermission = normalizeChannelPermission(permission ?? request.permission, {
-      allowAdmin: false,
-    });
+    const grantedPermission = normalizeChannelPermission(permission ?? request.permission);
     ensureChannelMember(ctx, channel, requester, grantedPermission);
     ctx.db.channelJoinRequest.id.update({
       ...request,

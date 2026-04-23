@@ -54,6 +54,7 @@ import {
   readAuthenticatedChannelMessages,
   rejectChannelJoin,
   sendChannelMessage,
+  setChannelMemberPermission,
   verifyChannelMessages,
   type ChannelMemberListItem,
   type ChannelMessageItem,
@@ -150,6 +151,10 @@ type TaskPanelField = {
   placeholder?: string;
   secret?: boolean;
   allowEmpty?: boolean;
+  choices?: Array<{
+    value: string;
+    label: string;
+  }>;
   lookup?: {
     mode: 'inbox_lookup' | 'saas_agent';
     tokenMode?: 'single' | 'comma_list';
@@ -574,6 +579,37 @@ function normalizeChannelAccessModeInput(value: string): 'public' | 'approval_re
     return 'approval_required';
   }
   return null;
+}
+
+function normalizeChannelPermissionInput(value: string): 'read' | 'read_write' | 'admin' | null {
+  const normalized = value.trim().toLowerCase().replace(/[-\s/]+/g, '_');
+  if (normalized === 'read' || normalized === 'read_only' || normalized === 'readonly') {
+    return 'read';
+  }
+  if (
+    normalized === 'read_write' ||
+    normalized === 'write' ||
+    normalized === 'writer' ||
+    normalized === 'readwrite'
+  ) {
+    return 'read_write';
+  }
+  if (normalized === 'admin') {
+    return 'admin';
+  }
+  return null;
+}
+
+function normalizePublicJoinPermissionInput(value: string): 'read' | 'read_write' | null {
+  const normalized = normalizeChannelPermissionInput(value);
+  return normalized === 'read' || normalized === 'read_write' ? normalized : null;
+}
+
+function describeChannelPermission(permission: string): string {
+  if (permission === 'read') return 'read only';
+  if (permission === 'read_write') return 'read/write';
+  if (permission === 'admin') return 'admin';
+  return permission;
 }
 
 function parseYesNoInput(value: string, defaultValue: boolean): boolean | null {
@@ -1923,14 +1959,21 @@ function TaskPanel({
       {panel.fields.length > 0 ? (
         <Box marginTop={1} flexDirection="column">
           {panel.fields.map((field, index) => {
-            const displayValue = field.secret ? maskValue(field.value) : field.value;
+            const choiceLabel = field.choices?.find(choice => choice.value === field.value)?.label;
+            const displayValue = field.choices
+              ? choiceLabel ?? field.value
+              : field.secret
+                ? maskValue(field.value)
+                : field.value;
             const isActive = index === panel.stepIndex;
             const activeCursor = isActive ? clampCursor(cursorIndex, displayValue.length) : displayValue.length;
             const valuePrefix = displayValue.slice(0, activeCursor);
             const valueSuffix = displayValue.slice(activeCursor);
-            const rowValue = displayValue
-              ? `${valuePrefix}${isActive ? '_' : ''}${valueSuffix}`
-              : `${isActive ? '_' : ''}${field.placeholder ?? ''}`;
+            const rowValue = field.choices
+              ? displayValue
+              : displayValue
+                ? `${valuePrefix}${isActive ? '_' : ''}${valueSuffix}`
+                : `${isActive ? '_' : ''}${field.placeholder ?? ''}`;
             const row = `${isActive ? '▸ ' : '  '}${field.label}: ${rowValue}`;
             return (
               <Text
@@ -2003,10 +2046,10 @@ function TaskPanel({
       <Text color="gray" wrap="truncate">
         {innerWidth
           ? truncateAndPadText(
-              `Step ${Math.min(panel.stepIndex + 1, Math.max(panel.fields.length, 1)).toString()}/${Math.max(panel.fields.length, 1).toString()} · ←/→ cursor · Enter ${currentField && !isLastField ? 'next' : panel.submitLabel.toLowerCase()} · Esc cancel`,
+              `Step ${Math.min(panel.stepIndex + 1, Math.max(panel.fields.length, 1)).toString()}/${Math.max(panel.fields.length, 1).toString()} · ${currentField?.choices ? '↑/↓ select' : '←/→ cursor'} · Enter ${currentField && !isLastField ? 'next' : panel.submitLabel.toLowerCase()} · Esc cancel`,
               innerWidth
             )
-          : `Step ${Math.min(panel.stepIndex + 1, Math.max(panel.fields.length, 1)).toString()}/${Math.max(panel.fields.length, 1).toString()} · ←/→ cursor · Enter ${currentField && !isLastField ? 'next' : panel.submitLabel.toLowerCase()} · Esc cancel`}
+          : `Step ${Math.min(panel.stepIndex + 1, Math.max(panel.fields.length, 1)).toString()}/${Math.max(panel.fields.length, 1).toString()} · ${currentField?.choices ? '↑/↓ select' : '←/→ cursor'} · Enter ${currentField && !isLastField ? 'next' : panel.submitLabel.toLowerCase()} · Esc cancel`}
       </Text>
     </Box>
   );
@@ -2045,6 +2088,7 @@ export function RootShell({
     initialSnapshot?.channelTab ?? 'messages'
   );
   const [channelApprovalIndex, setChannelApprovalIndex] = useState(0);
+  const [channelMemberIndex, setChannelMemberIndex] = useState(0);
   const [selectedAgentSlug, setSelectedAgentSlug] = useState<string | null>(
     initialSnapshot?.selectedAgentSlug ?? null
   );
@@ -2546,6 +2590,9 @@ export function RootShell({
     channelMembersState.channelId === selectedChannel?.id
       ? channelMembersState.members
       : [];
+  const selectedChannelMember =
+    selectedChannelMemberItems[clampIndex(channelMemberIndex, selectedChannelMemberItems.length)] ??
+    null;
   const selectedChannelMessagesLoading =
     shouldUseLiveChannelMessages
       ? liveChannelMessagesLoading && !liveChannelMessagesLoaded
@@ -2592,6 +2639,10 @@ export function RootShell({
       clampIndex(current, selectedChannelApprovals.length)
     );
   }, [selectedChannelApprovals.length]);
+
+  useEffect(() => {
+    setChannelMemberIndex(current => clampIndex(current, selectedChannelMemberItems.length));
+  }, [selectedChannelMemberItems.length]);
 
   useEffect(() => {
     if (channelTab === 'approvals' && !selectedChannel?.isAdmin) {
@@ -3662,10 +3713,29 @@ export function RootShell({
           label: 'Access',
           value: 'public',
           placeholder: 'public or approval_required',
+          choices: [
+            { value: 'public', label: 'Public' },
+            { value: 'approval_required', label: 'Approval required' },
+          ],
           validate: value =>
             normalizeChannelAccessModeInput(value)
               ? null
               : 'Use public or approval_required.',
+        },
+        {
+          key: 'publicJoinPermission',
+          label: 'Public join',
+          value: 'read',
+          placeholder: 'read or read_write',
+          choices: [
+            { value: 'read', label: 'Read only' },
+            { value: 'read_write', label: 'Read/write' },
+          ],
+          validate: (value, values) =>
+            normalizeChannelAccessModeInput(values.accessMode) === 'public' &&
+            !normalizePublicJoinPermissionInput(value)
+              ? 'Use read or read_write.'
+              : null,
         },
         {
           key: 'discoverable',
@@ -3682,11 +3752,14 @@ export function RootShell({
           return;
         }
         const accessMode = normalizeChannelAccessModeInput(values.accessMode);
+        const publicJoinPermission = normalizePublicJoinPermissionInput(
+          values.publicJoinPermission
+        );
         const discoverable = parseYesNoInput(values.discoverable, true);
-        if (!accessMode || discoverable === null) {
+        if (!accessMode || !publicJoinPermission || discoverable === null) {
           setTask(current => ({
             ...current,
-            error: 'Channel access or discoverability is invalid.',
+            error: 'Channel access, public join permission, or discoverability is invalid.',
           }));
           return;
         }
@@ -3700,6 +3773,7 @@ export function RootShell({
               title: values.title || undefined,
               description: values.description || undefined,
               accessMode,
+              publicJoinPermission,
               discoverable,
               reporter,
             }),
@@ -3777,6 +3851,129 @@ export function RootShell({
             setTask(current => ({
               ...current,
               notice: `Sent message to /${result.slug ?? selectedChannel.slug}.`,
+            }));
+          }
+        );
+      },
+    });
+  };
+
+  const openApproveChannelJoinTask = (approval: LiveChannelApproval) => {
+    openTaskPanel({
+      title: `Approve ${approval.requesterSlug}`,
+      help: `Choose the permission to grant in #${approval.channelSlug}.`,
+      submitLabel: 'Approve',
+      fields: [
+        {
+          key: 'permission',
+          label: 'Permission',
+          value: normalizeChannelPermissionInput(approval.permission) ?? 'read',
+          choices: [
+            { value: 'read', label: 'Read only' },
+            { value: 'read_write', label: 'Read/write' },
+            { value: 'admin', label: 'Admin' },
+          ],
+          validate: value =>
+            normalizeChannelPermissionInput(value) ? null : 'Choose a valid permission.',
+        },
+      ],
+      onSubmit: async values => {
+        setTaskPanel(null);
+        if (!model) {
+          return;
+        }
+        const permission = normalizeChannelPermissionInput(values.permission);
+        if (!permission) {
+          setTask(current => ({
+            ...current,
+            error: 'Choose a valid channel permission.',
+          }));
+          return;
+        }
+        await performTask(
+          `Approving channel request #${approval.id}`,
+          reporter =>
+            approveChannelJoin({
+              profileName: options.profile,
+              actorSlug: model.activeInbox.slug,
+              requestId: approval.id,
+              permission,
+              reporter,
+            }),
+          () => {
+            setChannelApprovalIndex(0);
+            setTask(current => ({
+              ...current,
+              notice: `Approved ${approval.requesterSlug} as ${describeChannelPermission(
+                permission
+              )}.`,
+            }));
+          }
+        );
+      },
+    });
+  };
+
+  const openSetChannelMemberPermissionTask = (member: ChannelMemberListItem) => {
+    if (!selectedChannel?.isAdmin) {
+      return;
+    }
+    openTaskPanel({
+      title: `Set ${member.agentSlug} permission`,
+      help: `Choose the member permission in #${selectedChannel.slug}.`,
+      submitLabel: 'Save',
+      fields: [
+        {
+          key: 'permission',
+          label: 'Permission',
+          value: normalizeChannelPermissionInput(member.permission) ?? 'read',
+          choices: [
+            { value: 'read', label: 'Read only' },
+            { value: 'read_write', label: 'Read/write' },
+            { value: 'admin', label: 'Admin' },
+          ],
+          validate: value =>
+            normalizeChannelPermissionInput(value) ? null : 'Choose a valid permission.',
+        },
+      ],
+      onSubmit: async values => {
+        setTaskPanel(null);
+        if (!model || !selectedChannel) {
+          return;
+        }
+        const permission = normalizeChannelPermissionInput(values.permission);
+        if (!permission) {
+          setTask(current => ({
+            ...current,
+            error: 'Choose a valid channel permission.',
+          }));
+          return;
+        }
+        await performTask(
+          `Updating ${member.agentSlug} in /${selectedChannel.slug}`,
+          reporter =>
+            setChannelMemberPermission({
+              profileName: options.profile,
+              actorSlug: model.activeInbox.slug,
+              slug: selectedChannel.slug,
+              memberAgentDbId: member.agentDbId,
+              permission,
+              reporter,
+            }),
+          () => {
+            setChannelMembersState(current =>
+              current.channelId === selectedChannel.id
+                ? {
+                    ...current,
+                    members: current.members.map(row =>
+                      row.agentDbId === member.agentDbId ? { ...row, permission } : row
+                    ),
+                  }
+                : current
+            );
+            setTask(current => ({
+              ...current,
+              notice: `Updated ${member.agentSlug} to ${describeChannelPermission(permission)}.`,
             }));
           }
         );
@@ -4549,6 +4746,35 @@ export function RootShell({
         return;
       }
 
+      if (currentField?.choices && (key.downArrow || key.upArrow || key.leftArrow || key.rightArrow)) {
+        const direction = key.upArrow || key.leftArrow ? -1 : 1;
+        const currentIndex = currentField.choices.findIndex(
+          choice => choice.value === currentField.value
+        );
+        const nextChoice =
+          currentField.choices[
+            clampIndex(Math.max(currentIndex, 0) + direction, currentField.choices.length)
+          ];
+        if (nextChoice) {
+          setTaskPanel(current =>
+            current
+              ? {
+                  ...current,
+                  fields: current.fields.map(field =>
+                    field.key === currentField.key
+                      ? {
+                          ...field,
+                          value: nextChoice.value,
+                        }
+                      : field
+                  ),
+                }
+              : current
+          );
+        }
+        return;
+      }
+
       if (key.tab && currentField?.lookup && taskLookup.items.length > 0) {
         const selectedSuggestion =
           taskLookup.items[clampIndex(taskLookupIndex, taskLookup.items.length)] ?? null;
@@ -4664,6 +4890,9 @@ export function RootShell({
         if (!currentField) {
           return;
         }
+        if (currentField.choices) {
+          return;
+        }
         const cursor = clampCursor(taskCursorIndex, currentField.value.length);
         const shouldDeleteBackward =
           key.backspace || (key.delete && cursor >= currentField.value.length);
@@ -4700,16 +4929,25 @@ export function RootShell({
       }
 
       if (key.leftArrow && currentField) {
+        if (currentField.choices) {
+          return;
+        }
         setTaskCursorIndex(current => clampCursor(current - 1, currentField.value.length));
         return;
       }
 
       if (key.rightArrow && currentField) {
+        if (currentField.choices) {
+          return;
+        }
         setTaskCursorIndex(current => clampCursor(current + 1, currentField.value.length));
         return;
       }
 
       if (!key.ctrl && !key.meta && input && currentField) {
+        if (currentField.choices) {
+          return;
+        }
         const cursor = clampCursor(taskCursorIndex, currentField.value.length);
         setTaskPanel(current =>
           current
@@ -5374,12 +5612,32 @@ export function RootShell({
       }
 
       if (channelTab === 'members') {
-        if (input === '[' || key.upArrow) {
-          await pageSelectedChannelMembers(key.upArrow ? 1 : -1);
+        if (key.downArrow) {
+          setChannelMemberIndex(current =>
+            clampIndex(current + 1, selectedChannelMemberItems.length)
+          );
           return;
         }
-        if (input === ']' || key.downArrow) {
-          await pageSelectedChannelMembers(key.downArrow ? -1 : 1);
+        if (key.upArrow) {
+          setChannelMemberIndex(current =>
+            clampIndex(current - 1, selectedChannelMemberItems.length)
+          );
+          return;
+        }
+        if (input === '[') {
+          await pageSelectedChannelMembers(-1);
+          return;
+        }
+        if (input === ']') {
+          await pageSelectedChannelMembers(1);
+          return;
+        }
+        if (
+          (lowerInput === 'p' || key.return) &&
+          selectedChannel.isAdmin &&
+          selectedChannelMember?.active
+        ) {
+          openSetChannelMemberPermissionTask(selectedChannelMember);
           return;
         }
         return;
@@ -5403,23 +5661,7 @@ export function RootShell({
           return;
         }
         if ((input === 'a' || key.return) && selectedChannelApproval) {
-          await performTask(
-            `Approving channel request #${selectedChannelApproval.id}`,
-            reporter =>
-              approveChannelJoin({
-                profileName: options.profile,
-                actorSlug: model.activeInbox.slug,
-                requestId: selectedChannelApproval.id,
-                reporter,
-              }),
-            () => {
-              setChannelApprovalIndex(0);
-              setTask(current => ({
-                ...current,
-                notice: `Approved channel request #${selectedChannelApproval.id}.`,
-              }));
-            }
-          );
+          openApproveChannelJoinTask(selectedChannelApproval);
           return;
         }
         if (input === 'x' && selectedChannelApproval) {
@@ -5995,8 +6237,14 @@ export function RootShell({
           detail: selectedChannel ? `#${selectedChannel.slug}` : undefined,
           items: [
             ...(channelTabs.length > 1 ? [{ key: '←/→', label: 'switch tab' }] : []),
+            ...(selectedChannelMemberItems.length > 1
+              ? [{ key: '↑/↓', label: 'select member' }]
+              : []),
+            ...(selectedChannel?.isAdmin && selectedChannelMember?.active
+              ? [{ key: 'P/Enter', label: 'set permission' }]
+              : []),
             ...(canPageChannelMembersNewer || canPageChannelMembersOlder
-              ? [{ key: '↑/↓', label: 'page members' }]
+              ? [{ key: '[ ]', label: 'page members' }]
               : []),
             { key: 'Esc', label: 'overview' },
             { key: 'Tab', label: 'sidebar' },
@@ -6420,6 +6668,9 @@ export function RootShell({
                       const labels = [
                         channel.permission,
                         channel.canSend ? 'can send' : null,
+                        channel.accessMode === 'public'
+                          ? `join ${describeChannelPermission(channel.publicJoinPermission)}`
+                          : null,
                         channel.pendingApprovals > 0
                           ? `${channel.pendingApprovals.toString()} pending`
                           : null,
@@ -6444,6 +6695,12 @@ export function RootShell({
                         selectedChannel.accessMode === 'approval_required'
                           ? 'approval required'
                           : selectedChannel.accessMode
+                      }${
+                        selectedChannel.accessMode === 'public'
+                          ? ` · join ${describeChannelPermission(
+                              selectedChannel.publicJoinPermission
+                            )}`
+                          : ''
                       } · messages ${selectedChannel.lastMessageSeq} · last ${formatTimestamp(selectedChannel.lastMessageAt)}`}
                       width={contentListWidth}
                       color="gray"
@@ -6538,18 +6795,38 @@ export function RootShell({
                       <Text color="red">✗ {selectedChannelMembersError}</Text>
                     ) : null}
                     {selectedChannelMemberItems.length > 0 ? (
-                      selectedChannelMemberItems.map(member => (
-                        <FixedLine
-                          key={member.id}
-                          text={`${member.agentDisplayName?.trim() || member.agentSlug} · ${
-                            member.agentSlug
-                          } · ${member.permission}${member.active ? '' : ' · inactive'} · sent ${
-                            member.lastSentSeq
-                          }`}
-                          width={contentListWidth}
-                          color={member.agentSlug === model.activeInbox.slug ? 'cyan' : 'gray'}
-                        />
-                      ))
+                      <>
+                        {renderList({
+                          items: selectedChannelMemberItems.map(member => {
+                            const label = member.agentDisplayName?.trim() || member.agentSlug;
+                            return `${label} · ${member.agentSlug} · ${describeChannelPermission(
+                              member.permission
+                            )}${member.active ? '' : ' · inactive'} · sent ${member.lastSentSeq}`;
+                          }),
+                          selectedIndex: clampIndex(
+                            channelMemberIndex,
+                            selectedChannelMemberItems.length
+                          ),
+                          empty: 'No visible channel members yet.',
+                          maxWidth: contentListWidth,
+                        })}
+                        {selectedChannelMember ? (
+                          <Box marginTop={1} flexDirection="column">
+                            <FixedLine
+                              text={`${selectedChannelMember.agentDisplayName?.trim() || selectedChannelMember.agentSlug} · ${describeChannelPermission(selectedChannelMember.permission)}`}
+                              width={contentListWidth}
+                              bold
+                            />
+                            <FixedLine
+                              text={`agent id ${selectedChannelMember.agentDbId} · ${
+                                selectedChannelMember.active ? 'active' : 'inactive'
+                              } · sent ${selectedChannelMember.lastSentSeq}`}
+                              width={contentListWidth}
+                              color="gray"
+                            />
+                          </Box>
+                        ) : null}
+                      </>
                     ) : selectedChannelMembersLoading ? (
                       <Text color="gray">Loading channel members...</Text>
                     ) : (

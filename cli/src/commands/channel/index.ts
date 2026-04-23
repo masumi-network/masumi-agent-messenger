@@ -17,6 +17,7 @@ import {
 } from '../../services/channel';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
 import { userError } from '../../services/errors';
+import { promptChoice } from '../../services/prompts';
 import { renderEmpty, renderKeyValue, renderTable, type TableColumn } from '../../services/render';
 import { showCommandHelp } from '../menu';
 
@@ -27,6 +28,7 @@ type ChannelOptions = GlobalOptions & {
   approvalRequired?: boolean;
   discoverable?: boolean;
   permission?: string;
+  publicJoinPermission?: string;
   contentType?: string;
   authenticated?: boolean;
   beforeChannelSeq?: string;
@@ -42,9 +44,17 @@ function channelColumns(): TableColumn[] {
     { header: 'ID', key: 'id' },
     { header: 'Slug', key: 'slug' },
     { header: 'Title', key: 'title' },
+    { header: 'Join', key: 'join' },
     { header: 'Messages', key: 'messages', align: 'right' },
     { header: 'Discoverable', key: 'discoverable' },
   ];
+}
+
+function formatChannelPermission(permission: string): string {
+  if (permission === 'read') return 'read';
+  if (permission === 'read_write') return 'read/write';
+  if (permission === 'admin') return 'admin';
+  return permission;
 }
 
 export function registerChannelCommands(program: Command): void {
@@ -80,6 +90,7 @@ export function registerChannelCommands(program: Command): void {
               id: row.id,
               slug: row.slug,
               title: row.title ?? '',
+              join: formatChannelPermission(row.publicJoinPermission),
               messages: row.lastMessageSeq,
               discoverable: row.discoverable ? 'yes' : 'no',
             })),
@@ -114,6 +125,10 @@ export function registerChannelCommands(program: Command): void {
                   { key: 'Slug', value: selected.slug },
                   { key: 'Title', value: selected.title ?? 'not set' },
                   { key: 'Description', value: selected.description ?? 'not set' },
+                  {
+                    key: 'Public join permission',
+                    value: formatChannelPermission(selected.publicJoinPermission),
+                  },
                   { key: 'Messages', value: selected.lastMessageSeq },
                   { key: 'Discoverable', value: selected.discoverable ? 'yes' : 'no' },
                 ])
@@ -228,6 +243,7 @@ export function registerChannelCommands(program: Command): void {
     .option('--title <title>', 'Channel title')
     .option('--description <text>', 'Channel description')
     .option('--approval-required', 'Require admin approval to join')
+    .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write', 'read')
     .option('--no-discoverable', 'Hide from discovery/search surfaces')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
@@ -242,6 +258,7 @@ export function registerChannelCommands(program: Command): void {
             title: options.title,
             description: options.description,
             accessMode: options.approvalRequired ? 'approval_required' : 'public',
+            publicJoinPermission: options.publicJoinPermission,
             discoverable: options.discoverable !== false,
             reporter,
           }),
@@ -260,6 +277,7 @@ export function registerChannelCommands(program: Command): void {
     .option('--title <title>', 'Channel title')
     .option('--description <text>', 'Channel description')
     .option('--approval-required', 'Require admin approval to join')
+    .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write', 'read')
     .option('--no-discoverable', 'Hide from discovery/search surfaces')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
@@ -274,6 +292,7 @@ export function registerChannelCommands(program: Command): void {
             title: options.title,
             description: options.description,
             accessMode: options.approvalRequired ? 'approval_required' : 'public',
+            publicJoinPermission: options.publicJoinPermission,
             discoverable: options.discoverable !== false,
             reporter,
           }),
@@ -286,7 +305,7 @@ export function registerChannelCommands(program: Command): void {
 
   channel
     .command('join')
-    .description('Join a public channel as read-only')
+    .description('Join a public channel')
     .argument('<slug>', 'Channel slug')
     .option('--agent <slug>', 'Owned agent slug to join as')
     .action(async function (this: Command, slug: string) {
@@ -302,7 +321,9 @@ export function registerChannelCommands(program: Command): void {
             reporter,
           }),
         toHuman: result => ({
-          summary: `Channel ${result.slug ?? slug} ${result.status}.`,
+          summary: `Channel ${result.slug ?? slug} ${result.status}${
+            result.permission ? ` with ${formatChannelPermission(result.permission)} access` : ''
+          }.`,
           details: [],
         }),
       });
@@ -452,10 +473,25 @@ export function registerChannelCommands(program: Command): void {
             actorSlug: options.agent,
             requestId,
             permission: options.permission,
+            selectPermission: options.permission || options.json || !process.stdin.isTTY || !process.stdout.isTTY
+              ? undefined
+              : request =>
+                  promptChoice({
+                    question: `Approve ${request.requesterSlug} for #${request.channelSlug} as`,
+                    defaultValue:
+                      request.permission === 'read_write' ? 'read_write' : 'read',
+                    options: [
+                      { value: 'read', label: 'Read only' },
+                      { value: 'read_write', label: 'Read/write' },
+                      { value: 'admin', label: 'Admin' },
+                    ],
+                  }),
             reporter,
           }),
         toHuman: result => ({
-          summary: `Channel request ${requestId} ${result.status}.`,
+          summary: `Channel request ${requestId} ${result.status}${
+            result.permission ? ` as ${formatChannelPermission(result.permission)}` : ''
+          }.`,
           details: [],
         }),
       });

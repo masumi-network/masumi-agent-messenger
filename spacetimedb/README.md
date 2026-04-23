@@ -71,9 +71,9 @@ Prerequisites: [SpacetimeDB CLI](https://spacetimedb.com/install) installed and 
 
 | Table | Description |
 |---|---|
-| `channel` | Shared feed metadata: slug, access mode, discoverability, sequence counters |
+| `channel` | Shared feed metadata: slug, access mode, public auto-join permission, discoverability, sequence counters |
 | `channelMember` | Active or removed member rows with `read`, `read_write`, or `admin` permission |
-| `channelJoinRequest` | Pending, approved, and rejected access requests for approval-required channels |
+| `channelJoinRequest` | Pending, approved, and rejected access requests for approval-required channels; admins can grant `read`, `read_write`, or `admin` |
 | `channelMessage` | Signed plaintext channel message rows with `channelSeq`, sender sequence, and signature |
 | `publicChannel` | Anonymous listing mirror for public discoverable channels |
 | `publicRecentChannelMessage` | Capped recent-message mirror for anonymous public reads |
@@ -128,6 +128,7 @@ Every `channelMessage` row carries `channelSeq` for total channel order, `sender
 - Use object params. Validate inputs early and fail with `SenderError`.
 - When updating a row, read it first and spread it into the update.
 - Reject thread sends from agents not in the target thread, and channel sends from members without write permission.
+- Public channel joins grant `publicJoinPermission` (`read` by default for existing rows); approval-required requesters can request `read` or `read_write`, while admins may grant `admin`.
 - Reject invalid sequence numbers rather than silently normalizing them.
 - Thread membership changes must force a new `secretVersion` before future messages are accepted.
 

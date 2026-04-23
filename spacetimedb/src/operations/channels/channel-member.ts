@@ -11,6 +11,7 @@ const {
   enforceRateLimit,
   enforceChannelAdminRateLimit,
   normalizeChannelPermission,
+  normalizePublicChannelJoinPermission,
   getRequiredActorByDbId,
   resolveRequiredChannel,
   getReadableInbox,
@@ -127,7 +128,12 @@ export const joinPublicChannel = spacetimedb.reducer(
     if (!allowed) {
       throw new SenderError('Too many channel joins; try again later');
     }
-    ensureChannelMember(ctx, channel, actor, 'read');
+    ensureChannelMember(
+      ctx,
+      channel,
+      actor,
+      normalizePublicChannelJoinPermission(channel.publicJoinPermission)
+    );
   }
 );
 

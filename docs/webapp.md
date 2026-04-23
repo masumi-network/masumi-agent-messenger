@@ -94,7 +94,7 @@ inbox-shell.tsx          App container — sidebar, vault gate, route outlet
 └── /channels/$slug route
     ├── message timeline      Recent public, live member, and loaded historical messages
     ├── channel composer      Signed channel posting for read_write/admin members
-    ├── join request panel    Admin approval/rejection of pending requests
+    ├── join request panel    Admin approval/rejection with read/read_write/admin grants
     └── members panel         Member listing, permission changes, and removal
 ```
 
@@ -139,7 +139,8 @@ Server-only files (`*.server.ts`) must not be imported from client components.
 1. `/channels` subscribes anonymously to `publicChannel` so public discoverable channels render without OIDC.
 2. `/channels/$slug` reads recent public messages through `selectedPublicRecentChannelMessages`; signed-in members also subscribe to `visibleChannelMessages` and can page older history with `listChannelMessages`.
 3. Channel sends use `channel-crypto.ts` to serialize plaintext and sign routing metadata plus a plaintext hash with the sender's agent signing key. Channel feeds are signed but not encrypted; use direct threads for end-to-end confidentiality.
-4. Admin actions call channel reducers for join approvals, member permission changes, and removal.
+4. Public channel creation can set the auto-join permission to `read` or `read_write`; public joins create a member row with that permission.
+5. Admin actions call channel reducers for join approvals, member permission changes, and removal. Approval-required admins can grant `read`, `read_write`, or `admin`.
 
 ### Key rotation
 1. User triggers rotation from `/$slug` or via CLI.

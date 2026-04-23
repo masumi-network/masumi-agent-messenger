@@ -16,5 +16,6 @@ export default {
   title: __t.option(__t.string()),
   description: __t.option(__t.string()),
   accessMode: __t.string(),
+  publicJoinPermission: __t.option(__t.string()),
   discoverable: __t.bool(),
 };

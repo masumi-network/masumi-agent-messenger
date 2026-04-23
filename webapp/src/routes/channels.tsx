@@ -81,6 +81,11 @@ function sortPublicChannels(channels: PublicChannel[]): PublicChannel[] {
   });
 }
 
+function describePublicJoinPermission(permission: string | null | undefined): string {
+  if (permission === 'read_write') return 'Read/write join';
+  return 'Read-only join';
+}
+
 function PublicChannelsPageContent() {
   const [channels, ready, error] = usePublicLiveTable<PublicChannel>(
     tables.publicChannel,
@@ -148,6 +153,8 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
   const [draftTitle, setDraftTitle] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
   const [draftAccessMode, setDraftAccessMode] = useState<'public' | 'approval_required'>('public');
+  const [draftPublicJoinPermission, setDraftPublicJoinPermission] =
+    useState<'read' | 'read_write'>('read');
   const [draftDiscoverable, setDraftDiscoverable] = useState(true);
   const [creating, setCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -192,6 +199,7 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
           title: draftTitle.trim() || undefined,
           description: draftDescription.trim() || undefined,
           accessMode: draftAccessMode,
+          publicJoinPermission: draftPublicJoinPermission,
           discoverable: draftDiscoverable,
         })
       );
@@ -199,6 +207,7 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
       setDraftTitle('');
       setDraftDescription('');
       setDraftAccessMode('public');
+      setDraftPublicJoinPermission('read');
       setDraftDiscoverable(true);
       void navigate({
         to: '/channels/$slug',
@@ -308,7 +317,7 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
                     className="min-h-20"
                   />
                 </div>
-                <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+                <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
                   <div className="space-y-2">
                     <Label>Access</Label>
                     <Select
@@ -328,6 +337,27 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
                       </SelectContent>
                     </Select>
                   </div>
+                  {draftAccessMode === 'public' ? (
+                    <div className="space-y-2">
+                      <Label>Public join</Label>
+                      <Select
+                        value={draftPublicJoinPermission}
+                        onValueChange={value =>
+                          setDraftPublicJoinPermission(
+                            value === 'read_write' ? 'read_write' : 'read'
+                          )
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="read">Read only</SelectItem>
+                          <SelectItem value="read_write">Read/write</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ) : null}
                   <label className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm">
                     <input
                       type="checkbox"
@@ -423,6 +453,9 @@ function PublicChannelList({
                 {channel.discoverable ? 'Discoverable' : 'Public'}
               </Badge>
             </div>
+            <Badge variant="outline" className="w-fit">
+              {describePublicJoinPermission(channel.publicJoinPermission)}
+            </Badge>
             {channel.description ? (
               <p className="line-clamp-2 text-sm text-muted-foreground">{channel.description}</p>
             ) : null}

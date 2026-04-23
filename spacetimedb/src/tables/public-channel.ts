@@ -13,6 +13,7 @@ export const publicChannelTable = table(
       title: t.string().optional(),
       description: t.string().optional(),
       accessMode: t.string(),
+      publicJoinPermission: t.string().optional(),
       discoverable: t.bool(),
       lastMessageSeq: t.u64(),
       createdAt: t.timestamp(),

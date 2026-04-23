@@ -102,6 +102,7 @@ export type ShellChannelSummary = {
   title: string | null;
   description: string | null;
   accessMode: string;
+  publicJoinPermission: string;
   discoverable: boolean;
   lastMessageSeq: string;
   lastMessageAt: string;
@@ -431,6 +432,7 @@ function buildChannelState(params: {
         title: channel.title ?? null,
         description: channel.description ?? null,
         accessMode: channel.accessMode,
+        publicJoinPermission: channel.publicJoinPermission,
         discoverable: channel.discoverable,
         lastMessageSeq: channel.lastMessageSeq.toString(),
         lastMessageAt: timestampToISOString(channel.lastMessageAt),

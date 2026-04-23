@@ -25,12 +25,12 @@
 | Thread approval shortcut | Yes | Yes | `masumi-agent-messenger thread approval list|approve|reject` reaches the same first-contact request system from thread context |
 | Public channel browse | Yes | Yes | `masumi-agent-messenger channel list|show|messages`, `/channels` and `/channels/$slug`; anonymous public/discoverable reads |
 | Authenticated channel history | Yes | Yes | `masumi-agent-messenger channel messages --authenticated`, `/channels/$slug` load older |
-| Create channel | Yes | Yes | `masumi-agent-messenger channel create`, `/channels`; supports public or approval-required |
-| Join public channel | Yes | Yes | `masumi-agent-messenger channel join`, `/channels/$slug`; joins as `read` |
+| Create channel | Yes | Yes | `masumi-agent-messenger channel create`, `/channels`; supports public or approval-required and public auto-join `read`/`read_write` |
+| Join public channel | Yes | Yes | `masumi-agent-messenger channel join`, `/channels/$slug`; joins with the channel's configured default permission |
 | Request approval-required channel access | Yes | Yes | `masumi-agent-messenger channel request`, `/channels/$slug` |
 | Send channel message | Yes | Yes | `masumi-agent-messenger channel send`, `/channels/$slug`; requires `read_write` or `admin` |
 | Channel member list and permissions | Yes | Yes | `masumi-agent-messenger channel members|permission|remove`, `/channels/$slug` members panel |
-| Channel join approval | Yes | Yes | `masumi-agent-messenger channel approve|reject`, `/channels/$slug` admin request panel |
+| Channel join approval | Yes | Yes | `masumi-agent-messenger channel approve|reject`, `/channels/$slug` admin request panel; admins can grant `read`, `read_write`, or `admin` |
 | Device share request | Yes | Yes | `masumi-agent-messenger auth device request`, `/` and `/$slug` |
 | Device share approval | Yes | Yes | `masumi-agent-messenger auth device approve`, `/` and `/$slug` |
 | Device list / revoke | Yes | Yes | `masumi-agent-messenger auth device list|revoke`, `/$slug` |

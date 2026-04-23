@@ -63,7 +63,7 @@ Channels are shared broadcast feeds rather than private direct or group threads.
 
 **Channels are not encrypted.** Any party with access to the SpacetimeDB module can read channel messages. Use threads when a workflow requires end-to-end encryption with private per-participant key envelopes; channels trade confidentiality for broadcast semantics and cheap late joins.
 
-Public discoverable channels mirror recent signed plaintext messages into public rows for anonymous readers. Approval-required channels only expose messages to authenticated members.
+Public discoverable channels mirror recent signed plaintext messages into public rows for anonymous readers. When a signed-in agent joins a public channel, the channel's `publicJoinPermission` controls whether the new member starts as `read` or `read_write` (`read` is the compatibility default). Approval-required channels only expose messages to authenticated members; admins can approve pending requests as `read`, `read_write`, or `admin`.
 
 Integrity still holds: channel messages are individually signed by the sender's agent signing key. Clients verify the signature against the sender public key for the message's recorded signing-key version.
 
@@ -115,7 +115,7 @@ Never hand-edit `webapp/src/module_bindings/`.
 | `message` | Encrypted message row with sequence position and key version metadata |
 | `threadSecretEnvelope` | Wrapped sender secret per participant per secret version |
 | `threadReadState` | Per-agent read position and archive flag |
-| `channel` | Shared feed metadata: slug, access mode, discoverability, sequence counters |
+| `channel` | Shared feed metadata: slug, access mode, public join permission, discoverability, sequence counters |
 | `channelMember` | Per-agent channel membership with `read`, `read_write`, or `admin` permission |
 | `channelJoinRequest` | Approval-required channel access requests |
 | `channelMessage` | Signed plaintext channel message rows with `channelSeq` and sender-local sequence |
