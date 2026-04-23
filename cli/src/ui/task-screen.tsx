@@ -2,6 +2,8 @@ import { Box, Static, Text, useApp, useInput } from 'ink';
 import { useEffect, useState } from 'react';
 import { spawn } from 'node:child_process';
 
+type InkInputKey = Parameters<Parameters<typeof useInput>[0]>[1];
+
 export type TaskEvent = {
   kind: 'info' | 'success' | 'error';
   text: string;
@@ -15,9 +17,52 @@ export type TaskBanner = {
 };
 
 export type TaskPrompt = {
-  message: string;
-  onConfirm: () => void;
-};
+  onCancel: () => void;
+} & (
+  | {
+      kind: 'press-enter';
+      message: string;
+      onSubmit: () => void;
+    }
+  | {
+      kind: 'choice';
+      question: string;
+      options: Array<{ label: string }>;
+      selectedIndex: number;
+      onSelectedIndexChange: (index: number) => void;
+      onSubmit: (index: number) => void;
+    }
+  | {
+      kind: 'confirm';
+      question: string;
+      value: boolean;
+      defaultValue?: boolean;
+      onValueChange: (value: boolean) => void;
+      onSubmit: (value: boolean) => void;
+    }
+  | {
+      kind: 'text' | 'secret';
+      question: string;
+      value: string;
+      cursor: number;
+      defaultValue?: string;
+      placeholder?: string;
+      onChange: (value: string, cursor: number) => void;
+      onSubmit: (value: string) => void;
+    }
+  | {
+      kind: 'multiline';
+      question: string;
+      doneMessage: string;
+      lines: string[];
+      value: string;
+      cursor: number;
+      placeholder?: string;
+      onChange: (value: string, cursor: number) => void;
+      onAddLine: (line: string) => void;
+      onSubmit: () => void;
+    }
+);
 
 export type TaskRenderState = {
   title: string;
@@ -174,6 +219,186 @@ function prefixForEvent(kind: TaskEvent['kind']): string {
   return '[..]';
 }
 
+function clampCursor(cursor: number, value: string): number {
+  return Math.max(0, Math.min(value.length, cursor));
+}
+
+function insertInput(value: string, cursor: number, input: string): [string, number] {
+  const safeCursor = clampCursor(cursor, value);
+  const nextValue = value.slice(0, safeCursor) + input + value.slice(safeCursor);
+  return [nextValue, safeCursor + input.length];
+}
+
+function removeBeforeCursor(value: string, cursor: number): [string, number] {
+  const safeCursor = clampCursor(cursor, value);
+  if (safeCursor <= 0) {
+    return [value, safeCursor];
+  }
+  return [value.slice(0, safeCursor - 1) + value.slice(safeCursor), safeCursor - 1];
+}
+
+function removeAtCursor(value: string, cursor: number): [string, number] {
+  const safeCursor = clampCursor(cursor, value);
+  if (safeCursor >= value.length) {
+    return [value, safeCursor];
+  }
+  return [value.slice(0, safeCursor) + value.slice(safeCursor + 1), safeCursor];
+}
+
+function shouldInsertInput(input: string, key: InkInputKey): boolean {
+  return Boolean(input && !key.ctrl && !key.meta && !key.return && !key.tab && !key.escape);
+}
+
+function renderEditableValue(params: {
+  value: string;
+  cursor: number;
+  secret?: boolean;
+  placeholder?: string;
+}) {
+  const displayValue = params.secret ? '*'.repeat(params.value.length) : params.value;
+  const cursor = clampCursor(params.cursor, displayValue);
+  if (!displayValue) {
+    return (
+      <Text>
+        <Text inverse> </Text>
+        {params.placeholder ? <Text color="gray">{params.placeholder}</Text> : null}
+      </Text>
+    );
+  }
+
+  const before = displayValue.slice(0, cursor);
+  const active = displayValue[cursor] ?? ' ';
+  const after = cursor < displayValue.length ? displayValue.slice(cursor + 1) : '';
+
+  return (
+    <Text>
+      {before}
+      <Text inverse>{active}</Text>
+      {after}
+    </Text>
+  );
+}
+
+function editValueFromInput(prompt: Extract<TaskPrompt, { kind: 'text' | 'secret' | 'multiline' }>, input: string, key: InkInputKey): void {
+  if (key.leftArrow) {
+    prompt.onChange(prompt.value, clampCursor(prompt.cursor - 1, prompt.value));
+    return;
+  }
+  if (key.rightArrow) {
+    prompt.onChange(prompt.value, clampCursor(prompt.cursor + 1, prompt.value));
+    return;
+  }
+  if (key.home) {
+    prompt.onChange(prompt.value, 0);
+    return;
+  }
+  if (key.end) {
+    prompt.onChange(prompt.value, prompt.value.length);
+    return;
+  }
+  if (key.backspace) {
+    const [nextValue, nextCursor] = removeBeforeCursor(prompt.value, prompt.cursor);
+    prompt.onChange(nextValue, nextCursor);
+    return;
+  }
+  if (key.delete) {
+    const [nextValue, nextCursor] = removeAtCursor(prompt.value, prompt.cursor);
+    prompt.onChange(nextValue, nextCursor);
+    return;
+  }
+  if (shouldInsertInput(input, key)) {
+    const [nextValue, nextCursor] = insertInput(prompt.value, prompt.cursor, input);
+    prompt.onChange(nextValue, nextCursor);
+  }
+}
+
+function renderPrompt(prompt: TaskPrompt) {
+  if (prompt.kind === 'press-enter') {
+    return <Text color="cyan">{prompt.message}</Text>;
+  }
+
+  if (prompt.kind === 'choice') {
+    return (
+      <Box flexDirection="column">
+        <Text color="cyan">{prompt.question}</Text>
+        {prompt.options.map((option, index) => (
+          <Text key={`${option.label}:${index}`} color={index === prompt.selectedIndex ? 'cyan' : 'gray'}>
+            {index === prompt.selectedIndex ? '> ' : '  '}
+            {option.label}
+          </Text>
+        ))}
+        <Text color="gray">Up/Down select · Enter confirm · Esc cancel</Text>
+      </Box>
+    );
+  }
+
+  if (prompt.kind === 'confirm') {
+    const yesSuffix = prompt.defaultValue === true ? ' (default)' : '';
+    const noSuffix = prompt.defaultValue === false ? ' (default)' : '';
+    return (
+      <Box flexDirection="column">
+        <Text color="cyan">{prompt.question}</Text>
+        <Text>
+          <Text color={prompt.value ? 'cyan' : 'gray'}>{prompt.value ? '> ' : '  '}Yes{yesSuffix}</Text>
+          <Text color="gray"> / </Text>
+          <Text color={!prompt.value ? 'cyan' : 'gray'}>{!prompt.value ? '> ' : '  '}No{noSuffix}</Text>
+        </Text>
+        <Text color="gray">Left/Right select · y/n choose · Enter confirm · Esc cancel</Text>
+      </Box>
+    );
+  }
+
+  if (prompt.kind === 'text' || prompt.kind === 'secret') {
+    const hasDefault = Boolean(prompt.defaultValue && prompt.defaultValue.length > 0);
+    return (
+      <Box flexDirection="column">
+        <Text color="cyan">
+          {prompt.question}
+          {prompt.kind === 'text' && hasDefault ? <Text color="gray"> [default: {prompt.defaultValue}]</Text> : null}
+          {prompt.kind === 'secret' && hasDefault ? <Text color="gray"> [Enter keeps current value]</Text> : null}
+        </Text>
+        <Text>
+          <Text color="green">{'> '}</Text>
+          {renderEditableValue({
+            value: prompt.value,
+            cursor: prompt.cursor,
+            secret: prompt.kind === 'secret',
+            placeholder:
+              prompt.placeholder ??
+              (prompt.kind === 'secret' ? 'Hidden input' : hasDefault ? 'Press Enter for default' : 'Type here'),
+          })}
+        </Text>
+        <Text color="gray">Enter submit · Esc cancel</Text>
+      </Box>
+    );
+  }
+
+  if (prompt.kind !== 'multiline') {
+    return null;
+  }
+
+  return (
+    <Box flexDirection="column">
+      <Text color="cyan">{prompt.question}</Text>
+      <Text color="gray">{prompt.doneMessage}</Text>
+      {prompt.lines.map((line, index) => (
+        <Text key={`${index}:${line}`} color="gray">
+          . {line}
+        </Text>
+      ))}
+      <Text>
+        <Text color="green">{'> '}</Text>
+        {renderEditableValue({
+          value: prompt.value,
+          cursor: prompt.cursor,
+          placeholder: prompt.placeholder ?? 'Type a line',
+        })}
+      </Text>
+      <Text color="gray">Enter adds line · empty line submits · Esc cancel</Text>
+    </Box>
+  );
+}
+
 export function TaskScreen({ state }: { state: TaskRenderState }) {
   const { exit } = useApp();
   const shouldAnimateCelebration = Boolean(state.final?.celebration);
@@ -214,10 +439,86 @@ export function TaskScreen({ state }: { state: TaskRenderState }) {
 
   useInput(
     (input, key) => {
+      if (hasActivePrompt) {
+        const prompt = state.prompt!;
+        if (key.escape || (key.ctrl && input === 'c')) {
+          prompt.onCancel();
+          return;
+        }
+
+        if (prompt.kind === 'press-enter') {
+          if (key.return) {
+            prompt.onSubmit();
+          }
+          return;
+        }
+
+        if (prompt.kind === 'choice') {
+          if (key.upArrow) {
+            const nextIndex =
+              prompt.selectedIndex <= 0 ? prompt.options.length - 1 : prompt.selectedIndex - 1;
+            prompt.onSelectedIndexChange(nextIndex);
+            return;
+          }
+          if (key.downArrow) {
+            const nextIndex =
+              prompt.selectedIndex >= prompt.options.length - 1 ? 0 : prompt.selectedIndex + 1;
+            prompt.onSelectedIndexChange(nextIndex);
+            return;
+          }
+          if (key.return) {
+            prompt.onSubmit(prompt.selectedIndex);
+          }
+          return;
+        }
+
+        if (prompt.kind === 'confirm') {
+          const lowered = input.toLowerCase();
+          if (lowered === 'y') {
+            prompt.onSubmit(true);
+            return;
+          }
+          if (lowered === 'n') {
+            prompt.onSubmit(false);
+            return;
+          }
+          if (key.leftArrow || key.rightArrow || key.tab) {
+            prompt.onValueChange(!prompt.value);
+            return;
+          }
+          if (key.return) {
+            prompt.onSubmit(prompt.value);
+          }
+          return;
+        }
+
+        if (prompt.kind === 'text' || prompt.kind === 'secret') {
+          if (key.return) {
+            prompt.onSubmit(prompt.value);
+            return;
+          }
+          editValueFromInput(prompt, input, key);
+          return;
+        }
+
+        if (prompt.kind !== 'multiline') {
+          return;
+        }
+
+        if (key.return) {
+          if (prompt.value.length === 0) {
+            prompt.onSubmit();
+            return;
+          }
+          prompt.onAddLine(prompt.value);
+          return;
+        }
+        editValueFromInput(prompt, input, key);
+        return;
+      }
+
       if (key.return) {
-        if (hasActivePrompt) {
-          state.prompt!.onConfirm();
-        } else if (shouldAnimateCelebration) {
+        if (shouldAnimateCelebration) {
           exit();
         }
       }
@@ -307,7 +608,7 @@ export function TaskScreen({ state }: { state: TaskRenderState }) {
         </Box>
       ) : null}
       {hasActivePrompt ? (
-        <Text color="cyan">{state.prompt!.message}</Text>
+        renderPrompt(state.prompt!)
       ) : state.active && !state.final ? (
         <Text color="cyan">
           {ACTIVE_SPINNER_FRAMES[spinnerIndex]} {state.active}

@@ -7,15 +7,65 @@ type PromptOutputLifecycle = {
   afterPrompt(): void;
 };
 
+export type ConfirmPromptParams = {
+  question: string;
+  defaultValue?: boolean;
+};
+
+export type TextPromptParams = {
+  question: string;
+  defaultValue?: string;
+  placeholder?: string;
+};
+
+export type SecretPromptParams = {
+  question: string;
+  defaultValue?: string;
+  placeholder?: string;
+};
+
+export type ChoicePromptParams<T extends string> = {
+  question: string;
+  options: Array<{
+    value: T;
+    label: string;
+  }>;
+  defaultValue?: T;
+};
+
+export type MultilinePromptParams = {
+  question: string;
+  doneMessage?: string;
+  placeholder?: string;
+};
+
+export type PromptProvider = {
+  confirmYesNo(params: ConfirmPromptParams): Promise<boolean>;
+  waitForEnterMessage(message: string): Promise<void>;
+  promptText(params: TextPromptParams): Promise<string>;
+  promptSecret(params: SecretPromptParams): Promise<string>;
+  promptChoice<T extends string>(params: ChoicePromptParams<T>): Promise<T>;
+  promptMultiline(params: MultilinePromptParams): Promise<string>;
+};
+
 const SHOW_CURSOR = '\u001B[?25h';
 
 let promptOutputLifecycle: PromptOutputLifecycle | undefined;
+let promptProvider: PromptProvider | undefined;
 
 export function installPromptOutputLifecycle(hooks: PromptOutputLifecycle): () => void {
   const previous = promptOutputLifecycle;
   promptOutputLifecycle = hooks;
   return () => {
     promptOutputLifecycle = previous;
+  };
+}
+
+export function installPromptProvider(provider: PromptProvider): () => void {
+  const previous = promptProvider;
+  promptProvider = provider;
+  return () => {
+    promptProvider = previous;
   };
 }
 
@@ -50,10 +100,11 @@ function keepProcessAliveWhilePrompting(): () => void {
   };
 }
 
-export async function confirmYesNo(params: {
-  question: string;
-  defaultValue?: boolean;
-}): Promise<boolean> {
+export async function confirmYesNo(params: ConfirmPromptParams): Promise<boolean> {
+  if (promptProvider) {
+    return promptProvider.confirmYesNo(params);
+  }
+
   if (!interactiveStdioAvailable()) {
     return params.defaultValue ?? false;
   }
@@ -81,6 +132,10 @@ export async function confirmYesNo(params: {
 }
 
 export async function waitForEnterMessage(message: string): Promise<void> {
+  if (promptProvider) {
+    return promptProvider.waitForEnterMessage(message);
+  }
+
   if (!interactiveStdioAvailable()) {
     return;
   }
@@ -99,10 +154,11 @@ export async function waitForEnterMessage(message: string): Promise<void> {
   });
 }
 
-export async function promptText(params: {
-  question: string;
-  defaultValue?: string;
-}): Promise<string> {
+export async function promptText(params: TextPromptParams): Promise<string> {
+  if (promptProvider) {
+    return promptProvider.promptText(params);
+  }
+
   if (!interactiveStdioAvailable()) {
     return params.defaultValue ?? '';
   }
@@ -114,10 +170,15 @@ export async function promptText(params: {
 
   return withPromptOutputSuspended(async () => {
     try {
-      const suffix =
+      const suffixParts = [
         params.defaultValue && params.defaultValue.length > 0
-          ? ` [default: ${params.defaultValue}] `
-          : ' ';
+          ? `default: ${params.defaultValue}`
+          : undefined,
+        params.placeholder && params.placeholder.length > 0
+          ? `placeholder: ${params.placeholder}`
+          : undefined,
+      ].filter(part => part !== undefined);
+      const suffix = suffixParts.length > 0 ? ` [${suffixParts.join('; ')}] ` : ' ';
       const answer = await readline.question(`${params.question}${suffix}`);
       const trimmed = answer.trim();
       if (!trimmed) {
@@ -130,18 +191,24 @@ export async function promptText(params: {
   });
 }
 
-export async function promptSecret(params: {
-  question: string;
-  defaultValue?: string;
-}): Promise<string> {
+export async function promptSecret(params: SecretPromptParams): Promise<string> {
+  if (promptProvider) {
+    return promptProvider.promptSecret(params);
+  }
+
   if (!interactiveStdioAvailable()) {
     return params.defaultValue ?? '';
   }
 
-  const suffix =
+  const suffixParts = [
     params.defaultValue && params.defaultValue.length > 0
-      ? ' [press Enter to keep the current value] '
-      : ' ';
+      ? 'press Enter to keep the current value'
+      : undefined,
+    params.placeholder && params.placeholder.length > 0
+      ? `placeholder: ${params.placeholder}`
+      : undefined,
+  ].filter(part => part !== undefined);
+  const suffix = suffixParts.length > 0 ? ` [${suffixParts.join('; ')}] ` : ' ';
 
   return withPromptOutputSuspended(async () => new Promise<string>((resolve, reject) => {
     process.stdout.write(`${params.question}${suffix}`);
@@ -226,14 +293,11 @@ export async function promptSecret(params: {
   }));
 }
 
-export async function promptChoice<T extends string>(params: {
-  question: string;
-  options: Array<{
-    value: T;
-    label: string;
-  }>;
-  defaultValue?: T;
-}): Promise<T> {
+export async function promptChoice<T extends string>(params: ChoicePromptParams<T>): Promise<T> {
+  if (promptProvider) {
+    return promptProvider.promptChoice(params);
+  }
+
   if (!interactiveStdioAvailable()) {
     if (params.defaultValue !== undefined) {
       return params.defaultValue;
@@ -324,10 +388,11 @@ export async function promptChoice<T extends string>(params: {
   }));
 }
 
-export async function promptMultiline(params: {
-  question: string;
-  doneMessage?: string;
-}): Promise<string> {
+export async function promptMultiline(params: MultilinePromptParams): Promise<string> {
+  if (promptProvider) {
+    return promptProvider.promptMultiline(params);
+  }
+
   if (!interactiveStdioAvailable()) {
     return '';
   }
@@ -341,7 +406,9 @@ export async function promptMultiline(params: {
     try {
       const lines: string[] = [];
       process.stdout.write(
-        `${params.question}\n${params.doneMessage ?? 'Press Enter on an empty line to finish.'}\n`
+        `${params.question}\n${params.doneMessage ?? 'Press Enter on an empty line to finish.'}\n${
+          params.placeholder ? `Placeholder: ${params.placeholder}\n` : ''
+        }`
       );
       while (true) {
         const line = await readline.question(lines.length === 0 ? '> ' : '. ');

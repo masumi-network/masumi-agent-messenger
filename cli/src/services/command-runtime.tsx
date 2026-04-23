@@ -5,8 +5,17 @@ import { createInterface } from 'node:readline/promises';
 import type { BirthdayCelebration } from './easter-eggs';
 import { CliError, toCliError } from './errors';
 import { blue, dim, green, red, yellow } from './render';
-import { installPromptOutputLifecycle } from './prompts';
-import { TaskScreen, type TaskBanner, type TaskRenderState } from '../ui/task-screen';
+import {
+  installPromptOutputLifecycle,
+  installPromptProvider,
+  type ChoicePromptParams,
+  type ConfirmPromptParams,
+  type MultilinePromptParams,
+  type PromptProvider,
+  type SecretPromptParams,
+  type TextPromptParams,
+} from './prompts';
+import { TaskScreen, type TaskBanner, type TaskPrompt, type TaskRenderState } from '../ui/task-screen';
 
 export type GlobalOptions = {
   json: boolean;
@@ -48,6 +57,7 @@ type JsonEnvelope<T> =
 
 const JSON_SCHEMA_VERSION = 1 as const;
 const DEFAULT_TRY_HINT = 'masumi-agent-messenger --help';
+const PROMPT_CANCELLED_HINT = 'Re-run the command and complete the prompt when ready.';
 
 type CommandActionContext = {
   reporter: TaskReporter;
@@ -65,6 +75,13 @@ type CommandActionParams<T> = {
     title: string;
   }) => Promise<void>;
 };
+
+function promptCancelledError(hint = PROMPT_CANCELLED_HINT): CliError {
+  return new CliError('Prompt cancelled.', {
+    code: 'PROMPT_CANCELLED',
+    hint,
+  });
+}
 
 class ConsoleReporter implements TaskReporter {
   constructor(private readonly isVerbose = false) {}
@@ -110,7 +127,7 @@ class ConsoleReporter implements TaskReporter {
   }
 }
 
-class InkReporter implements TaskReporter {
+class InkReporter implements TaskReporter, PromptProvider {
   private state: TaskRenderState;
   private readonly rerender: (tree: ReactNode) => void;
   private readonly isVerbose: boolean;
@@ -131,6 +148,11 @@ class InkReporter implements TaskReporter {
     this.state.events.push({ kind: 'info', text });
     if (this.promptSuspendDepth > 0) {
       this.deferredActive = text;
+      this.flush();
+      return;
+    }
+    if (this.state.prompt) {
+      this.flush();
       return;
     }
     this.state.active = text;
@@ -141,6 +163,11 @@ class InkReporter implements TaskReporter {
     this.state.events.push({ kind: 'success', text });
     if (this.promptSuspendDepth > 0) {
       this.deferredActive = undefined;
+      this.flush();
+      return;
+    }
+    if (this.state.prompt) {
+      this.flush();
       return;
     }
     this.state.active = undefined;
@@ -152,6 +179,11 @@ class InkReporter implements TaskReporter {
     this.state.events.push({ kind: 'info', text });
     if (this.promptSuspendDepth > 0) {
       this.deferredActive = text;
+      this.flush();
+      return;
+    }
+    if (this.state.prompt) {
+      this.flush();
       return;
     }
     this.state.active = text;
@@ -196,17 +228,192 @@ class InkReporter implements TaskReporter {
   }
 
   waitForKeypress(message: string): Promise<void> {
-    return new Promise<void>(resolve => {
-      this.state.prompt = {
+    if (!process.stdin.isTTY) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      this.beginNativePrompt({
+        kind: 'press-enter',
         message,
-        onConfirm: () => {
-          this.state.prompt = undefined;
-          this.flush();
+        onSubmit: () => {
+          this.endNativePrompt();
           resolve();
         },
+        onCancel: () => {
+          this.endNativePrompt();
+          reject(promptCancelledError('Press Enter to continue, or re-run the command when ready.'));
+        },
+      });
+    });
+  }
+
+  waitForEnterMessage(message: string): Promise<void> {
+    return this.waitForKeypress(message);
+  }
+
+  confirmYesNo(params: ConfirmPromptParams): Promise<boolean> {
+    if (!process.stdin.isTTY) {
+      return Promise.resolve(params.defaultValue ?? false);
+    }
+
+    return new Promise<boolean>((resolve, reject) => {
+      let value = params.defaultValue ?? false;
+      const updatePrompt = () => {
+        if (this.state.prompt?.kind === 'confirm') {
+          this.state.prompt = {
+            ...this.state.prompt,
+            value,
+          };
+          this.flush();
+        }
       };
-      this.state.active = undefined;
-      this.flush();
+
+      this.beginNativePrompt({
+        kind: 'confirm',
+        question: params.question,
+        value,
+        defaultValue: params.defaultValue,
+        onValueChange: nextValue => {
+          value = nextValue;
+          updatePrompt();
+        },
+        onSubmit: selectedValue => {
+          this.endNativePrompt();
+          resolve(selectedValue);
+        },
+        onCancel: () => {
+          this.endNativePrompt();
+          reject(promptCancelledError());
+        },
+      });
+    });
+  }
+
+  promptText(params: TextPromptParams): Promise<string> {
+    if (!process.stdin.isTTY) {
+      return Promise.resolve(params.defaultValue ?? '');
+    }
+
+    return this.promptEditable({
+      kind: 'text',
+      question: params.question,
+      defaultValue: params.defaultValue,
+      placeholder: params.placeholder,
+      resolveValue: value => {
+        const trimmed = value.trim();
+        return trimmed || params.defaultValue || '';
+      },
+    });
+  }
+
+  promptSecret(params: SecretPromptParams): Promise<string> {
+    if (!process.stdin.isTTY) {
+      return Promise.resolve(params.defaultValue ?? '');
+    }
+
+    return this.promptEditable({
+      kind: 'secret',
+      question: params.question,
+      defaultValue: params.defaultValue,
+      placeholder: params.placeholder,
+      resolveValue: value => value || params.defaultValue || '',
+    });
+  }
+
+  promptChoice<T extends string>(params: ChoicePromptParams<T>): Promise<T> {
+    if (!process.stdin.isTTY) {
+      if (params.defaultValue !== undefined) {
+        return Promise.resolve(params.defaultValue);
+      }
+      return Promise.resolve(params.options[0]!.value);
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      const defaultIndex = params.defaultValue
+        ? params.options.findIndex(option => option.value === params.defaultValue)
+        : 0;
+      let selectedIndex = Math.max(0, defaultIndex);
+      const updatePrompt = () => {
+        if (this.state.prompt?.kind === 'choice') {
+          this.state.prompt = {
+            ...this.state.prompt,
+            selectedIndex,
+          };
+          this.flush();
+        }
+      };
+
+      this.beginNativePrompt({
+        kind: 'choice',
+        question: params.question,
+        options: params.options.map(option => ({ label: option.label })),
+        selectedIndex,
+        onSelectedIndexChange: nextIndex => {
+          selectedIndex = nextIndex;
+          updatePrompt();
+        },
+        onSubmit: index => {
+          this.endNativePrompt();
+          resolve(params.options[index]!.value);
+        },
+        onCancel: () => {
+          this.endNativePrompt();
+          reject(promptCancelledError());
+        },
+      });
+    });
+  }
+
+  promptMultiline(params: MultilinePromptParams): Promise<string> {
+    if (!process.stdin.isTTY) {
+      return Promise.resolve('');
+    }
+
+    return new Promise<string>((resolve, reject) => {
+      let lines: string[] = [];
+      let value = '';
+      let cursor = 0;
+      const updatePrompt = () => {
+        if (this.state.prompt?.kind === 'multiline') {
+          this.state.prompt = {
+            ...this.state.prompt,
+            lines,
+            value,
+            cursor,
+          };
+          this.flush();
+        }
+      };
+
+      this.beginNativePrompt({
+        kind: 'multiline',
+        question: params.question,
+        doneMessage: params.doneMessage ?? 'Press Enter on an empty line to finish.',
+        lines,
+        value,
+        cursor,
+        placeholder: params.placeholder,
+        onChange: (nextValue, nextCursor) => {
+          value = nextValue;
+          cursor = nextCursor;
+          updatePrompt();
+        },
+        onAddLine: line => {
+          lines = [...lines, line];
+          value = '';
+          cursor = 0;
+          updatePrompt();
+        },
+        onSubmit: () => {
+          this.endNativePrompt();
+          resolve(lines.join('\n').trim());
+        },
+        onCancel: () => {
+          this.endNativePrompt();
+          reject(promptCancelledError());
+        },
+      });
     });
   }
 
@@ -247,6 +454,71 @@ class InkReporter implements TaskReporter {
     this.flush();
   }
 
+  private beginNativePrompt(prompt: TaskPrompt): void {
+    this.deferredActive = this.state.active;
+    this.state = {
+      ...this.state,
+      active: undefined,
+      prompt,
+    };
+    this.flush();
+  }
+
+  private endNativePrompt(): void {
+    this.state = {
+      ...this.state,
+      active: this.state.final ? undefined : this.deferredActive,
+      prompt: undefined,
+    };
+    this.deferredActive = undefined;
+    this.flush();
+  }
+
+  private promptEditable(params: {
+    kind: 'text' | 'secret';
+    question: string;
+    defaultValue?: string;
+    placeholder?: string;
+    resolveValue: (value: string) => string;
+  }): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      let value = '';
+      let cursor = 0;
+      const updatePrompt = () => {
+        if (this.state.prompt?.kind === params.kind) {
+          this.state.prompt = {
+            ...this.state.prompt,
+            value,
+            cursor,
+          };
+          this.flush();
+        }
+      };
+
+      this.beginNativePrompt({
+        kind: params.kind,
+        question: params.question,
+        value,
+        cursor,
+        defaultValue: params.defaultValue,
+        placeholder: params.placeholder,
+        onChange: (nextValue, nextCursor) => {
+          value = nextValue;
+          cursor = nextCursor;
+          updatePrompt();
+        },
+        onSubmit: submittedValue => {
+          this.endNativePrompt();
+          resolve(params.resolveValue(submittedValue));
+        },
+        onCancel: () => {
+          this.endNativePrompt();
+          reject(promptCancelledError());
+        },
+      });
+    });
+  }
+
   private flush(): void {
     this.rerender(<TaskScreen state={this.state} />);
   }
@@ -260,7 +532,7 @@ function createNoopReporter(): TaskReporter {
 }
 
 function isInteractive(options: GlobalOptions): boolean {
-  return !options.json && Boolean(process.stdout.isTTY && process.stderr.isTTY);
+  return !options.json && Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
 }
 
 function isPlainHumanMode(options: GlobalOptions): boolean {
@@ -425,6 +697,7 @@ export async function runCommandAction<T>(params: CommandActionParams<T>): Promi
       reporter.resumeAfterPrompt();
     },
   });
+  const restorePromptProvider = installPromptProvider(reporter);
   let shouldManualUnmount = true;
 
   try {
@@ -452,6 +725,7 @@ export async function runCommandAction<T>(params: CommandActionParams<T>): Promi
     reporter.finishError(errorMessage);
     process.exitCode = cliError.exitCode;
   } finally {
+    restorePromptProvider();
     restorePromptOutputLifecycle();
     if (shouldManualUnmount) {
       instance.unmount();

@@ -5,6 +5,7 @@ import { resolvePublicDescriptionOption } from '../../services/public-descriptio
 import { confirmYesNo, promptMultiline, waitForEnterMessage } from '../../services/prompts';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
 import { cyan, dim, green, renderKeyValue, yellow } from '../../services/render';
+import { isInteractiveHumanMode } from '../menu';
 
 type RegisterAgentOptions = GlobalOptions & {
   slug?: string;
@@ -34,7 +35,7 @@ export function registerInboxAgentRegisterCommand(command: Command): void {
             profileName: options.profile,
             actorSlug: options.slug,
             reporter,
-            registrationMode: options.json ? 'auto' : 'prompt',
+            registrationMode: isInteractiveHumanMode(options) ? 'prompt' : 'auto',
             desiredLinkedEmailVisibility: !options.disableLinkedEmail,
             desiredPublicDescription: await resolvePublicDescriptionOption({
               description: options.publicDescription,

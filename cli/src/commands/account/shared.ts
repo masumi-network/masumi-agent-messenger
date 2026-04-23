@@ -29,7 +29,7 @@ export type AccountFlowOptions = GlobalOptions & {
 };
 
 export function isInteractiveAccountFlow(options: GlobalOptions): boolean {
-  return !options.json && Boolean(process.stdout.isTTY && process.stderr.isTTY);
+  return !options.json && Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
 }
 
 export function buildAccountRegistrationPrompts() {
@@ -75,9 +75,9 @@ export async function resolveAccountRegistrationSettings(options: AccountFlowOpt
   return {
     registrationMode: options.skipAgentRegistration
       ? 'skip'
-      : options.json
-        ? 'auto'
-        : 'prompt',
+      : isInteractiveAccountFlow(options)
+        ? 'prompt'
+        : 'auto',
     desiredLinkedEmailVisibility: !options.disableLinkedEmail,
     desiredPublicDescription: await resolvePublicDescriptionOption({
       description: options.publicDescription,

@@ -5,6 +5,7 @@ import { resolvePublicDescriptionOption } from '../../services/public-descriptio
 import { confirmYesNo, promptMultiline, waitForEnterMessage } from '../../services/prompts';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
 import { bold, cyan, dim, green, renderKeyValue, yellow } from '../../services/render';
+import { isInteractiveHumanMode } from '../menu';
 
 type StatusOptions = GlobalOptions & {
   skipAgentRegistration?: boolean;
@@ -35,9 +36,9 @@ export function registerInboxStatusCommand(command: Command): void {
             reporter,
             registrationMode: options.skipAgentRegistration
               ? 'skip'
-              : options.json
-                ? 'auto'
-                : 'prompt',
+              : isInteractiveHumanMode(options)
+                ? 'prompt'
+                : 'auto',
             desiredLinkedEmailVisibility: !options.disableLinkedEmail,
             desiredPublicDescription: await resolvePublicDescriptionOption({
               description: options.publicDescription,

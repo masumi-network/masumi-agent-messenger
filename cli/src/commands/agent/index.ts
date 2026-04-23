@@ -44,6 +44,7 @@ import {
   yellow,
   type TableColumn,
 } from '../../services/render';
+import { isInteractiveHumanMode } from '../menu';
 import { showCommandHelp } from '../menu';
 
 type AgentContextOptions = GlobalOptions & {
@@ -363,9 +364,9 @@ export function registerAgentCommands(program: Command): void {
             reporter,
             registrationMode: options.skipAgentRegistration
               ? 'skip'
-              : options.json
-                ? 'auto'
-                : 'prompt',
+              : isInteractiveHumanMode(options)
+                ? 'prompt'
+                : 'auto',
             desiredLinkedEmailVisibility: !options.disableLinkedEmail,
             desiredPublicDescription: await resolvePublicDescriptionOption({
               description: options.publicDescription,
@@ -860,7 +861,7 @@ export function registerAgentCommands(program: Command): void {
             profileName: options.profile,
             actorSlug: selectedAgentSlug,
             reporter,
-            registrationMode: options.json ? 'auto' : 'prompt',
+            registrationMode: isInteractiveHumanMode(options) ? 'prompt' : 'auto',
             desiredLinkedEmailVisibility: !options.disableLinkedEmail,
             desiredPublicDescription: await resolvePublicDescriptionOption({
               description: options.publicDescription,

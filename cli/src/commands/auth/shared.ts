@@ -31,7 +31,7 @@ export type AuthFlowOptions = GlobalOptions & {
 };
 
 export function isInteractiveAuthFlow(options: GlobalOptions): boolean {
-  return !options.json && Boolean(process.stdout.isTTY && process.stderr.isTTY);
+  return !options.json && Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
 }
 
 export function buildRegistrationPrompts() {
@@ -98,9 +98,9 @@ export async function resolveRegistrationSettings(options: AuthFlowOptions) {
   return {
     registrationMode: options.skipAgentRegistration
       ? 'skip'
-      : options.json
-        ? 'auto'
-        : 'prompt',
+      : isInteractiveAuthFlow(options)
+        ? 'prompt'
+        : 'auto',
     desiredLinkedEmailVisibility: !options.disableLinkedEmail,
     desiredPublicDescription: await resolvePublicDescriptionOption({
       description: options.publicDescription,

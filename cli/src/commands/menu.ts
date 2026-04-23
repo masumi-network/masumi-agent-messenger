@@ -4,7 +4,7 @@ import type { GlobalOptions } from '../services/command-runtime';
 import { promptChoice, promptMultiline, promptText } from '../services/prompts';
 
 export function isInteractiveHumanMode(options: GlobalOptions): boolean {
-  return !options.json && Boolean(process.stdout.isTTY && process.stderr.isTTY);
+  return !options.json && Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
 }
 
 export function toGlobalArgs(options: GlobalOptions): string[] {
@@ -41,6 +41,7 @@ export function showCommandHelp(command: Command): void {
 export async function promptForMenuText(params: {
   question: string;
   defaultValue?: string;
+  placeholder?: string;
 }): Promise<string> {
   return promptText(params);
 }

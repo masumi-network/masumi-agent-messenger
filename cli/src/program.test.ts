@@ -93,24 +93,50 @@ function makePendingDeviceLoginResult(
 }
 
 function setInteractiveTty(value: boolean): () => void {
-  const stdoutDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
-  const stderrDescriptor = Object.getOwnPropertyDescriptor(process.stderr, 'isTTY');
-
-  Object.defineProperty(process.stdout, 'isTTY', {
-    configurable: true,
-    value,
+  return setTtyStreams({
+    stdin: value,
+    stdout: value,
+    stderr: value,
   });
-  Object.defineProperty(process.stderr, 'isTTY', {
+}
+
+function setTtyStreams(values: {
+  stdin: boolean;
+  stdout: boolean;
+  stderr: boolean;
+}): () => void {
+  const streams = {
+    stdin: process.stdin,
+    stdout: process.stdout,
+    stderr: process.stderr,
+  };
+  const descriptors = {
+    stdin: Object.getOwnPropertyDescriptor(streams.stdin, 'isTTY'),
+    stdout: Object.getOwnPropertyDescriptor(streams.stdout, 'isTTY'),
+    stderr: Object.getOwnPropertyDescriptor(streams.stderr, 'isTTY'),
+  };
+
+  Object.defineProperty(streams.stdin, 'isTTY', {
     configurable: true,
-    value,
+    value: values.stdin,
+  });
+  Object.defineProperty(streams.stdout, 'isTTY', {
+    configurable: true,
+    value: values.stdout,
+  });
+  Object.defineProperty(streams.stderr, 'isTTY', {
+    configurable: true,
+    value: values.stderr,
   });
 
   return () => {
-    if (stdoutDescriptor) {
-      Object.defineProperty(process.stdout, 'isTTY', stdoutDescriptor);
-    }
-    if (stderrDescriptor) {
-      Object.defineProperty(process.stderr, 'isTTY', stderrDescriptor);
+    for (const key of ['stdin', 'stdout', 'stderr'] as const) {
+      const descriptor = descriptors[key];
+      if (descriptor) {
+        Object.defineProperty(streams[key], 'isTTY', descriptor);
+      } else {
+        delete (streams[key] as { isTTY?: boolean }).isTTY;
+      }
     }
   };
 }
@@ -940,6 +966,95 @@ describe('CLI command parsing', () => {
         profileName: 'default',
       })
     );
+  });
+
+  it('uses prompt registration for auth code complete in an interactive TTY', async () => {
+    const restoreTty = setInteractiveTty(true);
+
+    try {
+      const { buildProgram, mocks } = await loadProgramWithMocks();
+
+      await buildProgram().parseAsync([
+        'node',
+        'masumi-agent-messenger',
+        'auth',
+        'code',
+        'complete',
+        '--polling-code',
+        'polling-interactive',
+      ]);
+
+      expect(mocks.waitForLogin).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pollingCode: 'polling-interactive',
+          registrationMode: 'prompt',
+        })
+      );
+    } finally {
+      restoreTty();
+    }
+  });
+
+  it('uses automatic auth registration when stdin is not interactive', async () => {
+    const restoreTty = setTtyStreams({
+      stdin: false,
+      stdout: true,
+      stderr: true,
+    });
+
+    try {
+      const { buildProgram, mocks } = await loadProgramWithMocks();
+
+      await buildProgram().parseAsync([
+        'node',
+        'masumi-agent-messenger',
+        'auth',
+        'code',
+        'complete',
+        '--polling-code',
+        'polling-noninteractive',
+      ]);
+
+      expect(mocks.waitForLogin).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pollingCode: 'polling-noninteractive',
+          registrationMode: 'auto',
+        })
+      );
+    } finally {
+      restoreTty();
+    }
+  });
+
+  it('uses automatic account registration when stdin is not interactive', async () => {
+    const restoreTty = setTtyStreams({
+      stdin: false,
+      stdout: true,
+      stderr: true,
+    });
+
+    try {
+      const { buildProgram, mocks } = await loadProgramWithMocks();
+
+      await buildProgram().parseAsync([
+        'node',
+        'masumi-agent-messenger',
+        'account',
+        'login',
+        'complete',
+        '--polling-code',
+        'account-noninteractive',
+      ]);
+
+      expect(mocks.waitForLogin).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pollingCode: 'account-noninteractive',
+          registrationMode: 'auto',
+        })
+      );
+    } finally {
+      restoreTty();
+    }
   });
 
   it('requires --polling-code for account login complete', async () => {
