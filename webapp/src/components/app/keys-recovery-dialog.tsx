@@ -26,6 +26,14 @@ type PendingDeviceRequest = {
   expiresAt: string;
 };
 
+function compactPendingDeviceRequestCode(request: PendingDeviceRequest | null): string | null {
+  if (!request) {
+    return null;
+  }
+
+  return request.verificationSymbols.join('') || request.verificationCode.replace(/\s+/gu, '');
+}
+
 function VerificationCodeDisplay({
   symbols,
   words,
@@ -181,7 +189,12 @@ export function KeysRecoveryContent({
     'request' | 'approve' | 'import'
   >(defaultKeyIssue ? 'request' : 'approve');
   const [copiedForCode, setCopiedForCode] = useState<string | null>(null);
-  const copiedVerificationCode = copiedForCode !== null && copiedForCode === pendingDeviceRequest?.verificationCode;
+  const compactVerificationCode = useMemo(
+    () => compactPendingDeviceRequestCode(pendingDeviceRequest),
+    [pendingDeviceRequest]
+  );
+  const copiedVerificationCode =
+    copiedForCode !== null && copiedForCode === compactVerificationCode;
   const [nowMs, setNowMs] = useState(() => Date.now());
   const autoRequestedRef = useRef(false);
   const requestButtonLabel = autoGenerateCodeOnMissingKeys
@@ -263,12 +276,12 @@ export function KeysRecoveryContent({
   }, [devices]);
 
   async function handleCopyVerificationCode(): Promise<void> {
-    if (!pendingDeviceRequest || typeof navigator === 'undefined' || !navigator.clipboard) {
+    if (!compactVerificationCode || typeof navigator === 'undefined' || !navigator.clipboard) {
       return;
     }
 
-    await navigator.clipboard.writeText(pendingDeviceRequest.verificationCode);
-    setCopiedForCode(pendingDeviceRequest.verificationCode);
+    await navigator.clipboard.writeText(compactVerificationCode);
+    setCopiedForCode(compactVerificationCode);
   }
 
   if (mode === 'backups') {
@@ -354,7 +367,7 @@ export function KeysRecoveryContent({
                     words={pendingDeviceRequest.verificationWords}
                   />
                   <p className="font-mono text-sm text-muted-foreground">
-                    {pendingDeviceRequest.verificationCode}
+                    {compactVerificationCode ?? pendingDeviceRequest.verificationCode}
                   </p>
                 </div>
                 <Button

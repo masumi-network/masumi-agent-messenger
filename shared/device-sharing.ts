@@ -18,7 +18,6 @@ const DEVICE_SHARE_CIPHER_ALGORITHM = 'aes-gcm-256-device-share-v1';
 const DEVICE_VERIFICATION_CODE_HASH_ALGORITHM = 'sha256-v1';
 const DEVICE_VERIFICATION_CODE_BYTES = 6;
 const DEVICE_VERIFICATION_CODE_SYMBOLS = 8;
-const DEVICE_VERIFICATION_CODE_GROUP_SIZE = 4;
 
 type MatrixEmojiEntry = {
   emoji: string;
@@ -273,11 +272,7 @@ function tokenizeDeviceVerificationCode(compactCode: string): MatrixEmojiSymbol[
 }
 
 function formatEmojiSymbols(symbols: readonly string[]): string {
-  const groups: string[] = [];
-  for (let index = 0; index < symbols.length; index += DEVICE_VERIFICATION_CODE_GROUP_SIZE) {
-    groups.push(symbols.slice(index, index + DEVICE_VERIFICATION_CODE_GROUP_SIZE).join(''));
-  }
-  return groups.join(' ');
+  return symbols.join('');
 }
 
 function encodeDeviceVerificationCode(bytes: Uint8Array): string {

@@ -61,6 +61,8 @@ describe('device sharing verification codes', () => {
     const parsed = parseDeviceVerificationCode('🐶🐱🦁🐎 🦄🐷🐘🐰');
     const smileyParsed = parseDeviceVerificationCode('🎂❤️😀🤖 🎩👓🔧🎅');
 
+    expect(parsed.formattedCode).toBe('🐶🐱🦁🐎🦄🐷🐘🐰');
+    expect(smileyParsed.formattedCode).toBe('🎂❤️😀🤖🎩👓🔧🎅');
     expect(parsed.symbols).toEqual(['🐶', '🐱', '🦁', '🐎', '🦄', '🐷', '🐘', '🐰']);
     expect(parsed.words).toEqual([
       'Dog',
@@ -88,6 +90,7 @@ describe('device sharing verification codes', () => {
     expect(parsed.symbols).toHaveLength(8);
     expect(parsed.words).toHaveLength(8);
     expect(parsed.fingerprintHex).toHaveLength(12);
+    expect(parsed.formattedCode).not.toContain(' ');
     expect(canonicalizeDeviceVerificationCode(parsed.formattedCode)).toBe(parsed.canonicalCode);
     expect(formatDeviceVerificationCode(parsed.canonicalCode)).toBe(parsed.formattedCode);
   });
@@ -99,7 +102,9 @@ describe('device sharing verification codes', () => {
       clientCreatedAt: new Date('2026-04-15T12:00:00.000Z'),
     });
     const parsed = parseDeviceVerificationCode(verificationCode);
-    const whitespaceVariant = parsed.formattedCode.split(' ').join('  \n');
+    const whitespaceVariant = `${parsed.symbols.slice(0, 4).join('')}  \n${parsed.symbols
+      .slice(4)
+      .join('')}`;
 
     await expect(hashDeviceVerificationCode(whitespaceVariant)).resolves.toBe(
       await hashDeviceVerificationCode(parsed.canonicalCode)
