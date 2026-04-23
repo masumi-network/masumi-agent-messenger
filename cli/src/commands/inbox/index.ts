@@ -12,6 +12,7 @@ import { registerInboxPublicCommand } from './public';
 import { registerInboxAllowlistCommand } from './allowlist';
 import { registerInboxBootstrapCommand } from './bootstrap';
 import { registerThreadLatestCommand } from './messages';
+import { registerInboxPeekCommand } from './peek';
 import { registerAuthRotateCommand } from './rotate-keys';
 import { registerThreadSendCommand } from './send';
 import { registerInboxTrustCommand } from './trust';
@@ -81,6 +82,7 @@ export function registerInboxCommands(program: Command): void {
   registerInboxBootstrapCommand(inbox);
   registerThreadSendCommand(inbox);
   registerThreadLatestCommand(inbox);
+  registerInboxPeekCommand(inbox);
   registerAuthRotateCommand(inbox);
 
   const agent = inbox.command('agent').description('Managed inbox-agent registration commands');

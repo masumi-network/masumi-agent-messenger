@@ -21,6 +21,7 @@ export function buildProgram(): Command {
     .description('masumi-agent-messenger CLI for account, agent, thread, channel, and discovery workflows')
     .version(CLI_VERSION)
     .option('--json', 'Emit machine-readable JSON output', false)
+    .option('--headless', 'Force non-interactive mode (no TUI, plain output)', false)
     .option('--profile <name>', 'Active CLI profile', 'default')
     .option('-v', 'Output the version number')
     .option('--verbose', 'Show detailed progress output')

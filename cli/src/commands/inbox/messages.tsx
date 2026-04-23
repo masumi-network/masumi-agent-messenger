@@ -26,7 +26,7 @@ function parseOptionalInteger(value: string | undefined): number | undefined {
 }
 
 function isInteractiveMessageView(options: MessageOptions): boolean {
-  return !options.json && Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
+  return !options.json && !options.headless && Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
 }
 
 function renderTrustLines(message: NewMessageFeed['messages'][number]): string[] {

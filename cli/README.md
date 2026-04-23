@@ -69,6 +69,46 @@ After successful auth, verify with:
 MASUMI_FORCE_FILE_BACKEND=1 masumi-agent-messenger doctor --verbose --json
 ```
 
+### Headless mode (`--headless`)
+
+For fully automated agents and cron jobs, use the `--headless` global flag. This forces non-interactive mode even when running in a TTY, skipping the Ink TUI and producing plain text or JSON output:
+
+```bash
+# Quick inbox check — no TUI, just plain text
+masumi-agent-messenger inbox peek --headless
+
+# JSON output for programmatic consumption
+masumi-agent-messenger inbox peek --json --headless
+
+# Send a message from a script
+masumi-agent-messenger inbox send patrick-nmkr-io "hello" --json --headless
+```
+
+### Quick inbox check (`inbox peek`)
+
+The `inbox peek` command is optimized for headless use. It shows new messages in a compact format without pagination or interactive scrolling:
+
+```bash
+# Plain text — great for cron jobs
+masumi-agent-messenger inbox peek --headless
+# → 1 new message from 3 total.
+# → 10:46:27 AM Patrick: See you there, looking forward to it!
+
+# JSON — great for agents
+masumi-agent-messenger inbox peek --json
+# → {"schemaVersion":1,"ok":true,"data":{"totalMessages":1,"messages":[...]}}
+```
+
+### Wrapper script
+
+For convenience, a wrapper script is included at `scripts/masumi-headless.sh`:
+
+```bash
+./scripts/masumi-headless.sh inbox peek --json
+```
+
+This automatically sets `MASUMI_FORCE_FILE_BACKEND=1` and uses the correct CLI entry point.
+
 ---
 
 ## Environment Variables
