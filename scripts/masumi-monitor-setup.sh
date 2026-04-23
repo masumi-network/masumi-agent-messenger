@@ -9,7 +9,7 @@ set -euo pipefail
 
 INTERVAL_MINUTES=5
 PROFILE="default"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CLI_DIR="${SCRIPT_DIR}/../cli"
 CRON_TAG="# masumi-inbox-monitor"
 
@@ -31,11 +31,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Validate CLI exists
+if [[ ! -f "${CLI_DIR}/dist/bin.js" ]]; then
+  echo "Error: CLI not found at ${CLI_DIR}/dist/bin.js"
+  echo "Please build the CLI first: cd ${CLI_DIR} && npm run build"
+  exit 1
+fi
+
 # Validate interval
 if ! [[ "$INTERVAL_MINUTES" =~ ^[0-9]+$ ]] || [[ "$INTERVAL_MINUTES" -lt 1 ]]; then
   echo "Error: interval must be a positive integer (minutes)"
   exit 1
 fi
+
+# Ensure log directory exists
+LOG_DIR="${HOME}/.local/share"
+mkdir -p "$LOG_DIR"
 
 # Determine cron schedule
 if [[ "$INTERVAL_MINUTES" -eq 1 ]]; then
@@ -51,14 +62,14 @@ else
   fi
 fi
 
-# Build the cron command
-CRON_CMD="${SCHEDULE} MASUMI_FORCE_FILE_BACKEND=1 ${CLI_DIR}/dist/bin.js inbox peek --profile ${PROFILE} --json >> ${HOME}/.local/share/masumi-monitor.log 2>&1"
+# Build the cron command (quote profile to handle spaces)
+CRON_CMD="${SCHEDULE} MASUMI_FORCE_FILE_BACKEND=1 ${CLI_DIR}/dist/bin.js inbox peek --profile '${PROFILE}' --json >> ${LOG_DIR}/masumi-monitor.log 2>&1"
 
 # Check if already installed
-if crontab -l 2>/dev/null | grep -qF "$CRON_TAG"; then
+if crontab -l 2>/dev/null | grep -qxF "$CRON_TAG"; then
   echo "Monitor already installed. Updating..."
-  # Remove old entry
-  crontab -l 2>/dev/null | grep -vF "$CRON_TAG" | crontab -
+  # Remove old entry (exact line match)
+  crontab -l 2>/dev/null | grep -vxF "$CRON_TAG" | crontab -
 fi
 
 # Add new entry
@@ -67,7 +78,7 @@ fi
 echo "✅ Masumi inbox monitor installed"
 echo "   Schedule: every ${INTERVAL_MINUTES} minute(s)"
 echo "   Profile:  ${PROFILE}"
-echo "   Log:      ${HOME}/.local/share/masumi-monitor.log"
+echo "   Log:      ${LOG_DIR}/masumi-monitor.log"
 echo ""
 echo "To verify:  crontab -l | grep masumi"
-echo "To remove:  crontab -l | grep -v masumi | crontab -"
+echo "To remove:  crontab -l | grep -v '^# masumi-inbox-monitor$' | crontab -"
