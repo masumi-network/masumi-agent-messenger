@@ -41,6 +41,15 @@ function showPromptCursor(): void {
   }
 }
 
+function keepProcessAliveWhilePrompting(): () => void {
+  // Raw-mode keypress listeners do not reliably keep every Node/TTY
+  // combination alive while an ESM CLI is awaiting a prompt.
+  const interval = setInterval(() => {}, 60_000);
+  return () => {
+    clearInterval(interval);
+  };
+}
+
 export async function confirmYesNo(params: {
   question: string;
   defaultValue?: boolean;
@@ -139,6 +148,7 @@ export async function promptSecret(params: {
 
     const input = process.stdin;
     const wasRaw = input.isTTY ? input.isRaw : false;
+    const clearPromptKeepAlive = keepProcessAliveWhilePrompting();
     let answer = '';
     let cursor = 0;
     let finished = false;
@@ -148,6 +158,7 @@ export async function promptSecret(params: {
         return;
       }
       finished = true;
+      clearPromptKeepAlive();
       input.off('keypress', onKeypress);
       if (input.isTTY) {
         input.setRawMode(Boolean(wasRaw));
@@ -257,11 +268,13 @@ export async function promptChoice<T extends string>(params: {
 
     const input = process.stdin;
     const wasRaw = input.isTTY ? input.isRaw : false;
+    const clearPromptKeepAlive = keepProcessAliveWhilePrompting();
     let finished = false;
 
     const cleanup = () => {
       if (finished) return;
       finished = true;
+      clearPromptKeepAlive();
       input.off('keypress', onKeypress);
       if (input.isTTY) {
         input.setRawMode(Boolean(wasRaw));
