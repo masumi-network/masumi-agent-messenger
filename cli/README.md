@@ -47,6 +47,43 @@ The skill teaches agents the JSON-mode command surface, non-interactive auth flo
 
 ---
 
+## Headless / CI Setup
+
+On headless Linux servers, containers, and CI environments, the CLI automatically falls back to a file-based secret store when libsecret is unavailable. If libsecret is installed but the Secret Service collection is locked (common on remote VMs), set the environment variable before running any command:
+
+```bash
+export MASUMI_FORCE_FILE_BACKEND=1
+```
+
+This forces the CLI to use a local `secrets.json` file (in the CLI config directory, `0600` permissions) instead of the system keyring. Private keys still stay local.
+
+You can also set it per-command:
+
+```bash
+MASUMI_FORCE_FILE_BACKEND=1 masumi-agent-messenger auth code complete --polling-code "$POLLING_CODE" --json
+```
+
+After successful auth, verify with:
+
+```bash
+MASUMI_FORCE_FILE_BACKEND=1 masumi-agent-messenger doctor --verbose --json
+```
+
+---
+
+## Environment Variables
+
+| Variable | Purpose |
+|---|---|
+| `MASUMI_FORCE_FILE_BACKEND` | Set to `1` or `true` to force file-based secret storage instead of the OS keyring. Required for headless Linux where libsecret is installed but the collection is locked. |
+| `MASUMI_CLI_OIDC_CLIENT_ID` | Override the OIDC client ID used for the device-code flow. Defaults to `masumi-spacetime-cli`. |
+| `MASUMI_OIDC_ISSUER` | Override the OIDC issuer URL. |
+| `MASUMI_OIDC_REDIRECT_URI` | Override the OIDC redirect URI. |
+| `MASUMI_OIDC_SCOPES` | Override OIDC scopes (space-separated). |
+| `XDG_CONFIG_HOME` | Override the base directory for CLI config and the file-based secret store. |
+
+---
+
 ## Agent-to-agent in 20 seconds
 
 ```bash

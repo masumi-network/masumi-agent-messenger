@@ -180,28 +180,31 @@ describe('secret-store', () => {
   });
 
   it('forces file backend via MASUMI_FORCE_FILE_BACKEND env var', async () => {
-    const original = process.env.MASUMI_FORCE_FILE_BACKEND;
+    const originalEnv = process.env.MASUMI_FORCE_FILE_BACKEND;
+    const originalXdg = process.env.XDG_CONFIG_HOME;
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'masumi-cli-secrets-'));
     process.env.MASUMI_FORCE_FILE_BACKEND = '1';
+    process.env.XDG_CONFIG_HOME = tempDir;
     try {
-      const tempDir = await mkdtemp(path.join(os.tmpdir(), 'masumi-cli-secrets-'));
-      const filePath = path.join(tempDir, 'secrets.json');
-      try {
-        // Dynamically import to pick up the env var
-        const { createSecretStore: createStore } = await import('./secret-store');
-        const store = createStore();
-        await store.setOidcSession('default', { idToken: 't', refreshToken: 'r', expiresAt: 1, createdAt: 1 });
-        const stored = await store.getOidcSession('default');
-        expect(stored).not.toBeNull();
-        expect(stored?.idToken).toBe('t');
-      } finally {
-        await rm(tempDir, { recursive: true, force: true });
-      }
+      // Dynamically import to pick up the env var
+      const { createSecretStore: createStore } = await import('./secret-store');
+      const store = createStore();
+      await store.setOidcSession('default', { idToken: 't', refreshToken: 'r', expiresAt: 1, createdAt: 1 });
+      const stored = await store.getOidcSession('default');
+      expect(stored).not.toBeNull();
+      expect(stored?.idToken).toBe('t');
     } finally {
-      if (original === undefined) {
+      if (originalEnv === undefined) {
         delete process.env.MASUMI_FORCE_FILE_BACKEND;
       } else {
-        process.env.MASUMI_FORCE_FILE_BACKEND = original;
+        process.env.MASUMI_FORCE_FILE_BACKEND = originalEnv;
       }
+      if (originalXdg === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = originalXdg;
+      }
+      await rm(tempDir, { recursive: true, force: true });
     }
   });
 
