@@ -274,8 +274,7 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
   const canCreate = writeAccess.canWrite && Boolean(existingDefaultActor);
   const canManageSelectedAgent =
     writeAccess.canWrite &&
-    Boolean(selectedOwnedAgent) &&
-    !selectedOwnedAgentEntry?.deregistered;
+    Boolean(selectedOwnedAgent);
   const needsBootstrapRedirect =
     workspace.status === 'ready' && workspace.tablesReady && !existingDefaultActor;
 
@@ -334,6 +333,12 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
   const deregisterConfirmationMatches =
     Boolean(selectedOwnedAgent) &&
     deregisterConfirmationSlug.trim() === selectedOwnedAgent?.slug;
+  const registerManagedAgentLabel =
+    managedAgentRegistration.registrationState === 'DeregistrationConfirmed' ||
+    managedAgentRegistration.registrationState === 'DeregistrationRequested' ||
+    managedAgentRegistration.registrationState === 'DeregistrationInitiated'
+      ? 'Re-register managed agent'
+      : 'Register managed agent';
 
   function resetMessages() {
     setError(null);
@@ -439,9 +444,20 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
     }
 
     if (!canRegisterManagedAgent) {
-      setError(
-        'This agent is already registered or pending. You can only retry after a failed attempt.'
-      );
+      if (
+        managedAgentRegistration.registrationState === 'RegistrationRequested' ||
+        managedAgentRegistration.registrationState === 'RegistrationInitiated' ||
+        managedAgentRegistration.registrationState === 'DeregistrationRequested' ||
+        managedAgentRegistration.registrationState === 'DeregistrationInitiated'
+      ) {
+        setError(
+          'This managed registration is still in progress on Masumi. Wait for it to finish or refresh the agent status before retrying.'
+        );
+      } else {
+        setError(
+          'This agent is already registered. You can retry after a failed, missing, stale, or deregistered registration state.'
+        );
+      }
       return;
     }
 
@@ -1347,7 +1363,7 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
                                 >
                                   {inboxAgentAction === 'register'
                                     ? 'Registering…'
-                                    : 'Register managed agent'}
+                                    : registerManagedAgentLabel}
                                 </Button>
                                 <Button
                                   size="sm"

@@ -36,7 +36,7 @@ describe('canAttemptManagedAgentRegistration', () => {
     ).toBe(true);
   });
 
-  it('blocks retry when registration is already recorded and not failed', () => {
+  it('blocks retry when registration is confirmed', () => {
     expect(
       canAttemptManagedAgentRegistration({
         status: 'registered',
@@ -45,7 +45,9 @@ describe('canAttemptManagedAgentRegistration', () => {
         registrationState: 'RegistrationConfirmed',
       })
     ).toBe(false);
+  });
 
+  it('allows explicit recovery from pending or deregistered local states', () => {
     expect(
       canAttemptManagedAgentRegistration({
         status: 'skipped',
@@ -53,14 +55,32 @@ describe('canAttemptManagedAgentRegistration', () => {
         agentIdentifier: null,
         registrationState: 'RegistrationRequested',
       })
+    ).toBe(true);
+
+    expect(
+      canAttemptManagedAgentRegistration({
+        status: 'pending',
+        inboxAgentId: null,
+        agentIdentifier: null,
+        registrationState: 'DeregistrationInitiated',
+      })
+    ).toBe(true);
+
+    expect(
+      canAttemptManagedAgentRegistration({
+        status: 'pending',
+        inboxAgentId: 'agent-123',
+        agentIdentifier: 'did:masumi:agent-123',
+        registrationState: 'DeregistrationInitiated',
+      })
     ).toBe(false);
 
     expect(
       canAttemptManagedAgentRegistration({
-        status: 'insufficient_credits',
-        inboxAgentId: null,
+        status: 'pending',
+        inboxAgentId: 'agent-123',
         agentIdentifier: null,
-        registrationState: null,
+        registrationState: 'RegistrationRequested',
       })
     ).toBe(false);
 
@@ -70,6 +90,17 @@ describe('canAttemptManagedAgentRegistration', () => {
         inboxAgentId: 'agent-123',
         agentIdentifier: 'did:masumi:agent-123',
         registrationState: 'DeregistrationConfirmed',
+      })
+    ).toBe(true);
+  });
+
+  it('blocks retry after insufficient credits until another state is recorded', () => {
+    expect(
+      canAttemptManagedAgentRegistration({
+        status: 'insufficient_credits',
+        inboxAgentId: null,
+        agentIdentifier: null,
+        registrationState: null,
       })
     ).toBe(false);
   });

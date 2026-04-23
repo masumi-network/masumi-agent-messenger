@@ -21,6 +21,7 @@ import {
   isPendingMasumiInboxAgentState,
   isAnyDeregistrationInboxAgentState,
   isMissingRequiredScopeMessage,
+  isOwnedSaasRegistrationBlockingFreshCreate,
   getMasumiInboxAgentNetwork,
   type MasumiInboxAgentNetwork,
   MASUMI_INBOX_AGENT_REQUIRED_CREDITS,
@@ -30,8 +31,9 @@ import {
   type MasumiActorRegistrationMetadata,
   type MasumiInboxAgentEntry,
   type MasumiRegistrationResult,
+  mergeMasumiRegistrationMetadataFromEntry,
+  pickOwnedSaasExactInboxAgentMatch,
   pickNewestExactInboxAgentMatch,
-  registrationMetadataFromEntry,
   registrationResultFromMetadata,
   type SerializedMasumiInboxAgentSearchResponse,
 } from '../../../shared/inbox-agent-registration';
@@ -665,34 +667,89 @@ async function discoverOwnedPayInboxAgentBySlug(params: {
   issuer: string;
   accessToken: string;
   slug: string;
+  filterStatus?: 'Registered' | 'Pending' | 'Deregistered' | 'Failed';
 }): Promise<MasumiInboxAgentEntry | null> {
   const normalizedSlug = normalizeInboxSlug(params.slug);
   if (!normalizedSlug) {
     return null;
   }
 
-  const url = buildMasumiPayApiUrl(params.issuer, 'inbox-agents');
-  url.searchParams.set('network', getMasumiInboxAgentNetwork());
-  url.searchParams.set('take', '20');
-  url.searchParams.set('search', normalizedSlug);
-  url.searchParams.set('filterStatus', 'Registered');
+  let cursor: string | null = null;
 
-  const response = await fetchWithNetworkErrorTag(url, {
-    headers: buildHeaders(params.accessToken),
-  });
+  do {
+    const url = buildMasumiPayApiUrl(params.issuer, 'inbox-agents');
+    url.searchParams.set('network', getMasumiInboxAgentNetwork());
+    url.searchParams.set('take', '20');
+    url.searchParams.set('search', normalizedSlug);
+    if (params.filterStatus) {
+      url.searchParams.set('filterStatus', params.filterStatus);
+    }
+    if (cursor) {
+      url.searchParams.set('cursor', cursor);
+    }
 
-  if (!response.ok) {
-    const body = await readErrorBody(response);
-    throw userError(body.error ?? `Unable to list inbox agents (${response.status})`, {
-      code: 'INBOX_AGENT_LOOKUP_FAILED',
+    const response = await fetchWithNetworkErrorTag(url, {
+      headers: buildHeaders(params.accessToken),
     });
+
+    if (!response.ok) {
+      const body = await readErrorBody(response);
+      throw userError(body.error ?? `Unable to list inbox agents (${response.status})`, {
+        code: 'INBOX_AGENT_LOOKUP_FAILED',
+      });
+    }
+
+    const parsed = parseMasumiPayInboxAgentCollection(await response.json());
+    const exact = params.filterStatus
+      ? pickOwnedSaasExactInboxAgentMatch({
+          entries: parsed.agents,
+          slug: normalizedSlug,
+        })
+      : pickNewestExactInboxAgentMatch({
+          entries: parsed.agents,
+          slug: normalizedSlug,
+          includeDeregistered: true,
+        });
+    if (exact) {
+      return exact;
+    }
+
+    cursor = parsed.nextCursor;
+  } while (cursor);
+
+  return null;
+}
+
+async function discoverOwnedBlockingPayInboxAgentBySlug(params: {
+  issuer: string;
+  accessToken: string;
+  slug: string;
+}): Promise<MasumiInboxAgentEntry | null> {
+  const registered = await discoverOwnedPayInboxAgentBySlug({
+    issuer: params.issuer,
+    accessToken: params.accessToken,
+    slug: params.slug,
+    filterStatus: 'Registered',
+  });
+  if (registered) {
+    return registered;
   }
 
-  const parsed = parseMasumiPayInboxAgentCollection(await response.json());
-  return pickNewestExactInboxAgentMatch({
-    entries: parsed.agents,
-    slug: normalizedSlug,
+  return discoverOwnedPayInboxAgentBySlug({
+    issuer: params.issuer,
+    accessToken: params.accessToken,
+    slug: params.slug,
+    filterStatus: 'Pending',
   });
+}
+
+function hasTrustedLocalConfirmedRegistration(
+  metadata: MasumiActorRegistrationMetadata | null | undefined
+): boolean {
+  return Boolean(
+    metadata?.masumiInboxAgentId?.trim() &&
+      metadata.masumiRegistrationState === 'RegistrationConfirmed'
+  );
 }
 
 function isDeregisterableRegistrationMetadata(
@@ -867,38 +924,95 @@ export async function syncMasumiInboxAgentRegistration(params: {
     return { registration: result, metadata: currentMetadata };
   }
 
-  try {
-    const discovered = await discoverInboxAgentBySlug({
-      issuer: params.profile.issuer,
-      session: params.session,
-      slug: params.actor.slug,
-      includeDeregistered:
-        Boolean(currentMetadata?.masumiInboxAgentId) ||
-        isAnyDeregistrationInboxAgentState(currentMetadata?.masumiRegistrationState),
-    });
-
-    if (discovered) {
-      currentMetadata = registrationMetadataFromEntry(discovered);
-      await persistRegistrationMetadata({
-        conn: params.conn,
-        actor: params.actor,
-        metadata: currentMetadata,
+  if (params.mode === 'skip') {
+    try {
+      const discovered = await discoverInboxAgentBySlug({
+        issuer: params.profile.issuer,
+        session: params.session,
+        slug: params.actor.slug,
+        includeDeregistered:
+          Boolean(currentMetadata?.masumiInboxAgentId) ||
+          isAnyDeregistrationInboxAgentState(currentMetadata?.masumiRegistrationState),
       });
 
-      result = registrationResultFromMetadata(currentMetadata);
-      params.reporter.success('Phase: lookup complete');
+      if (discovered) {
+        currentMetadata = mergeMasumiRegistrationMetadataFromEntry({
+          entry: discovered,
+          current: currentMetadata,
+          preserveCurrentAgentIdentifier: true,
+        });
+        await persistRegistrationMetadata({
+          conn: params.conn,
+          actor: params.actor,
+          metadata: currentMetadata,
+        });
+
+        result = registrationResultFromMetadata(currentMetadata);
+        params.reporter.success('Phase: lookup complete');
+        return { registration: result, metadata: currentMetadata };
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to discover inbox-agent registration';
+      result = {
+        ...result,
+        status: currentMetadata
+          ? result.status
+          : isMissingRequiredScopeMessage(message)
+            ? 'scope_missing'
+            : 'service_unavailable',
+        error: isMissingRequiredScopeMessage(message)
+          ? toScopeMessage(message, params.session)
+          : message,
+      };
       return { registration: result, metadata: currentMetadata };
+    }
+
+    if (currentMetadata && result.status !== 'failed') {
+      return { registration: result, metadata: currentMetadata };
+    }
+
+    if (!currentMetadata) {
+      result.skipped = true;
+      result.status = 'skipped';
+    }
+    return { registration: result, metadata: currentMetadata };
+  }
+
+  let discoveredOwned: MasumiInboxAgentEntry | null = null;
+  try {
+    discoveredOwned = await discoverOwnedBlockingPayInboxAgentBySlug({
+      issuer: params.profile.issuer,
+      accessToken,
+      slug: params.actor.slug,
+    });
+
+    if (discoveredOwned) {
+      currentMetadata = mergeMasumiRegistrationMetadataFromEntry({
+        entry: discoveredOwned,
+        current: currentMetadata,
+        preserveCurrentAgentIdentifier: true,
+      });
+
+      if (isOwnedSaasRegistrationBlockingFreshCreate(discoveredOwned.state)) {
+        await persistRegistrationMetadata({
+          conn: params.conn,
+          actor: params.actor,
+          metadata: currentMetadata,
+        });
+        result = registrationResultFromMetadata(currentMetadata);
+        params.reporter.success('Phase: lookup complete');
+        return { registration: result, metadata: currentMetadata };
+      }
     }
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : 'Unable to discover inbox-agent registration';
+      error instanceof Error ? error.message : 'Unable to discover owned inbox-agent registration';
     result = {
       ...result,
-      status: currentMetadata
-        ? result.status
-        : isMissingRequiredScopeMessage(message)
-          ? 'scope_missing'
-          : 'service_unavailable',
+      status: isMissingRequiredScopeMessage(message)
+        ? 'scope_missing'
+        : 'service_unavailable',
       error: isMissingRequiredScopeMessage(message)
         ? toScopeMessage(message, params.session)
         : message,
@@ -906,15 +1020,9 @@ export async function syncMasumiInboxAgentRegistration(params: {
     return { registration: result, metadata: currentMetadata };
   }
 
-  if (currentMetadata && result.status !== 'failed') {
-    return { registration: result, metadata: currentMetadata };
-  }
-
-  if (params.mode === 'skip') {
-    if (!currentMetadata) {
-      result.skipped = true;
-      result.status = 'skipped';
-    }
+  if (!discoveredOwned && hasTrustedLocalConfirmedRegistration(currentMetadata)) {
+    result = registrationResultFromMetadata(currentMetadata);
+    params.reporter.success('Phase: lookup complete');
     return { registration: result, metadata: currentMetadata };
   }
 
@@ -995,6 +1103,7 @@ export async function syncMasumiInboxAgentRegistration(params: {
   const preAttemptMetadata = currentMetadata;
   currentMetadata = createRegistrationRequestedMetadata({
     current: currentMetadata,
+    preserveCurrentAgentIdentifier: true,
   });
   await persistRegistrationMetadata({
     conn: params.conn,
@@ -1034,7 +1143,11 @@ export async function syncMasumiInboxAgentRegistration(params: {
 
     params.reporter.success('Phase: register complete');
 
-    currentMetadata = registrationMetadataFromEntry(created.entry);
+    currentMetadata = mergeMasumiRegistrationMetadataFromEntry({
+      entry: created.entry,
+      current: preAttemptMetadata,
+      preserveCurrentAgentIdentifier: true,
+    });
     await persistRegistrationMetadata({
       conn: params.conn,
       actor: params.actor,
@@ -1115,6 +1228,7 @@ export async function deregisterMasumiInboxAgentRegistration(params: {
   actor: VisibleAgentRow;
   reporter: TaskReporter;
 }): Promise<SyncResult> {
+  const localMetadata = readActorRegistrationMetadata(params.actor);
   const accessToken = hasMasumiAccessToken(params.session)
     ? params.session.accessToken.trim()
     : null;
@@ -1136,7 +1250,15 @@ export async function deregisterMasumiInboxAgentRegistration(params: {
     accessToken,
     slug: params.actor.slug,
   });
-  let currentMetadata = discovered ? registrationMetadataFromEntry(discovered) : null;
+  let currentMetadata = discovered
+    ? mergeMasumiRegistrationMetadataFromEntry({
+        entry: discovered,
+        current: localMetadata,
+        preserveCurrentAgentIdentifier: true,
+      })
+    : isDeregisterableRegistrationMetadata(localMetadata)
+      ? localMetadata
+      : null;
 
   if (!isDeregisterableRegistrationMetadata(currentMetadata)) {
     const state = currentMetadata?.masumiRegistrationState ?? 'not registered';
@@ -1186,7 +1308,11 @@ export async function deregisterMasumiInboxAgentRegistration(params: {
     };
   }
 
-  currentMetadata = registrationMetadataFromEntry(deregistered);
+  currentMetadata = mergeMasumiRegistrationMetadataFromEntry({
+    entry: deregistered,
+    current: currentMetadata,
+    preserveCurrentAgentIdentifier: true,
+  });
   await persistRegistrationMetadata({
     conn: params.conn,
     actor: params.actor,

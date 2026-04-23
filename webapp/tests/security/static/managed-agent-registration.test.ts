@@ -13,7 +13,7 @@ describe('managed agent registration retry policy', () => {
     ).toBe(true);
   });
 
-  it('still blocks retry when a non-failed registration state is already recorded', () => {
+  it('allows explicit recovery when only stale local pending state is recorded', () => {
     expect(
       canAttemptManagedAgentRegistration({
         status: 'service_unavailable',
@@ -21,6 +21,6 @@ describe('managed agent registration retry policy', () => {
         agentIdentifier: null,
         registrationState: 'RegistrationRequested',
       })
-    ).toBe(false);
+    ).toBe(true);
   });
 });

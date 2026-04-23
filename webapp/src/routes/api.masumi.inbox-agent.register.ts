@@ -1,6 +1,9 @@
 import { createFileRoute } from '@tanstack/react-router';
 import {
+  createMasumiRegistrationOperationalFailureResponse,
+  masumiRegistrationClientErrorToHttpStatus,
   registerMasumiInboxAgentForSession,
+  resolveTrustedOwnedRegistrationSubjectForSession,
 } from '@/lib/inbox-agent-registration.server';
 import { readAuthenticatedBrowserSession } from '@/lib/oidc-auth.server';
 import {
@@ -41,10 +44,7 @@ function parseSubject(value: unknown): SerializedMasumiActorRegistrationSubject 
   return {
     slug: subject.slug,
     displayName: typeof subject.displayName === 'string' ? subject.displayName : null,
-    registration:
-      typeof subject.registration === 'object' && subject.registration !== null
-        ? (subject.registration as SerializedMasumiActorRegistrationSubject['registration'])
-        : null,
+    registration: null,
   };
 }
 
@@ -77,21 +77,60 @@ export const Route = createFileRoute('/api/masumi/inbox-agent/register')({
         }
 
         try {
-          const subject = parseSubject(await request.json());
+          const requestedSubject = parseSubject(await request.json());
+          let subject: SerializedMasumiActorRegistrationSubject;
+          try {
+            subject = await resolveTrustedOwnedRegistrationSubjectForSession({
+              session,
+              subject: requestedSubject,
+            });
+          } catch (error) {
+            const clientStatus = masumiRegistrationClientErrorToHttpStatus(error);
+            if (clientStatus !== null) {
+              return jsonResponse(
+                {
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : 'Unable to register managed inbox agent',
+                },
+                clientStatus,
+                cookies
+              );
+            }
+            return registrationResponse(
+              createMasumiRegistrationOperationalFailureResponse({
+                session,
+                error,
+                currentRegistration: requestedSubject.registration,
+              }),
+              cookies
+            );
+          }
           const result = await registerMasumiInboxAgentForSession({
             session,
             subject,
           });
           return registrationResponse(result, cookies);
         } catch (error) {
-          return jsonResponse(
-            {
-              error:
-                error instanceof Error
-                  ? error.message
-                  : 'Unable to register managed inbox agent',
-            },
-            400,
+          const clientStatus = masumiRegistrationClientErrorToHttpStatus(error);
+          if (clientStatus !== null) {
+            return jsonResponse(
+              {
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : 'Unable to register managed inbox agent',
+              },
+              clientStatus,
+              cookies
+            );
+          }
+          return registrationResponse(
+            createMasumiRegistrationOperationalFailureResponse({
+              session,
+              error,
+            }),
             cookies
           );
         }

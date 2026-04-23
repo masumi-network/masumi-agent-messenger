@@ -394,6 +394,18 @@ export function isAnyDeregistrationInboxAgentState(
   );
 }
 
+export function isOwnedSaasRegistrationBlockingFreshCreate(
+  state: string | null | undefined
+): boolean {
+  return (
+    state === 'RegistrationRequested' ||
+    state === 'RegistrationInitiated' ||
+    state === 'RegistrationConfirmed' ||
+    state === 'DeregistrationRequested' ||
+    state === 'DeregistrationInitiated'
+  );
+}
+
 export function isDeregisteredMasumiRegistrationMetadata(
   metadata: MasumiActorRegistrationMetadata | null | undefined
 ): boolean {
@@ -590,6 +602,29 @@ export function pickNewestExactInboxAgentMatch(params: {
   return matches[0] ?? null;
 }
 
+export function pickOwnedSaasExactInboxAgentMatch(params: {
+  entries: MasumiInboxAgentEntry[];
+  slug: string;
+}): MasumiInboxAgentEntry | null {
+  const normalizedSlug = normalizeInboxAgentSlug(params.slug);
+  const matches = params.entries
+    .filter(entry => normalizeInboxAgentSlug(entry.agentSlug) === normalizedSlug)
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.updatedAt);
+      const rightTime = Date.parse(right.updatedAt);
+      if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
+        return rightTime - leftTime;
+      }
+      return right.updatedAt.localeCompare(left.updatedAt);
+    });
+
+  const blocking = matches.filter(entry =>
+    isOwnedSaasRegistrationBlockingFreshCreate(entry.state)
+  );
+
+  return blocking[0] ?? matches[0] ?? null;
+}
+
 export function registrationMetadataFromEntry(
   entry: MasumiInboxAgentEntry
 ): MasumiActorRegistrationMetadata {
@@ -601,14 +636,39 @@ export function registrationMetadataFromEntry(
   };
 }
 
+export function mergeMasumiRegistrationMetadataFromEntry(params: {
+  entry: MasumiInboxAgentEntry;
+  current?: MasumiActorRegistrationMetadata | null;
+  preserveCurrentAgentIdentifier?: boolean;
+}): MasumiActorRegistrationMetadata {
+  const metadata = registrationMetadataFromEntry(params.entry);
+  const currentIdentifier = params.current?.masumiAgentIdentifier?.trim();
+
+  if (
+    params.preserveCurrentAgentIdentifier &&
+    !metadata.masumiAgentIdentifier &&
+    currentIdentifier
+  ) {
+    return {
+      ...metadata,
+      masumiAgentIdentifier: currentIdentifier,
+    };
+  }
+
+  return metadata;
+}
+
 export function createRegistrationRequestedMetadata(params: {
   current: MasumiActorRegistrationMetadata | null | undefined;
+  preserveCurrentAgentIdentifier?: boolean;
 }): MasumiActorRegistrationMetadata {
   return {
     masumiRegistrationNetwork:
       params.current?.masumiRegistrationNetwork ?? getMasumiInboxAgentNetwork(),
     masumiInboxAgentId: undefined,
-    masumiAgentIdentifier: undefined,
+    masumiAgentIdentifier: params.preserveCurrentAgentIdentifier
+      ? params.current?.masumiAgentIdentifier
+      : undefined,
     masumiRegistrationState: 'RegistrationRequested',
   };
 }

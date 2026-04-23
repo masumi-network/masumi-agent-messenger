@@ -3803,7 +3803,7 @@ export interface paths {
         put?: never;
         /**
          * Register inbox agent
-         * @description Compatibility alias for `POST /pay/api/v1/inbox-agents`. Registers a new inbox agent with the same server-side executing-wallet flow as the canonical route.
+         * @description Compatibility alias for `POST /pay/api/v1/inbox-agents`. Registers a new inbox agent with the same server-side executing-wallet flow as the canonical route. Returns HTTP 409 when the slug is already in use on the selected network, or when the finalized registration resolves to another user's existing ownership record.
          */
         post: {
             parameters: {
@@ -3935,7 +3935,7 @@ export interface paths {
                         };
                     };
                 };
-                /** @description Inbox agent already owned by another user */
+                /** @description Inbox registration conflict */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -3944,7 +3944,8 @@ export interface paths {
                         "application/json": {
                             /** @enum {boolean} */
                             success: false;
-                            error: string;
+                            /** @enum {string} */
+                            error: "Inbox slug is already in use on this network" | "Inbox agent is already owned by another account";
                         };
                     };
                 };
@@ -4194,7 +4195,7 @@ export interface paths {
         put?: never;
         /**
          * Deregister inbox agent
-         * @description Starts deregistration for an inbox agent after SaaS verifies ownership and resolves the matching payment source smart contract.
+         * @description Requests deregistration for a confirmed inbox agent after SaaS verifies ownership and resolves the matching payment source smart contract. The slug remains unavailable until the registry confirms deregistration.
          */
         post: {
             parameters: {
@@ -4208,7 +4209,7 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Deregistration started */
+                /** @description Deregistration requested */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -4648,7 +4649,7 @@ export interface paths {
         put?: never;
         /**
          * Register inbox agent
-         * @description Registers a new inbox agent after normalizing the slug. A configured server-side executing wallet pays for the registration and receives the registration asset; ownership is tracked locally for the authenticated user.
+         * @description Registers a new inbox agent after normalizing the slug. A configured server-side executing wallet pays for the registration and receives the registration asset; ownership is tracked locally for the authenticated user. Returns HTTP 409 when the slug is already in use on the selected network, or when the finalized registration resolves to another user's existing ownership record.
          */
         post: {
             parameters: {
@@ -4780,7 +4781,7 @@ export interface paths {
                         };
                     };
                 };
-                /** @description Inbox agent already owned by another user */
+                /** @description Inbox registration conflict */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -4789,7 +4790,8 @@ export interface paths {
                         "application/json": {
                             /** @enum {boolean} */
                             success: false;
-                            error: string;
+                            /** @enum {string} */
+                            error: "Inbox slug is already in use on this network" | "Inbox agent is already owned by another account";
                         };
                     };
                 };

@@ -330,6 +330,7 @@ export async function registerBrowserInboxAgent(params: {
   const currentMetadata = readActorRegistrationMetadata(params.actor);
   const requestedMetadata = createRegistrationRequestedMetadata({
     current: currentMetadata,
+    preserveCurrentAgentIdentifier: true,
   });
   const requestedActor = applyRegistrationMetadataToActor(params.actor, requestedMetadata);
 
@@ -435,7 +436,20 @@ export async function deregisterBrowserInboxAgent(params: {
   }
 
   if (!response.ok) {
-    throw new Error(payload.registration.error ?? 'Unable to deregister inbox agent');
+    const nextMetadata =
+      deserializeMasumiRegistrationMetadata(payload.metadata) ??
+      readActorRegistrationMetadata(params.actor);
+
+    await persistRegistrationMetadata({
+      actor: params.actor,
+      persistRegistration: params.persistRegistration,
+      metadata: nextMetadata,
+    });
+
+    return {
+      actor: applyRegistrationMetadataToActor(params.actor, nextMetadata),
+      registration: payload.registration,
+    };
   }
 
   const metadata = deserializeMasumiRegistrationMetadata(payload.metadata);

@@ -1,8 +1,11 @@
 import type { PublicContactPolicy } from '../../../shared/contact-policy';
 import type { PublicHeaderCapability } from '../../../shared/message-format';
-import { DbConnection } from '../module_bindings';
+import { DbConnection, tables } from '../module_bindings';
+import type { Agent, Inbox as InboxRow } from '../module_bindings/types';
 import { normalizeInboxSlug } from '../../../shared/inbox-slug';
+import { resolveWorkspaceSnapshot } from './app-shell';
 import { ensureWorkspaceEnvLoaded } from './workspace-env.server';
+import type { AuthenticatedRequestBrowserSession } from './oidc-auth.server';
 import { setGlobalLogLevel } from 'spacetimedb';
 
 ensureWorkspaceEnvLoaded();
@@ -67,6 +70,15 @@ function withErrorContext(action: string, error: unknown): Error {
   return new Error(action);
 }
 
+function fingerprintSessionToken(token: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < token.length; index += 1) {
+    hash ^= token.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
 async function withConnection<T>(
   subscribe: (conn: DbConnection, resolve: (value: T) => void, reject: (error: Error) => void) => void
 ): Promise<T> {
@@ -80,6 +92,45 @@ async function withConnection<T>(
       .withDatabaseName(DB_NAME)
       .onConnect(conn => {
         subscribe(
+          conn,
+          value => {
+            clearTimeout(timeoutId);
+            conn.disconnect();
+            resolve(value);
+          },
+          error => {
+            clearTimeout(timeoutId);
+            conn.disconnect();
+            reject(error);
+          }
+        );
+      })
+      .onConnectError((_ctx, error) => {
+        clearTimeout(timeoutId);
+        reject(withErrorContext('SpacetimeDB connection failed', error));
+      })
+      .build();
+  });
+}
+
+async function withAuthenticatedSubscription<T>(params: {
+  sessionToken: string;
+  subscribe: (conn: DbConnection, resolve: (value: T) => void, reject: (error: Error) => void) => void;
+}): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error('SpacetimeDB connection timeout'));
+    }, 10000);
+
+    const uri = new URL(HOST);
+    uri.searchParams.set('__session', fingerprintSessionToken(params.sessionToken));
+
+    DbConnection.builder()
+      .withUri(uri.toString())
+      .withDatabaseName(DB_NAME)
+      .withToken(params.sessionToken)
+      .onConnect(conn => {
+        params.subscribe(
           conn,
           value => {
             clearTimeout(timeoutId);
@@ -200,5 +251,45 @@ export async function fetchPublishedPublicRouteBySlug(
           )
         );
       });
+  });
+}
+
+export async function resolveOwnedActorBySlugForSession(params: {
+  session: AuthenticatedRequestBrowserSession;
+  slug: string;
+}): Promise<Agent | null> {
+  const normalizedSlug = normalizeInboxSlug(params.slug);
+  if (!normalizedSlug) {
+    return null;
+  }
+
+  return withAuthenticatedSubscription({
+    sessionToken: params.session.idToken,
+    subscribe: (conn, resolve, reject) => {
+      conn
+        .subscriptionBuilder()
+        .onApplied(() => {
+          try {
+            const snapshot = resolveWorkspaceSnapshot({
+              inboxes: Array.from(conn.db.visibleInboxes.iter()) as InboxRow[],
+              actors: Array.from(conn.db.visibleAgents.iter()) as Agent[],
+              contactRequests: [],
+              threadInvites: [],
+              session: params.session,
+              selectedSlug: null,
+            });
+            const ownedActor =
+              snapshot.ownedInboxAgents.find(entry => entry.actor.slug === normalizedSlug)
+                ?.actor ?? null;
+            resolve(ownedActor);
+          } catch (error) {
+            reject(withErrorContext('Resolving owned actor by slug failed', error));
+          }
+        })
+        .onError(error => {
+          reject(withErrorContext('SpacetimeDB subscription failed', error));
+        })
+        .subscribe([tables.visibleInboxes, tables.visibleAgents]);
+    },
   });
 }

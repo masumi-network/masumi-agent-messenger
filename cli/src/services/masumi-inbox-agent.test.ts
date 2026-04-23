@@ -805,7 +805,7 @@ describe('syncMasumiInboxAgentRegistration', () => {
         info() {},
         success() {},
       },
-      mode: 'auto',
+      mode: 'skip',
     });
 
     expect(result.registration.status).toBe('registered');
@@ -875,7 +875,7 @@ describe('syncMasumiInboxAgentRegistration', () => {
         info() {},
         success() {},
       },
-      mode: 'auto',
+      mode: 'skip',
     });
 
     expect(result.registration.status).toBe('pending');
@@ -955,7 +955,7 @@ describe('syncMasumiInboxAgentRegistration', () => {
         info() {},
         success() {},
       },
-      mode: 'auto',
+      mode: 'skip',
     });
 
     expect(result.registration.status).toBe('deregistered');
@@ -1039,7 +1039,7 @@ describe('syncMasumiInboxAgentRegistration', () => {
         info() {},
         success() {},
       },
-      mode: 'auto',
+      mode: 'skip',
     });
 
     expect(result.registration.status).toBe('registered');
@@ -1123,7 +1123,7 @@ describe('syncMasumiInboxAgentRegistration', () => {
         info() {},
         success() {},
       },
-      mode: 'auto',
+      mode: 'skip',
     });
 
     expect(result.registration.status).toBe('failed');
@@ -1135,6 +1135,705 @@ describe('syncMasumiInboxAgentRegistration', () => {
       masumiAgentIdentifier: 'did:masumi:deregistered-agent',
       masumiRegistrationState: 'RegistrationFailed',
     });
+  });
+
+  it('creates a fresh SaaS item in auto mode when stale local pending state has no owned item', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            creditsRemaining: 3,
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            id: 'fresh-agent-id',
+            name: 'Agent',
+            description: null,
+            agentSlug: 'agent',
+            state: 'RegistrationRequested',
+            createdAt: '2026-04-15T00:20:00.000Z',
+            updatedAt: '2026-04-15T00:20:00.000Z',
+            lastCheckedAt: null,
+            agentIdentifier: null,
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await syncMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+          setAgentPublicLinkedEmailVisibility: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'agent',
+          displayName: 'Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: undefined,
+        masumiAgentIdentifier: 'did:masumi:old-agent',
+        masumiRegistrationState: 'RegistrationRequested',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+      mode: 'auto',
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.inboxAgentId).toBe('fresh-agent-id');
+    expect(result.registration.agentIdentifier).toBe('did:masumi:old-agent');
+    expect(upsertMasumiInboxAgentRegistration).toHaveBeenLastCalledWith({
+      agentDbId: 1n,
+      masumiRegistrationNetwork: configuredNetwork,
+      masumiInboxAgentId: 'fresh-agent-id',
+      masumiAgentIdentifier: 'did:masumi:old-agent',
+      masumiRegistrationState: 'RegistrationRequested',
+    });
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toBe(
+      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=agent&filterStatus=Registered`
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toBe(
+      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=agent&filterStatus=Pending`
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[3]?.[0])).toBe(
+      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}`
+    );
+  });
+
+  it('creates a fresh SaaS item in auto mode when stale local pending state still has an old inboxAgentId', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            creditsRemaining: 3,
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            id: 'fresh-agent-id',
+            name: 'Agent',
+            description: null,
+            agentSlug: 'agent',
+            state: 'RegistrationRequested',
+            createdAt: '2026-04-15T00:20:00.000Z',
+            updatedAt: '2026-04-15T00:20:00.000Z',
+            lastCheckedAt: null,
+            agentIdentifier: null,
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await syncMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+          setAgentPublicLinkedEmailVisibility: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'agent',
+          displayName: 'Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'stale-agent-id',
+        masumiAgentIdentifier: 'did:masumi:old-agent',
+        masumiRegistrationState: 'RegistrationRequested',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+      mode: 'auto',
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.inboxAgentId).toBe('fresh-agent-id');
+    expect(result.registration.agentIdentifier).toBe('did:masumi:old-agent');
+    expect(upsertMasumiInboxAgentRegistration).toHaveBeenLastCalledWith({
+      agentDbId: 1n,
+      masumiRegistrationNetwork: configuredNetwork,
+      masumiInboxAgentId: 'fresh-agent-id',
+      masumiAgentIdentifier: 'did:masumi:old-agent',
+      masumiRegistrationState: 'RegistrationRequested',
+    });
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(4);
+  });
+
+  it('does not create a duplicate when auto mode finds an owned pending SaaS item', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [
+            {
+              id: 'existing-pending-id',
+              name: 'Agent',
+              description: null,
+              agentSlug: 'agent',
+              state: 'RegistrationRequested',
+              createdAt: '2026-04-15T00:20:00.000Z',
+              updatedAt: '2026-04-15T00:20:00.000Z',
+              lastCheckedAt: null,
+              agentIdentifier: null,
+            },
+          ],
+          nextCursor: null,
+        })
+      ) as typeof fetch;
+
+    const result = await syncMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'agent',
+          displayName: 'Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: undefined,
+        masumiAgentIdentifier: 'did:masumi:old-agent',
+        masumiRegistrationState: 'RegistrationRequested',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+      mode: 'auto',
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.inboxAgentId).toBe('existing-pending-id');
+    expect(result.registration.agentIdentifier).toBe('did:masumi:old-agent');
+    expect(upsertMasumiInboxAgentRegistration).toHaveBeenCalledWith({
+      agentDbId: 1n,
+      masumiRegistrationNetwork: configuredNetwork,
+      masumiInboxAgentId: 'existing-pending-id',
+      masumiAgentIdentifier: 'did:masumi:old-agent',
+      masumiRegistrationState: 'RegistrationRequested',
+    });
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toContain(
+      'filterStatus=Registered'
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toContain(
+      'filterStatus=Pending'
+    );
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(2);
+  });
+
+  it('keeps a trusted confirmed local registration when owned Pay lookup returns no exact item', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      ) as typeof fetch;
+
+    const result = await syncMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'agent',
+          displayName: 'Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'confirmed-agent-id',
+        masumiAgentIdentifier: 'did:masumi:confirmed-agent',
+        masumiRegistrationState: 'RegistrationConfirmed',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+      mode: 'auto',
+    });
+
+    expect(result.registration.status).toBe('registered');
+    expect(result.registration.inboxAgentId).toBe('confirmed-agent-id');
+    expect(result.registration.agentIdentifier).toBe('did:masumi:confirmed-agent');
+    expect(upsertMasumiInboxAgentRegistration).not.toHaveBeenCalled();
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toContain(
+      'filterStatus=Registered'
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toContain(
+      'filterStatus=Pending'
+    );
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(2);
+  });
+
+  it('paginates the owned Pay lookup until it finds an exact slug match in auto mode', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [
+            {
+              id: 'other-agent-id',
+              name: 'Other Agent',
+              description: null,
+              agentSlug: 'other-agent',
+              state: 'RegistrationConfirmed',
+              createdAt: '2026-04-15T00:10:00.000Z',
+              updatedAt: '2026-04-15T00:10:00.000Z',
+              lastCheckedAt: null,
+              agentIdentifier: null,
+            },
+          ],
+          nextCursor: 'cursor-2',
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [
+            {
+              id: 'existing-pending-id',
+              name: 'Agent',
+              description: null,
+              agentSlug: 'agent',
+              state: 'RegistrationRequested',
+              createdAt: '2026-04-15T00:20:00.000Z',
+              updatedAt: '2026-04-15T00:20:00.000Z',
+              lastCheckedAt: null,
+              agentIdentifier: null,
+            },
+          ],
+          nextCursor: null,
+        })
+      ) as typeof fetch;
+
+    const result = await syncMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'agent',
+          displayName: 'Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: undefined,
+        masumiAgentIdentifier: 'did:masumi:old-agent',
+        masumiRegistrationState: 'RegistrationRequested',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+      mode: 'auto',
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.inboxAgentId).toBe('existing-pending-id');
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toContain(
+      'filterStatus=Registered'
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[2]?.[0])).toContain(
+      'filterStatus=Pending'
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[2]?.[0])).toContain('cursor=cursor-2');
+    expect(upsertMasumiInboxAgentRegistration).toHaveBeenCalledWith({
+      agentDbId: 1n,
+      masumiRegistrationNetwork: configuredNetwork,
+      masumiInboxAgentId: 'existing-pending-id',
+      masumiAgentIdentifier: 'did:masumi:old-agent',
+      masumiRegistrationState: 'RegistrationRequested',
+    });
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(3);
+  });
+
+  it('falls back to the pending pass when the registered pass has no exact match in auto mode', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [
+            {
+              id: 'older-pending-id',
+              name: 'Agent',
+              description: null,
+              agentSlug: 'agent',
+              state: 'RegistrationRequested',
+              createdAt: '2026-04-15T00:20:00.000Z',
+              updatedAt: '2026-04-15T00:20:00.000Z',
+              lastCheckedAt: null,
+              agentIdentifier: null,
+            },
+          ],
+          nextCursor: null,
+        })
+      ) as typeof fetch;
+
+    const result = await syncMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'agent',
+          displayName: 'Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: undefined,
+        masumiAgentIdentifier: 'did:masumi:old-agent',
+        masumiRegistrationState: 'RegistrationRequested',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+      mode: 'auto',
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.inboxAgentId).toBe('older-pending-id');
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toContain(
+      'filterStatus=Registered'
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toContain(
+      'filterStatus=Pending'
+    );
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(2);
+  });
+
+  it('surfaces SaaS slug conflicts in auto mode registration attempts', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            creditsRemaining: 3,
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(409, {
+          success: false,
+          error: 'Inbox slug is already in use on this network',
+        })
+      ) as typeof fetch;
+
+    const result = await syncMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+          setAgentPublicLinkedEmailVisibility: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'agent',
+          displayName: 'Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: undefined,
+        masumiAgentIdentifier: undefined,
+        masumiRegistrationState: undefined,
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+      mode: 'auto',
+    });
+
+    expect(result.registration.status).toBe('failed');
+    expect(result.registration.error).toBe(
+      'Inbox slug is already in use on this network'
+    );
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(4);
   });
 });
 
@@ -1254,7 +1953,7 @@ describe('deregisterMasumiInboxAgentRegistration', () => {
 
     const calls = vi.mocked(global.fetch).mock.calls;
     expect(String(calls[0]?.[0])).toBe(
-      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=agent&filterStatus=Registered`
+      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=agent`
     );
     expect(String(calls[1]?.[0])).toBe(
       `https://issuer.example.com/pay/api/v1/inbox-agents/agent-123/deregister?network=${configuredNetwork}`
@@ -1266,5 +1965,148 @@ describe('deregisterMasumiInboxAgentRegistration', () => {
       })
     );
     expect(calls).toHaveLength(2);
+  });
+
+  it('falls back to local confirmed id when owned Pay lookup returns no exact item', async () => {
+    const upsertMasumiInboxAgentRegistration = vi.fn().mockResolvedValue(undefined);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            id: 'local-confirmed-id',
+            name: 'Agent',
+            description: 'Registered agent',
+            agentSlug: 'agent',
+            state: 'DeregistrationRequested',
+            createdAt: '2026-04-15T00:00:00.000Z',
+            updatedAt: '2026-04-15T00:10:00.000Z',
+            lastCheckedAt: null,
+            agentIdentifier: 'did:masumi:agent',
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await deregisterMasumiInboxAgentRegistration({
+      profile: {
+        name: 'default',
+        issuer: 'https://issuer.example.com',
+        clientId: 'client-id',
+        oidcScope: 'openid profile email',
+        spacetimeHost: 'ws://localhost:3000',
+        spacetimeDbName: 'agentmessenger-dev',
+      },
+      session: {
+        idToken: 'id-token',
+        accessToken: 'access-token',
+        expiresAt: 1,
+        createdAt: 1,
+      },
+      conn: {
+        reducers: {
+          upsertMasumiInboxAgentRegistration,
+        },
+      } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+      actor: {
+        ...actor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          inboxIdentifier: undefined,
+          isDefault: true,
+          publicIdentity: 'agent',
+          displayName: 'Agent',
+          currentEncryptionPublicKey: 'enc',
+          currentEncryptionKeyVersion: 'enc-v1',
+          currentSigningPublicKey: 'sig',
+          currentSigningKeyVersion: 'sig-v1',
+          createdAt: timestamp(1n),
+          updatedAt: timestamp(1n),
+        }),
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'local-confirmed-id',
+        masumiAgentIdentifier: 'did:masumi:agent',
+        masumiRegistrationState: 'RegistrationConfirmed',
+      },
+      reporter: {
+        info() {},
+        success() {},
+      },
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toBe(
+      `https://issuer.example.com/pay/api/v1/inbox-agents/local-confirmed-id/deregister?network=${configuredNetwork}`
+    );
+  });
+
+  it('surfaces owned Pay lookup failures without treating the agent as unregistered', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      jsonResponse(503, {
+        success: false,
+        error: 'pay offline',
+      })
+    ) as typeof fetch;
+
+    await expect(
+      deregisterMasumiInboxAgentRegistration({
+        profile: {
+          name: 'default',
+          issuer: 'https://issuer.example.com',
+          clientId: 'client-id',
+          oidcScope: 'openid profile email',
+          spacetimeHost: 'ws://localhost:3000',
+          spacetimeDbName: 'agentmessenger-dev',
+        },
+        session: {
+          idToken: 'id-token',
+          accessToken: 'access-token',
+          expiresAt: 1,
+          createdAt: 1,
+        },
+        conn: {
+          reducers: {
+            upsertMasumiInboxAgentRegistration: vi.fn().mockResolvedValue(undefined),
+          },
+        } as unknown as import('../../../webapp/src/module_bindings').DbConnection,
+        actor: {
+          ...actor({
+            id: 1n,
+            inboxId: 10n,
+            normalizedEmail: 'agent@example.com',
+            slug: 'agent',
+            inboxIdentifier: undefined,
+            isDefault: true,
+            publicIdentity: 'agent',
+            displayName: 'Agent',
+            currentEncryptionPublicKey: 'enc',
+            currentEncryptionKeyVersion: 'enc-v1',
+            currentSigningPublicKey: 'sig',
+            currentSigningKeyVersion: 'sig-v1',
+            createdAt: timestamp(1n),
+            updatedAt: timestamp(1n),
+          }),
+          masumiRegistrationNetwork: configuredNetwork,
+          masumiInboxAgentId: 'local-confirmed-id',
+          masumiAgentIdentifier: 'did:masumi:agent',
+          masumiRegistrationState: 'RegistrationConfirmed',
+        },
+        reporter: {
+          info() {},
+          success() {},
+        },
+      })
+    ).rejects.toMatchObject({
+      message: 'pay offline',
+    });
   });
 });

@@ -283,6 +283,7 @@ describe('generated and source security contracts', () => {
     const registrationServer = readRelativeFile('src/lib/inbox-agent-registration.server.ts');
     const registerRoute = readRelativeFile('src/routes/api.masumi.inbox-agent.register.ts');
     const syncRoute = readRelativeFile('src/routes/api.masumi.inbox-agent.sync.ts');
+    const deregisterRoute = readRelativeFile('src/routes/api.masumi.inbox-agent.deregister.ts');
     const workspaceShell = readRelativeFile('src/features/workspace/use-workspace-shell.ts');
     const generatedTypes = readRelativeFile('src/module_bindings/types.ts');
     const masumiReducer = readRelativeFile(
@@ -303,7 +304,13 @@ describe('generated and source security contracts', () => {
     expect(masumiReducer).not.toContain('masumiVerified');
     expect(generatedTypes).toContain('agentIdentifier: __t.option(__t.string())');
     expect(registerRoute).toContain('masumiRegistrationOutcomeToHttpStatus');
+    expect(registerRoute).toContain('resolveTrustedOwnedRegistrationSubjectForSession');
+    expect(registerRoute).toContain('createMasumiRegistrationOperationalFailureResponse');
     expect(syncRoute).toContain('masumiRegistrationOutcomeToHttpStatus');
+    expect(syncRoute).toContain('resolveTrustedOwnedRegistrationSubjectForSession');
+    expect(syncRoute).toContain('createMasumiRegistrationOperationalFailureResponse');
+    expect(deregisterRoute).toContain('resolveTrustedOwnedRegistrationSubjectForSession');
+    expect(deregisterRoute).toContain('masumiRegistrationOutcomeToHttpStatus');
   });
 
   it('threads clientCreatedAt through the generated device-share contracts', () => {

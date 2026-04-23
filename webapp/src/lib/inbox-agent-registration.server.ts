@@ -13,6 +13,8 @@ import {
   isPendingMasumiInboxAgentState,
   isAnyDeregistrationInboxAgentState,
   isMissingRequiredScopeMessage,
+  isOwnedSaasRegistrationBlockingFreshCreate,
+  mergeMasumiRegistrationMetadataFromEntry,
   type MasumiInboxAgentNetwork,
   MASUMI_INBOX_AGENT_REQUIRED_CREDITS,
   type MasumiActorRegistrationMetadata,
@@ -22,11 +24,12 @@ import {
   parseMasumiPayInboxAgentCollection,
   parseMasumiRegistryInboxAgentCollection,
   parseMasumiPayInboxAgentEntry,
+  pickOwnedSaasExactInboxAgentMatch,
   pickNewestExactInboxAgentMatch,
-  registrationMetadataFromEntry,
   registrationResultFromMetadata,
   serializeMasumiRegistrationMetadata,
   type MasumiInboxAgentEntry,
+  type SerializedMasumiActorRegistrationMetadata,
   type SerializedMasumiInboxAgentSearchResponse,
   type SerializedMasumiActorRegistrationSubject,
   type SerializedMasumiRegistrationResponse,
@@ -34,6 +37,8 @@ import {
 import { normalizeInboxSlug } from '../../../shared/inbox-slug';
 import type { AuthenticatedRequestBrowserSession } from './oidc-auth.server';
 import { fetchMasumiApi } from './masumi-api';
+import { readActorRegistrationMetadata } from './inbox-agent-registration';
+import { resolveOwnedActorBySlugForSession } from './spacetimedb-server';
 
 function getMasumiInboxAgentNetwork(): MasumiInboxAgentNetwork {
   const raw = process.env.MASUMI_NETWORK?.trim();
@@ -436,29 +441,147 @@ async function createInboxAgent(params: {
 async function discoverOwnedPayInboxAgentBySlug(params: {
   session: AuthenticatedRequestBrowserSession;
   slug: string;
+  filterStatus?: 'Registered' | 'Pending' | 'Deregistered' | 'Failed';
 }): Promise<MasumiInboxAgentEntry | null> {
   const normalizedSlug = normalizeInboxSlug(params.slug);
   if (!normalizedSlug) {
     return null;
   }
 
-  const url = buildMasumiPayApiUrl(params.session.user.issuer, 'inbox-agents');
-  url.searchParams.set('network', getMasumiInboxAgentNetwork());
-  url.searchParams.set('take', '20');
-  url.searchParams.set('search', normalizedSlug);
-  url.searchParams.set('filterStatus', 'Registered');
+  let cursor: string | null = null;
 
-  const response = await fetchMasumiApi(params.session, url);
-  if (!response.ok) {
-    const body = await readErrorBody(response);
-    throw new Error(body.error ?? `Unable to list inbox agents (${response.status})`);
+  do {
+    const url = buildMasumiPayApiUrl(params.session.user.issuer, 'inbox-agents');
+    url.searchParams.set('network', getMasumiInboxAgentNetwork());
+    url.searchParams.set('take', '20');
+    url.searchParams.set('search', normalizedSlug);
+    if (params.filterStatus) {
+      url.searchParams.set('filterStatus', params.filterStatus);
+    }
+    if (cursor) {
+      url.searchParams.set('cursor', cursor);
+    }
+
+    const response = await fetchMasumiApi(params.session, url);
+    if (!response.ok) {
+      const body = await readErrorBody(response);
+      throw new Error(body.error ?? `Unable to list inbox agents (${response.status})`);
+    }
+
+    const parsed = parseMasumiPayInboxAgentCollection(await response.json());
+    const exact = params.filterStatus
+      ? pickOwnedSaasExactInboxAgentMatch({
+          entries: parsed.agents,
+          slug: normalizedSlug,
+        })
+      : pickNewestExactInboxAgentMatch({
+          entries: parsed.agents,
+          slug: normalizedSlug,
+          includeDeregistered: true,
+        });
+    if (exact) {
+      return exact;
+    }
+
+    cursor = parsed.nextCursor;
+  } while (cursor);
+
+  return null;
+}
+
+async function discoverOwnedBlockingPayInboxAgentBySlug(params: {
+  session: AuthenticatedRequestBrowserSession;
+  slug: string;
+}): Promise<MasumiInboxAgentEntry | null> {
+  const registered = await discoverOwnedPayInboxAgentBySlug({
+    session: params.session,
+    slug: params.slug,
+    filterStatus: 'Registered',
+  });
+  if (registered) {
+    return registered;
   }
 
-  const parsed = parseMasumiPayInboxAgentCollection(await response.json());
-  return pickNewestExactInboxAgentMatch({
-    entries: parsed.agents,
-    slug: normalizedSlug,
+  return discoverOwnedPayInboxAgentBySlug({
+    session: params.session,
+    slug: params.slug,
+    filterStatus: 'Pending',
   });
+}
+
+function hasTrustedLocalConfirmedRegistration(
+  metadata: MasumiActorRegistrationMetadata | null | undefined
+): boolean {
+  return Boolean(
+    metadata?.masumiInboxAgentId?.trim() &&
+      metadata.masumiRegistrationState === 'RegistrationConfirmed'
+  );
+}
+
+export function masumiRegistrationClientErrorToHttpStatus(
+  error: unknown
+): number | null {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  if (message === 'Inbox-agent request payload is invalid') {
+    return 400;
+  }
+  if (message.startsWith('No owned inbox actor found for slug `')) {
+    return 404;
+  }
+  if (message.includes(' cannot be deregistered while its state is ')) {
+    return 409;
+  }
+  return null;
+}
+
+export function createMasumiRegistrationOperationalFailureResponse(params: {
+  session: AuthenticatedRequestBrowserSession;
+  error: unknown;
+  currentRegistration?: SerializedMasumiActorRegistrationMetadata | null;
+}): SerializedMasumiRegistrationResponse {
+  const message =
+    params.error instanceof Error
+      ? params.error.message
+      : 'Unable to process inbox-agent registration';
+  const metadata = deserializeMasumiRegistrationMetadata(
+    params.currentRegistration
+  );
+  const current = metadata
+    ? registrationResultFromMetadata(metadata)
+    : createEmptyMasumiRegistrationResult();
+
+  return {
+    registration: {
+      ...current,
+      status: isMissingRequiredScopeMessage(message)
+        ? 'scope_missing'
+        : 'service_unavailable',
+      error: isMissingRequiredScopeMessage(message)
+        ? toScopeMessage(message, params.session)
+        : message,
+    },
+    metadata: serializeMasumiRegistrationMetadata(metadata),
+  };
+}
+
+export async function resolveTrustedOwnedRegistrationSubjectForSession(params: {
+  session: AuthenticatedRequestBrowserSession;
+  subject: SerializedMasumiActorRegistrationSubject;
+}): Promise<SerializedMasumiActorRegistrationSubject> {
+  const actor = await resolveOwnedActorBySlugForSession({
+    session: params.session,
+    slug: params.subject.slug,
+  });
+
+  if (!actor) {
+    throw new Error(`No owned inbox actor found for slug \`${params.subject.slug}\`.`);
+  }
+
+  return {
+    slug: actor.slug,
+    displayName: actor.displayName ?? null,
+    registration: serializeMasumiRegistrationMetadata(readActorRegistrationMetadata(actor)),
+  };
 }
 
 function isDeregisterableRegistrationMetadata(
@@ -474,14 +597,23 @@ async function resolveDeregisterableRegistrationMetadata(params: {
   session: AuthenticatedRequestBrowserSession;
   subject: SerializedMasumiActorRegistrationSubject;
 }): Promise<MasumiActorRegistrationMetadata | null> {
+  const currentMetadata = deserializeMasumiRegistrationMetadata(params.subject.registration);
   // Always resolve from the authenticated user's Pay inbox-agent list. The
   // public registry id is not guaranteed to be the Pay inboxAgentId accepted by
-  // /deregister, and client-supplied registration metadata is untrusted.
+  // /deregister. If the owned list is empty, fall back to the trusted actor
+  // metadata that the route resolved from SpacetimeDB for this owned slug.
   const discovered = await discoverOwnedPayInboxAgentBySlug({
     session: params.session,
     slug: params.subject.slug,
   });
-  return discovered ? registrationMetadataFromEntry(discovered) : null;
+  if (discovered) {
+    return mergeMasumiRegistrationMetadataFromEntry({
+      entry: discovered,
+      current: currentMetadata,
+      preserveCurrentAgentIdentifier: true,
+    });
+  }
+  return isDeregisterableRegistrationMetadata(currentMetadata) ? currentMetadata : null;
 }
 
 async function deregisterInboxAgent(params: {
@@ -532,7 +664,11 @@ export async function syncMasumiInboxAgentRegistrationForSession(params: {
       };
     }
 
-    const nextMetadata = registrationMetadataFromEntry(discovered);
+    const nextMetadata = mergeMasumiRegistrationMetadataFromEntry({
+      entry: discovered,
+      current: metadata,
+      preserveCurrentAgentIdentifier: true,
+    });
     return {
       registration: registrationResultFromMetadata(nextMetadata),
       metadata: serializeMasumiRegistrationMetadata(nextMetadata),
@@ -580,7 +716,11 @@ export async function deregisterMasumiInboxAgentForSession(params: {
       session: params.session,
       inboxAgentId: metadata.masumiInboxAgentId,
     });
-    const nextMetadata = registrationMetadataFromEntry(deregistered);
+    const nextMetadata = mergeMasumiRegistrationMetadataFromEntry({
+      entry: deregistered,
+      current: metadata,
+      preserveCurrentAgentIdentifier: true,
+    });
     return {
       registration: {
         ...registrationResultFromMetadata(nextMetadata),
@@ -605,6 +745,48 @@ export async function registerMasumiInboxAgentForSession(params: {
 }): Promise<SerializedMasumiRegistrationResponse> {
   const metadata = deserializeMasumiRegistrationMetadata(params.subject.registration);
   const result = registrationResultFromMetadata(metadata);
+  let discovered: MasumiInboxAgentEntry | null = null;
+
+  try {
+    discovered = await discoverOwnedBlockingPayInboxAgentBySlug({
+      session: params.session,
+      slug: params.subject.slug,
+    });
+
+    if (
+      discovered &&
+      isOwnedSaasRegistrationBlockingFreshCreate(discovered.state)
+    ) {
+      const nextMetadata = mergeMasumiRegistrationMetadataFromEntry({
+        entry: discovered,
+        current: metadata,
+        preserveCurrentAgentIdentifier: true,
+      });
+      return {
+        registration: registrationResultFromMetadata(nextMetadata),
+        metadata: serializeMasumiRegistrationMetadata(nextMetadata),
+      };
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to lookup inbox agent';
+    return {
+      registration: {
+        ...result,
+        status: isMissingRequiredScopeMessage(message) ? 'scope_missing' : 'service_unavailable',
+        error: isMissingRequiredScopeMessage(message)
+          ? toScopeMessage(message, params.session)
+          : message,
+      },
+      metadata: serializeMasumiRegistrationMetadata(metadata),
+    };
+  }
+
+  if (!discovered && hasTrustedLocalConfirmedRegistration(metadata)) {
+    return {
+      registration: registrationResultFromMetadata(metadata),
+      metadata: serializeMasumiRegistrationMetadata(metadata),
+    };
+  }
 
   let creditsRemaining: number | null;
   try {
@@ -655,7 +837,11 @@ export async function registerMasumiInboxAgentForSession(params: {
       };
     }
 
-    const nextMetadata = registrationMetadataFromEntry(created.entry);
+    const nextMetadata = mergeMasumiRegistrationMetadataFromEntry({
+      entry: created.entry,
+      current: metadata,
+      preserveCurrentAgentIdentifier: true,
+    });
     const nextRegistration = registrationResultFromMetadata(nextMetadata);
 
     return {

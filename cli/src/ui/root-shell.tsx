@@ -741,6 +741,44 @@ function describeManagedAgentRegistration(params: {
   }
 }
 
+function getManagedAgentPrimaryActionLabel(agent: {
+  managed: boolean;
+  registered: boolean;
+  deregistered: boolean;
+} | null): string {
+  if (!agent) {
+    return 'register';
+  }
+  if (agent.deregistered) {
+    return 're-register';
+  }
+  if (!agent.managed) {
+    return 'register';
+  }
+  if (agent.registered) {
+    return 'sync registration';
+  }
+  return 'sync registration';
+}
+
+function getManagedAgentPrimaryActionTitle(agent: {
+  slug: string;
+  managed: boolean;
+  registered: boolean;
+  deregistered: boolean;
+} | null): string {
+  if (!agent) {
+    return 'Register managed agent';
+  }
+  if (agent.deregistered) {
+    return `Re-registering managed agent for ${agent.slug}`;
+  }
+  if (!agent.managed) {
+    return `Registering managed agent for ${agent.slug}`;
+  }
+  return `Syncing managed agent registration for ${agent.slug}`;
+}
+
 function describeDiscoveryRegistrationState(state: MasumiInboxAgentState): string {
   if (isFailedRegistrationInboxAgentState(state)) {
     return 'invalid';
@@ -4354,7 +4392,7 @@ export function RootShell({
     }
 
     await performTask(
-      `Syncing managed agent for ${selectedAgent.slug}`,
+      getManagedAgentPrimaryActionTitle(selectedAgent),
       reporter =>
         registerInboxAgent({
           profileName: options.profile,
@@ -6394,7 +6432,7 @@ export function RootShell({
           { key: 'N', label: 'create agent' },
           { key: 'P', label: 'description' },
           { key: 'L', label: 'linked email' },
-          { key: 'M', label: 'register/sync' },
+          { key: 'M', label: getManagedAgentPrimaryActionLabel(selectedAgent) },
           { key: 'D', label: 'deregister' },
           { key: 'Tab', label: 'sidebar' },
         ],

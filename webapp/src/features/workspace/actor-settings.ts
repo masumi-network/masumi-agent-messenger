@@ -1,7 +1,10 @@
 import type { Agent } from '@/module_bindings/types';
 import type { AgentKeyPair } from '@/lib/crypto';
 import type { DefaultKeyIssue } from '@/lib/app-shell';
-import type { MasumiRegistrationResult } from '../../../../shared/inbox-agent-registration';
+import {
+  isOwnedSaasRegistrationBlockingFreshCreate,
+  type MasumiRegistrationResult,
+} from '../../../../shared/inbox-agent-registration';
 import {
   buildLegacyPublicMessageCapabilities,
   buildPublicMessageCapabilities,
@@ -86,19 +89,37 @@ export function canAttemptManagedAgentRegistration(
     'status' | 'inboxAgentId' | 'agentIdentifier' | 'registrationState'
   >
 ): boolean {
-  if (registration.registrationState === 'DeregistrationConfirmed') {
-    return false;
-  }
-
-  if (registration.inboxAgentId?.trim() || registration.agentIdentifier?.trim()) {
-    return false;
-  }
+  const hasRecordedIdentity = Boolean(
+    registration.inboxAgentId?.trim() || registration.agentIdentifier?.trim()
+  );
 
   if (
     registration.registrationState === 'RegistrationFailed' ||
+    registration.registrationState === 'DeregistrationFailed' ||
     registration.status === 'failed'
   ) {
     return true;
+  }
+
+  if (registration.registrationState === 'DeregistrationConfirmed') {
+    return true;
+  }
+
+  if (
+    registration.registrationState === 'RegistrationRequested' ||
+    registration.registrationState === 'RegistrationInitiated' ||
+    registration.registrationState === 'DeregistrationRequested' ||
+    registration.registrationState === 'DeregistrationInitiated'
+  ) {
+    return !hasRecordedIdentity;
+  }
+
+  if (isOwnedSaasRegistrationBlockingFreshCreate(registration.registrationState)) {
+    return false;
+  }
+
+  if (hasRecordedIdentity) {
+    return false;
   }
 
   if (

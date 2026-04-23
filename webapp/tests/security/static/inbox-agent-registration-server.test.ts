@@ -4,6 +4,7 @@ import {
   listMasumiInboxAgentsForSession,
   lookupMasumiInboxAgentForSession,
   prioritizeVerifiedMasumiInboxAgents,
+  registerMasumiInboxAgentForSession,
   syncMasumiInboxAgentRegistrationForSession,
 } from '@/lib/inbox-agent-registration.server';
 import type { AuthenticatedRequestBrowserSession } from '@/lib/oidc-auth.server';
@@ -486,6 +487,477 @@ describe('Masumi inbox-agent discovery ordering', () => {
   });
 });
 
+describe('Masumi inbox-agent re-registration', () => {
+  it('creates a fresh SaaS item when only stale local pending state exists', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            creditsRemaining: 3,
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            id: 'fresh-agent-id',
+            name: 'Pending Agent',
+            description: null,
+            agentSlug: 'pending-agent',
+            state: 'RegistrationRequested',
+            createdAt: '2026-04-15T10:20:00.000Z',
+            updatedAt: '2026-04-15T10:20:00.000Z',
+            lastCheckedAt: null,
+            agentIdentifier: null,
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await registerMasumiInboxAgentForSession({
+      session: testSession(),
+      subject: {
+        slug: 'pending-agent',
+        displayName: 'Pending Agent',
+        registration: serializeMasumiRegistrationMetadata({
+          masumiRegistrationNetwork: configuredNetwork,
+          masumiInboxAgentId: undefined,
+          masumiAgentIdentifier: 'did:masumi:old-agent',
+          masumiRegistrationState: 'RegistrationRequested',
+        }),
+      },
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.inboxAgentId).toBe('fresh-agent-id');
+    expect(result.registration.agentIdentifier).toBe('did:masumi:old-agent');
+    expect(result.metadata).toEqual(
+      serializeMasumiRegistrationMetadata({
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'fresh-agent-id',
+        masumiAgentIdentifier: 'did:masumi:old-agent',
+        masumiRegistrationState: 'RegistrationRequested',
+      })
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toBe(
+      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=pending-agent&filterStatus=Registered`
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toBe(
+      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=pending-agent&filterStatus=Pending`
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[3]?.[0])).toBe(
+      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}`
+    );
+  });
+
+  it('creates a fresh SaaS item when stale local pending state still has an old inboxAgentId', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            creditsRemaining: 3,
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            id: 'fresh-agent-id',
+            name: 'Pending Agent',
+            description: null,
+            agentSlug: 'pending-agent',
+            state: 'RegistrationRequested',
+            createdAt: '2026-04-15T10:20:00.000Z',
+            updatedAt: '2026-04-15T10:20:00.000Z',
+            lastCheckedAt: null,
+            agentIdentifier: null,
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await registerMasumiInboxAgentForSession({
+      session: testSession(),
+      subject: {
+        slug: 'pending-agent',
+        displayName: 'Pending Agent',
+        registration: serializeMasumiRegistrationMetadata({
+          masumiRegistrationNetwork: configuredNetwork,
+          masumiInboxAgentId: 'stale-agent-id',
+          masumiAgentIdentifier: 'did:masumi:old-agent',
+          masumiRegistrationState: 'RegistrationRequested',
+        }),
+      },
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.inboxAgentId).toBe('fresh-agent-id');
+    expect(result.registration.agentIdentifier).toBe('did:masumi:old-agent');
+    expect(result.metadata).toEqual(
+      serializeMasumiRegistrationMetadata({
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'fresh-agent-id',
+        masumiAgentIdentifier: 'did:masumi:old-agent',
+        masumiRegistrationState: 'RegistrationRequested',
+      })
+    );
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(4);
+  });
+
+  it('persists an existing owned pending SaaS item instead of creating a duplicate', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [
+            {
+              id: 'existing-pending-id',
+              name: 'Pending Agent',
+              description: null,
+              agentSlug: 'pending-agent',
+              state: 'RegistrationRequested',
+              createdAt: '2026-04-15T10:20:00.000Z',
+              updatedAt: '2026-04-15T10:20:00.000Z',
+              lastCheckedAt: null,
+              agentIdentifier: null,
+            },
+          ],
+          nextCursor: null,
+        })
+      ) as typeof fetch;
+
+    const result = await registerMasumiInboxAgentForSession({
+      session: testSession(),
+      subject: {
+        slug: 'pending-agent',
+        displayName: 'Pending Agent',
+        registration: serializeMasumiRegistrationMetadata({
+          masumiRegistrationNetwork: configuredNetwork,
+          masumiInboxAgentId: undefined,
+          masumiAgentIdentifier: 'did:masumi:old-agent',
+          masumiRegistrationState: 'RegistrationRequested',
+        }),
+      },
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.inboxAgentId).toBe('existing-pending-id');
+    expect(result.registration.agentIdentifier).toBe('did:masumi:old-agent');
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toContain(
+      'filterStatus=Registered'
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toContain(
+      'filterStatus=Pending'
+    );
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(2);
+  });
+
+  it('keeps a trusted confirmed local registration when owned Pay lookup returns no exact item', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      ) as typeof fetch;
+
+    const result = await registerMasumiInboxAgentForSession({
+      session: testSession(),
+      subject: {
+        slug: 'confirmed-agent',
+        displayName: 'Confirmed Agent',
+        registration: serializeMasumiRegistrationMetadata({
+          masumiRegistrationNetwork: configuredNetwork,
+          masumiInboxAgentId: 'confirmed-agent-id',
+          masumiAgentIdentifier: 'did:masumi:confirmed-agent',
+          masumiRegistrationState: 'RegistrationConfirmed',
+        }),
+      },
+    });
+
+    expect(result.registration.status).toBe('registered');
+    expect(result.registration.inboxAgentId).toBe('confirmed-agent-id');
+    expect(result.registration.agentIdentifier).toBe('did:masumi:confirmed-agent');
+    expect(result.metadata).toEqual(
+      serializeMasumiRegistrationMetadata({
+        masumiRegistrationNetwork: configuredNetwork,
+        masumiInboxAgentId: 'confirmed-agent-id',
+        masumiAgentIdentifier: 'did:masumi:confirmed-agent',
+        masumiRegistrationState: 'RegistrationConfirmed',
+      })
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toContain(
+      'filterStatus=Registered'
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toContain(
+      'filterStatus=Pending'
+    );
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(2);
+  });
+
+  it('paginates the owned Pay lookup until it finds an exact slug match', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [
+            {
+              id: 'other-agent-id',
+              name: 'Other Agent',
+              description: null,
+              agentSlug: 'other-agent',
+              state: 'RegistrationConfirmed',
+              createdAt: '2026-04-15T10:20:00.000Z',
+              updatedAt: '2026-04-15T10:20:00.000Z',
+              lastCheckedAt: null,
+              agentIdentifier: null,
+            },
+          ],
+          nextCursor: 'cursor-2',
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [
+            {
+              id: 'existing-pending-id',
+              name: 'Pending Agent',
+              description: null,
+              agentSlug: 'pending-agent',
+              state: 'RegistrationRequested',
+              createdAt: '2026-04-15T10:25:00.000Z',
+              updatedAt: '2026-04-15T10:25:00.000Z',
+              lastCheckedAt: null,
+              agentIdentifier: null,
+            },
+          ],
+          nextCursor: null,
+        })
+      ) as typeof fetch;
+
+    const result = await registerMasumiInboxAgentForSession({
+      session: testSession(),
+      subject: {
+        slug: 'pending-agent',
+        displayName: 'Pending Agent',
+        registration: serializeMasumiRegistrationMetadata({
+          masumiRegistrationNetwork: configuredNetwork,
+          masumiInboxAgentId: undefined,
+          masumiAgentIdentifier: 'did:masumi:old-agent',
+          masumiRegistrationState: 'RegistrationRequested',
+        }),
+      },
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.inboxAgentId).toBe('existing-pending-id');
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toContain(
+      'filterStatus=Registered'
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[2]?.[0])).toContain(
+      'filterStatus=Pending'
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[2]?.[0])).toContain('cursor=cursor-2');
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(3);
+  });
+
+  it('falls back to the pending pass when the registered pass has no exact match', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [
+            {
+              id: 'older-pending-id',
+              name: 'Pending Agent',
+              description: null,
+              agentSlug: 'pending-agent',
+              state: 'RegistrationRequested',
+              createdAt: '2026-04-15T10:20:00.000Z',
+              updatedAt: '2026-04-15T10:20:00.000Z',
+              lastCheckedAt: null,
+              agentIdentifier: null,
+            },
+          ],
+          nextCursor: null,
+        })
+      ) as typeof fetch;
+
+    const result = await registerMasumiInboxAgentForSession({
+      session: testSession(),
+      subject: {
+        slug: 'pending-agent',
+        displayName: 'Pending Agent',
+        registration: serializeMasumiRegistrationMetadata({
+          masumiRegistrationNetwork: configuredNetwork,
+          masumiInboxAgentId: undefined,
+          masumiAgentIdentifier: 'did:masumi:old-agent',
+          masumiRegistrationState: 'RegistrationRequested',
+        }),
+      },
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(result.registration.inboxAgentId).toBe('older-pending-id');
+    expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toContain(
+      'filterStatus=Registered'
+    );
+    expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toContain(
+      'filterStatus=Pending'
+    );
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(2);
+  });
+
+  it('does not create a fresh SaaS item when owned Pay lookup fails', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      jsonResponse(503, {
+        success: false,
+        error: 'pay offline',
+      })
+    ) as typeof fetch;
+
+    const result = await registerMasumiInboxAgentForSession({
+      session: testSession(),
+      subject: {
+        slug: 'pending-agent',
+        displayName: 'Pending Agent',
+        registration: serializeMasumiRegistrationMetadata({
+          masumiRegistrationNetwork: configuredNetwork,
+          masumiInboxAgentId: undefined,
+          masumiAgentIdentifier: 'did:masumi:old-agent',
+          masumiRegistrationState: 'RegistrationRequested',
+        }),
+      },
+    });
+
+    expect(result.registration.status).toBe('service_unavailable');
+    expect(result.registration.error).toBe('pay offline');
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(1);
+  });
+
+  it('surfaces SaaS slug conflicts from registration create responses', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            creditsRemaining: 3,
+          },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(409, {
+          success: false,
+          error: 'Inbox slug is already in use on this network',
+        })
+      ) as typeof fetch;
+
+    const result = await registerMasumiInboxAgentForSession({
+      session: testSession(),
+      subject: {
+        slug: 'pending-agent',
+        displayName: 'Pending Agent',
+        registration: null,
+      },
+    });
+
+    expect(result.registration.status).toBe('failed');
+    expect(result.registration.error).toBe(
+      'Inbox slug is already in use on this network'
+    );
+    expect(vi.mocked(global.fetch).mock.calls).toHaveLength(4);
+  });
+});
+
 describe('Masumi inbox-agent deregistration', () => {
   it('calls the SaaS deregister endpoint and returns updated metadata', async () => {
     process.env.MASUMI_NETWORK = configuredNetwork;
@@ -558,7 +1030,7 @@ describe('Masumi inbox-agent deregistration', () => {
       })
     );
     expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toBe(
-      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=verified-agent&filterStatus=Registered`
+      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=verified-agent`
     );
     expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toBe(
       `https://issuer.example.com/pay/api/v1/inbox-agents/agent-123/deregister?network=${configuredNetwork}`
@@ -636,10 +1108,58 @@ describe('Masumi inbox-agent deregistration', () => {
     });
 
     expect(String(vi.mocked(global.fetch).mock.calls[0]?.[0])).toBe(
-      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=verified-agent&filterStatus=Registered`
+      `https://issuer.example.com/pay/api/v1/inbox-agents?network=${configuredNetwork}&take=20&search=verified-agent`
     );
     expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toBe(
       `https://issuer.example.com/pay/api/v1/inbox-agents/server-authoritative-id/deregister?network=${configuredNetwork}`
+    );
+  });
+
+  it('falls back to local confirmed id when owned Pay lookup returns no exact item', async () => {
+    process.env.MASUMI_NETWORK = configuredNetwork;
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: [],
+          nextCursor: null,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          success: true,
+          data: {
+            id: 'local-confirmed-id',
+            name: 'Verified Agent',
+            description: null,
+            agentSlug: 'verified-agent',
+            state: 'DeregistrationRequested',
+            createdAt: '2026-04-15T10:00:00.000Z',
+            updatedAt: '2026-04-15T10:10:00.000Z',
+            lastCheckedAt: null,
+            agentIdentifier: 'did:masumi:verified-agent',
+          },
+        })
+      ) as typeof fetch;
+
+    const result = await deregisterMasumiInboxAgentForSession({
+      session: testSession(),
+      subject: {
+        slug: 'verified-agent',
+        displayName: 'Verified Agent',
+        registration: serializeMasumiRegistrationMetadata({
+          masumiRegistrationNetwork: configuredNetwork,
+          masumiInboxAgentId: 'local-confirmed-id',
+          masumiAgentIdentifier: 'did:masumi:verified-agent',
+          masumiRegistrationState: 'RegistrationConfirmed',
+        }),
+      },
+    });
+
+    expect(result.registration.status).toBe('pending');
+    expect(String(vi.mocked(global.fetch).mock.calls[1]?.[0])).toBe(
+      `https://issuer.example.com/pay/api/v1/inbox-agents/local-confirmed-id/deregister?network=${configuredNetwork}`
     );
   });
 });

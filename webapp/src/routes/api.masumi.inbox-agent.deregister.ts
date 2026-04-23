@@ -1,15 +1,19 @@
 import { createFileRoute } from '@tanstack/react-router';
 import {
+  createMasumiRegistrationOperationalFailureResponse,
   deregisterMasumiInboxAgentForSession,
+  masumiRegistrationClientErrorToHttpStatus,
+  resolveTrustedOwnedRegistrationSubjectForSession,
 } from '@/lib/inbox-agent-registration.server';
 import { readAuthenticatedBrowserSession } from '@/lib/oidc-auth.server';
 import {
   appendStandardSecurityHeaders,
   assertSameOriginUnsafeRequest,
 } from '@/lib/security';
-import type {
-  SerializedMasumiActorRegistrationSubject,
-  SerializedMasumiRegistrationResponse,
+import {
+  masumiRegistrationOutcomeToHttpStatus,
+  type SerializedMasumiActorRegistrationSubject,
+  type SerializedMasumiRegistrationResponse,
 } from '../../../shared/inbox-agent-registration';
 
 function jsonResponse(body: unknown, status = 200, cookies: string[] = []): Response {
@@ -37,9 +41,6 @@ function parseSubject(value: unknown): SerializedMasumiActorRegistrationSubject 
     throw new Error('Inbox-agent request payload is invalid');
   }
 
-  // Ignore client-supplied `registration` on deregister. The server resolves the
-  // authoritative `masumiInboxAgentId` by querying Masumi SaaS with the session's
-  // OIDC token. Slug + OIDC binding is the trust anchor.
   return {
     slug: subject.slug,
     displayName: typeof subject.displayName === 'string' ? subject.displayName : null,
@@ -51,12 +52,9 @@ function deregistrationResponse(
   body: SerializedMasumiRegistrationResponse,
   cookies: string[]
 ): Response {
-  const state = body.registration.registrationState;
   return jsonResponse(
     body,
-    state === 'DeregistrationRequested' || state === 'DeregistrationInitiated'
-      ? 202
-      : 200,
+    masumiRegistrationOutcomeToHttpStatus(body.registration.status),
     cookies
   );
 }
@@ -79,21 +77,84 @@ export const Route = createFileRoute('/api/masumi/inbox-agent/deregister')({
         }
 
         try {
-          const subject = parseSubject(await request.json());
-          const result = await deregisterMasumiInboxAgentForSession({
-            session,
-            subject,
-          });
-          return deregistrationResponse(result, cookies);
+          const requestedSubject = parseSubject(await request.json());
+          let subject: SerializedMasumiActorRegistrationSubject;
+          try {
+            subject = await resolveTrustedOwnedRegistrationSubjectForSession({
+              session,
+              subject: requestedSubject,
+            });
+          } catch (error) {
+            const clientStatus = masumiRegistrationClientErrorToHttpStatus(error);
+            if (clientStatus !== null) {
+              return jsonResponse(
+                {
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : 'Unable to deregister managed inbox agent',
+                },
+                clientStatus,
+                cookies
+              );
+            }
+            return deregistrationResponse(
+              createMasumiRegistrationOperationalFailureResponse({
+                session,
+                error,
+                currentRegistration: requestedSubject.registration,
+              }),
+              cookies
+            );
+          }
+          try {
+            const result = await deregisterMasumiInboxAgentForSession({
+              session,
+              subject,
+            });
+            return deregistrationResponse(result, cookies);
+          } catch (error) {
+            const clientStatus = masumiRegistrationClientErrorToHttpStatus(error);
+            if (clientStatus !== null) {
+              return jsonResponse(
+                {
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : 'Unable to deregister managed inbox agent',
+                },
+                clientStatus,
+                cookies
+              );
+            }
+            return deregistrationResponse(
+              createMasumiRegistrationOperationalFailureResponse({
+                session,
+                error,
+                currentRegistration: subject.registration,
+              }),
+              cookies
+            );
+          }
         } catch (error) {
-          return jsonResponse(
-            {
-              error:
-                error instanceof Error
-                  ? error.message
-                  : 'Unable to deregister managed inbox agent',
-            },
-            400,
+          const clientStatus = masumiRegistrationClientErrorToHttpStatus(error);
+          if (clientStatus !== null) {
+            return jsonResponse(
+              {
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : 'Unable to deregister managed inbox agent',
+              },
+              clientStatus,
+              cookies
+            );
+          }
+          return deregistrationResponse(
+            createMasumiRegistrationOperationalFailureResponse({
+              session,
+              error,
+            }),
             cookies
           );
         }
