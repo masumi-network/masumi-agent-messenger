@@ -10,3 +10,4 @@ dist
 *.log
 
 spacetime.local.json
+cli/package-lock.json
