@@ -83,6 +83,7 @@ import * as LookupPublishedAgentBySlugProcedure from "./lookup_published_agent_b
 import * as LookupPublishedAgentSigningKeysProcedure from "./lookup_published_agent_signing_keys_procedure";
 import * as LookupPublishedAgentsByEmailProcedure from "./lookup_published_agents_by_email_procedure";
 import * as LookupPublishedPublicRouteBySlugProcedure from "./lookup_published_public_route_by_slug_procedure";
+import * as ReadVisibleMessageSnapshotProcedure from "./read_visible_message_snapshot_procedure";
 import * as ResolveDeviceShareRequestByCodeProcedure from "./resolve_device_share_request_by_code_procedure";
 
 // Import all table schema definitions
@@ -337,6 +338,7 @@ const proceduresSchema = __procedures(
   __procedureSchema("lookup_published_agent_signing_keys", LookupPublishedAgentSigningKeysProcedure.params, LookupPublishedAgentSigningKeysProcedure.returnType),
   __procedureSchema("lookup_published_agents_by_email", LookupPublishedAgentsByEmailProcedure.params, LookupPublishedAgentsByEmailProcedure.returnType),
   __procedureSchema("lookup_published_public_route_by_slug", LookupPublishedPublicRouteBySlugProcedure.params, LookupPublishedPublicRouteBySlugProcedure.returnType),
+  __procedureSchema("read_visible_message_snapshot", ReadVisibleMessageSnapshotProcedure.params, ReadVisibleMessageSnapshotProcedure.returnType),
   __procedureSchema("resolve_device_share_request_by_code", ResolveDeviceShareRequestByCodeProcedure.params, ResolveDeviceShareRequestByCodeProcedure.returnType),
 );
 

@@ -35,6 +35,7 @@ import type {
   VisibleContactRequestRow,
   VisibleMessageRow,
   VisibleThreadSecretEnvelopeRow,
+  VisibleMessageSnapshot,
 } from '../../../webapp/src/module_bindings/types';
 import { ensureAuthenticatedSession } from './auth';
 import type { TaskReporter } from './command-runtime';
@@ -52,10 +53,11 @@ import { createSecretStore } from './secret-store';
 import {
   connectAuthenticated,
   disconnectConnection,
-  readMessageRows,
-  subscribeMessageTables,
+  readLatestMessageRows,
 } from './spacetimedb';
 import { lookupMasumiInboxAgentBySlug } from './masumi-inbox-agent';
+
+type MessageSnapshot = VisibleMessageSnapshot;
 
 type SendTargetSummary = {
   slug: string;
@@ -552,7 +554,7 @@ function requireVisibleThread(threads: VisibleThreadRow[], threadId: bigint): Vi
 }
 
 async function waitForDirectThread(params: {
-  read: () => ReturnType<typeof readMessageRows>;
+  read: () => Promise<MessageSnapshot>;
   ownActor: VisibleAgentRow;
   otherPublicIdentity: string;
   existingThreadIds?: Set<string>;
@@ -561,7 +563,7 @@ async function waitForDirectThread(params: {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   while (Date.now() < timeoutAt) {
-    const snapshot = params.read();
+    const snapshot = await params.read();
     const matches = findDirectThreads(snapshot.threads, params.ownActor, params.otherPublicIdentity);
     const existing = params.existingThreadIds
       ? matches.find(thread => !params.existingThreadIds?.has(thread.id.toString())) ?? null
@@ -581,7 +583,7 @@ async function waitForDirectThread(params: {
 }
 
 async function waitForSentMessage(params: {
-  read: () => ReturnType<typeof readMessageRows>;
+  read: () => Promise<MessageSnapshot>;
   threadId: bigint;
   senderActorId: bigint;
   senderSeq: bigint;
@@ -590,7 +592,7 @@ async function waitForSentMessage(params: {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   while (Date.now() < timeoutAt) {
-    const snapshot = params.read();
+    const snapshot = await params.read();
     const message = snapshot.messages.find(row => {
       return (
         row.threadId === params.threadId &&
@@ -614,7 +616,7 @@ async function waitForSentMessage(params: {
 }
 
 async function waitForContactRequest(params: {
-  read: () => ReturnType<typeof readMessageRows>;
+  read: () => Promise<MessageSnapshot>;
   requesterActorId: bigint;
   targetPublicIdentity: string;
   existingRequestIds?: Set<string>;
@@ -623,7 +625,7 @@ async function waitForContactRequest(params: {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   while (Date.now() < timeoutAt) {
-    const snapshot = params.read();
+    const snapshot = await params.read();
     const request = snapshot.contactRequests.find(row => {
       return (
         row.requesterAgentDbId === params.requesterActorId &&
@@ -643,6 +645,31 @@ async function waitForContactRequest(params: {
   }
 
   throw connectivityError('Timed out waiting for the contact request to sync.', {
+    code: 'CONTACT_REQUEST_SYNC_TIMEOUT',
+  });
+}
+
+async function waitForContactRequestStatus(params: {
+  read: () => Promise<MessageSnapshot>;
+  requestId: bigint;
+  status: VisibleContactRequestRow['status'];
+  timeoutMs?: number;
+}): Promise<VisibleContactRequestRow> {
+  const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
+
+  while (Date.now() < timeoutAt) {
+    const snapshot = await params.read();
+    const request = snapshot.contactRequests.find(row => row.id === params.requestId);
+    if (request?.status === params.status) {
+      return request;
+    }
+
+    await new Promise(resolve => {
+      setTimeout(resolve, 100);
+    });
+  }
+
+  throw connectivityError('Timed out waiting for contact request status to sync.', {
     code: 'CONTACT_REQUEST_SYNC_TIMEOUT',
   });
 }
@@ -684,347 +711,216 @@ export async function sendMessageToSlug(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread state');
-    const subscription = await subscribeMessageTables(conn);
+    params.reporter.verbose?.('Reading latest thread state');
+    const read = () => readLatestMessageRows(conn);
+    let snapshot = await read();
+    const ownActor = requireOwnedActor({
+      actors: snapshot.actors,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
+    const keyPair = await requireLocalActorKeyPairForSending({
+      profile,
+      ownActor,
+    });
 
+    params.reporter.verbose?.(`Resolving recipient slug or email ${params.to}`);
+    const targetLookup = await resolvePublishedActorLookup({
+      identifier: params.to,
+      lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
+      lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+      invalidMessage: 'Recipient slug or email is invalid.',
+      invalidCode: 'INVALID_AGENT_IDENTIFIER',
+      notFoundCode: 'ACTOR_NOT_FOUND',
+      fallbackMessage: 'No published inbox actor found for that slug or email.',
+    });
+    const target = targetLookup.selected;
+    let networkTarget: Awaited<ReturnType<typeof lookupMasumiInboxAgentBySlug>> = null;
     try {
-      const read = () => readMessageRows(conn);
-      let snapshot = read();
-      const ownActor = requireOwnedActor({
-        actors: snapshot.actors,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
-      });
-      const keyPair = await requireLocalActorKeyPairForSending({
-        profile,
-        ownActor,
-      });
-
-      params.reporter.verbose?.(`Resolving recipient slug or email ${params.to}`);
-      const targetLookup = await resolvePublishedActorLookup({
-        identifier: params.to,
-        lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-        lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
-        invalidMessage: 'Recipient slug or email is invalid.',
-        invalidCode: 'INVALID_AGENT_IDENTIFIER',
-        notFoundCode: 'ACTOR_NOT_FOUND',
-        fallbackMessage: 'No published inbox actor found for that slug or email.',
-      });
-      const target = targetLookup.selected;
-      let networkTarget: Awaited<ReturnType<typeof lookupMasumiInboxAgentBySlug>> = null;
-      try {
-        networkTarget = await lookupMasumiInboxAgentBySlug({
-          issuer: profile.issuer,
-          session,
-          slug: target.slug,
-        });
-      } catch (lookupError) {
-        // Masumi registry lookup is advisory — failures must not block the
-        // send, but they also must not be silent. Surface at info level so
-        // operators see the degraded check even without --verbose.
-        const detail =
-          lookupError instanceof Error ? lookupError.message : String(lookupError);
-        params.reporter.info(
-          `Masumi registration state for ${target.slug} could not be verified (${detail}); continuing with the published inbox route.`
-        );
-      }
-      if (
-        isDeregisteringOrDeregisteredInboxAgentState(networkTarget?.state) ||
-        isFailedRegistrationInboxAgentState(networkTarget?.state)
-      ) {
-        const invalidRegistration = isFailedRegistrationInboxAgentState(networkTarget?.state);
-        const reason = invalidRegistration
-          ? 'has an invalid Masumi registration'
-          : 'is deregistering or deregistered';
-        throw userError(
-          `Agent \`${target.slug}\` ${reason} and cannot be used for chats.`,
-          {
-            code: invalidRegistration
-              ? 'AGENT_REGISTRATION_INVALID'
-              : 'AGENT_DEREGISTERED',
-          }
-        );
-      }
-
-      if (target.publicIdentity === ownActor.publicIdentity) {
-        throw userError('Use a different inbox slug or email for a direct thread.', {
-          code: 'DIRECT_THREAD_SELF',
-        });
-      }
-
-      params.reporter.verbose?.(`Loading public route for ${target.slug}`);
-      const publishedRoute = (await conn.procedures.lookupPublishedPublicRouteBySlug({
+      networkTarget = await lookupMasumiInboxAgentBySlug({
+        issuer: profile.issuer,
+        session,
         slug: target.slug,
-      }))[0];
-      if (!publishedRoute) {
-        throw connectivityError('Recipient public route is unavailable.', {
-          code: 'PUBLIC_ROUTE_UNAVAILABLE',
-        });
-      }
+      });
+    } catch (lookupError) {
+      // Masumi registry lookup is advisory — failures must not block the
+      // send, but they also must not be silent. Surface at info level so
+      // operators see the degraded check even without --verbose.
+      const detail =
+        lookupError instanceof Error ? lookupError.message : String(lookupError);
+      params.reporter.info(
+        `Masumi registration state for ${target.slug} could not be verified (${detail}); continuing with the published inbox route.`
+      );
+    }
+    if (
+      isDeregisteringOrDeregisteredInboxAgentState(networkTarget?.state) ||
+      isFailedRegistrationInboxAgentState(networkTarget?.state)
+    ) {
+      const invalidRegistration = isFailedRegistrationInboxAgentState(networkTarget?.state);
+      const reason = invalidRegistration
+        ? 'has an invalid Masumi registration'
+        : 'is deregistering or deregistered';
+      throw userError(
+        `Agent \`${target.slug}\` ${reason} and cannot be used for chats.`,
+        {
+          code: invalidRegistration
+            ? 'AGENT_REGISTRATION_INVALID'
+            : 'AGENT_DEREGISTERED',
+        }
+      );
+    }
 
-      const payload = buildEncryptedPayload({
-        message: params.message,
-        contentType: params.contentType,
-        headerLines: params.headerLines,
+    if (target.publicIdentity === ownActor.publicIdentity) {
+      throw userError('Use a different inbox slug or email for a direct thread.', {
+        code: 'DIRECT_THREAD_SELF',
       });
-      const unsupportedReasons = findUnsupportedMessageReasons({
-        payload,
-        capabilities: {
-          allowAllContentTypes: publishedRoute.allowAllContentTypes,
-          allowAllHeaders: publishedRoute.allowAllHeaders,
-          supportedContentTypes: publishedRoute.supportedContentTypes,
-          supportedHeaders: publishedRoute.supportedHeaders.map(header => ({
-            name: header.name,
-            required: header.required ?? undefined,
-            allowMultiple: header.allowMultiple ?? undefined,
-            sensitive: header.sensitive ?? undefined,
-            allowedPrefixes: header.allowedPrefixes ?? undefined,
-          })),
-        },
+    }
+
+    params.reporter.verbose?.(`Loading public route for ${target.slug}`);
+    const publishedRoute = (await conn.procedures.lookupPublishedPublicRouteBySlug({
+      slug: target.slug,
+    }))[0];
+    if (!publishedRoute) {
+      throw connectivityError('Recipient public route is unavailable.', {
+        code: 'PUBLIC_ROUTE_UNAVAILABLE',
       });
-      if (unsupportedReasons.length > 0 && !params.forceUnsupported) {
-        throw userError(unsupportedReasons.join(' '), {
-          code: 'UNSUPPORTED_MESSAGE_PAYLOAD',
-        });
-      }
-      if (unsupportedReasons.length > 0 && params.forceUnsupported) {
-        params.reporter.info(
-          `Sending unsupported payload anyway: ${unsupportedReasons.join(' ')}`
+    }
+
+    const payload = buildEncryptedPayload({
+      message: params.message,
+      contentType: params.contentType,
+      headerLines: params.headerLines,
+    });
+    const unsupportedReasons = findUnsupportedMessageReasons({
+      payload,
+      capabilities: {
+        allowAllContentTypes: publishedRoute.allowAllContentTypes,
+        allowAllHeaders: publishedRoute.allowAllHeaders,
+        supportedContentTypes: publishedRoute.supportedContentTypes,
+        supportedHeaders: publishedRoute.supportedHeaders.map(header => ({
+          name: header.name,
+          required: header.required ?? undefined,
+          allowMultiple: header.allowMultiple ?? undefined,
+          sensitive: header.sensitive ?? undefined,
+          allowedPrefixes: header.allowedPrefixes ?? undefined,
+        })),
+      },
+    });
+    if (unsupportedReasons.length > 0 && !params.forceUnsupported) {
+      throw userError(unsupportedReasons.join(' '), {
+        code: 'UNSUPPORTED_MESSAGE_PAYLOAD',
+      });
+    }
+    if (unsupportedReasons.length > 0 && params.forceUnsupported) {
+      params.reporter.info(
+        `Sending unsupported payload anyway: ${unsupportedReasons.join(' ')}`
+      );
+    }
+
+    const selectionMode: SendMessageResult['selectionMode'] = requestedThreadId
+      ? 'thread-id'
+      : params.createNew
+        ? 'new'
+        : 'latest';
+    let pendingRequest: VisibleContactRequestRow | null =
+      snapshot.contactRequests.find(request => {
+        return (
+          request.direction === 'outgoing' &&
+          request.requesterAgentDbId === ownActor.id &&
+          request.targetPublicIdentity === target.publicIdentity &&
+          request.status === 'pending'
         );
-      }
+      }) ?? null;
+    let thread = requestedThreadId
+      ? requireDirectThreadById({
+          threads: snapshot.threads,
+          ownActor,
+          otherPublicIdentity: target.publicIdentity,
+          threadId: requestedThreadId,
+          targetSlug: target.slug,
+        })
+      : findDirectThread(snapshot.threads, ownActor, target.publicIdentity);
+    let createdDirectThread = false;
 
-      const selectionMode: SendMessageResult['selectionMode'] = requestedThreadId
-        ? 'thread-id'
-        : params.createNew
-          ? 'new'
-          : 'latest';
-      let pendingRequest: VisibleContactRequestRow | null =
-        snapshot.contactRequests.find(request => {
-          return (
-            request.direction === 'outgoing' &&
-            request.requesterAgentDbId === ownActor.id &&
-            request.targetPublicIdentity === target.publicIdentity &&
-            request.status === 'pending'
-          );
-        }) ?? null;
-      let thread = requestedThreadId
-        ? requireDirectThreadById({
-            threads: snapshot.threads,
+    if (pendingRequest && thread) {
+      params.reporter.verbose?.(
+        `Pending contact request is satisfied by visible thread ${thread.id.toString()}; sending in that thread.`
+      );
+      pendingRequest = null;
+    }
+
+    if (requestedThreadId) {
+      params.reporter.verbose?.(`Using direct thread ${requestedThreadId.toString()}`);
+    }
+
+    if ((!thread || params.createNew) && !pendingRequest) {
+      await requirePeerKeyTrust({
+        publicIdentity: target.publicIdentity,
+        displayLabel: target.slug,
+        observed: tupleFromPublishedActor(target),
+        allowFirstContactTrust: !thread,
+      });
+
+      const existingThreadIds = new Set(
+        findDirectThreads(snapshot.threads, ownActor, target.publicIdentity).map(existingThread =>
+          existingThread.id.toString()
+        )
+      );
+      try {
+        params.reporter.verbose?.(`Creating direct thread with ${target.slug}`);
+        await conn.reducers.createDirectThread({
+          agentDbId: ownActor.id,
+          otherAgentPublicIdentity: target.publicIdentity,
+          membershipLocked: undefined,
+          title: params.title?.trim() ? params.title.trim() : undefined,
+        });
+        try {
+          createdDirectThread = true;
+          thread = await waitForDirectThread({
+            read,
             ownActor,
             otherPublicIdentity: target.publicIdentity,
-            threadId: requestedThreadId,
-            targetSlug: target.slug,
-          })
-        : findDirectThread(snapshot.threads, ownActor, target.publicIdentity);
-      let createdDirectThread = false;
-
-      if (pendingRequest && thread) {
-        params.reporter.verbose?.(
-          `Pending contact request is satisfied by visible thread ${thread.id.toString()}; sending in that thread.`
-        );
-        pendingRequest = null;
-      }
-
-      if (requestedThreadId) {
-        params.reporter.verbose?.(`Using direct thread ${requestedThreadId.toString()}`);
-      }
-
-      if ((!thread || params.createNew) && !pendingRequest) {
-        await requirePeerKeyTrust({
-          publicIdentity: target.publicIdentity,
-          displayLabel: target.slug,
-          observed: tupleFromPublishedActor(target),
-          allowFirstContactTrust: !thread,
-        });
-
-        const existingThreadIds = new Set(
-          findDirectThreads(snapshot.threads, ownActor, target.publicIdentity).map(existingThread =>
-            existingThread.id.toString()
-          )
-        );
-        try {
-          params.reporter.verbose?.(`Creating direct thread with ${target.slug}`);
-          await conn.reducers.createDirectThread({
-            agentDbId: ownActor.id,
-            otherAgentPublicIdentity: target.publicIdentity,
-            membershipLocked: undefined,
-            title: params.title?.trim() ? params.title.trim() : undefined,
+            existingThreadIds,
           });
-          try {
-            createdDirectThread = true;
-            thread = await waitForDirectThread({
-              read,
-              ownActor,
-              otherPublicIdentity: target.publicIdentity,
-              existingThreadIds,
-            });
-            params.reporter.verbose?.(`Direct thread ready: ${thread.id.toString()}`);
-          } catch (error) {
-            const fallbackThread = findDirectThread(read().threads, ownActor, target.publicIdentity);
-            if (!fallbackThread) {
-              throw error;
-            }
-            // --new explicitly asked for a fresh direct thread. If the backend
-            // was idempotent (no new row synced) and we would be reusing an
-            // existing thread, surface that instead of silently doing so.
-            if (params.createNew) {
-              throw userError(
-                `--new could not create a fresh direct thread with ${target.slug}; existing thread ${fallbackThread.id.toString()} already exists. Omit --new to reuse it, or pass --thread-id ${fallbackThread.id.toString()} to send there explicitly.`,
-                {
-                  code: 'DIRECT_THREAD_NEW_NOT_CREATED',
-                }
-              );
-            }
-            createdDirectThread = false;
-            thread = fallbackThread;
-            params.reporter.verbose?.(
-              `No new direct thread row synced; using existing thread ${fallbackThread.id.toString()}.`
-            );
-          }
+          params.reporter.verbose?.(`Direct thread ready: ${thread.id.toString()}`);
         } catch (error) {
-          if (requestedThreadId || !isApprovalRequiredForFirstContactError(error)) {
+          const fallbackThread = findDirectThread(
+            (await read()).threads,
+            ownActor,
+            target.publicIdentity
+          );
+          if (!fallbackThread) {
             throw error;
           }
-
-          const existingRequestIds = new Set(
-            snapshot.contactRequests.map(request => request.id.toString())
-          );
-          const pendingThreadId = generateClientThreadId();
-          params.reporter.verbose?.(`Encrypting atomic first-contact request for ${target.slug}`);
-          const prepared = await prepareEncryptedMessage({
-            threadId: pendingThreadId,
-            senderActorId: ownActor.id,
-            senderPublicIdentity: ownActor.publicIdentity,
-            senderSeq: 1n,
-            payload,
-            keyPair,
-            recipients: [toActorPublicKeys(ownActor), toPublishedActorPublicKeys(target)],
-            existingSecret: null,
-            latestKnownSecretVersion: null,
-            rotateSecret: false,
-          });
-          params.reporter.verbose?.(
-            `Creating pending contact request with first message for ${target.slug}`
-          );
-          await conn.reducers.requestDirectContactWithFirstMessage({
-            agentDbId: ownActor.id,
-            otherAgentPublicIdentity: target.publicIdentity,
-            threadId: pendingThreadId,
-            membershipLocked: undefined,
-            title: params.title?.trim() ? params.title.trim() : undefined,
-            secretVersion: prepared.secretVersion,
-            signingKeyVersion: prepared.signingKeyVersion,
-            senderSeq: 1n,
-            ciphertext: prepared.ciphertext,
-            iv: prepared.iv,
-            cipherAlgorithm: prepared.cipherAlgorithm,
-            signature: prepared.signature,
-            replyToMessageId: undefined,
-            attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
-          });
-          pendingRequest = await waitForContactRequest({
-            read,
-            requesterActorId: ownActor.id,
-            targetPublicIdentity: target.publicIdentity,
-            existingRequestIds,
-          });
-
-          cacheSenderSecret(
-            pendingThreadId,
-            ownActor.publicIdentity,
-            prepared.senderSecret.secretVersion,
-            prepared.senderSecret.secretHex
-          );
-          params.reporter.success(`Contact request sent to ${target.slug}`);
-
-          const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
-          const targetOwnedActor = snapshot.actors.find(
-            actor => actor.publicIdentity === target.publicIdentity && ownActorIds.has(actor.id)
-          ) ?? null;
-
-          if (targetOwnedActor) {
-            params.reporter.verbose?.(`Auto-approving contact request from owned agent ${target.slug}`);
-            await conn.reducers.approveContactRequest({
-              agentDbId: targetOwnedActor.id,
-              requestId: pendingRequest.id,
-            });
-            const approvedRequest = await new Promise<VisibleContactRequestRow>((resolve, reject) => {
-              const timeoutAt = Date.now() + 10000;
-              const poll = () => {
-                const req = read().contactRequests.find(r => r.id === pendingRequest!.id);
-                if (req?.status === 'approved') { resolve(req); return; }
-                if (Date.now() >= timeoutAt) {
-                  reject(connectivityError('Timed out waiting for auto-approval to sync.', { code: 'CONTACT_REQUEST_SYNC_TIMEOUT' }));
-                  return;
-                }
-                setTimeout(poll, 100);
-              };
-              poll();
-            });
-            return {
-              sent: false,
-              approvalRequired: false,
-              profile: profile.name,
-              selectionMode: 'new',
-              to: {
-                slug: target.slug,
-                publicIdentity: target.publicIdentity,
-                displayName: target.displayName ?? null,
-              },
-              threadId: approvedRequest.threadId.toString(),
-              requestId: approvedRequest.id.toString(),
-              requestStatus: 'approved',
-              createdDirectThread: false,
-              targetLookup: {
-                input: targetLookup.input,
-                inputKind: targetLookup.inputKind,
-                matchedActors: targetLookup.matchedActors,
-                selected: targetLookup.selectedActor,
-              },
-            };
+          // --new explicitly asked for a fresh direct thread. If the backend
+          // was idempotent (no new row synced) and we would be reusing an
+          // existing thread, surface that instead of silently doing so.
+          if (params.createNew) {
+            throw userError(
+              `--new could not create a fresh direct thread with ${target.slug}; existing thread ${fallbackThread.id.toString()} already exists. Omit --new to reuse it, or pass --thread-id ${fallbackThread.id.toString()} to send there explicitly.`,
+              {
+                code: 'DIRECT_THREAD_NEW_NOT_CREATED',
+              }
+            );
           }
-
-          return {
-            sent: false,
-            approvalRequired: true,
-            profile: profile.name,
-            selectionMode: 'new',
-            to: {
-              slug: target.slug,
-              publicIdentity: target.publicIdentity,
-              displayName: target.displayName ?? null,
-            },
-            threadId: pendingRequest.threadId.toString(),
-            requestId: pendingRequest.id.toString(),
-            requestStatus: 'pending',
-            createdDirectThread: false,
-            targetLookup: {
-              input: targetLookup.input,
-              inputKind: targetLookup.inputKind,
-              matchedActors: targetLookup.matchedActors,
-              selected: targetLookup.selectedActor,
-            },
-          };
+          createdDirectThread = false;
+          thread = fallbackThread;
+          params.reporter.verbose?.(
+            `No new direct thread row synced; using existing thread ${fallbackThread.id.toString()}.`
+          );
         }
-      }
-
-      if (pendingRequest) {
-        if (pendingRequest.messageCount > 0n) {
-          throw userError('A pending contact request already exists for this actor pair.', {
-            code: 'CONTACT_REQUEST_PENDING',
-          });
+      } catch (error) {
+        if (requestedThreadId || !isApprovalRequiredForFirstContactError(error)) {
+          throw error;
         }
 
-        await requirePeerKeyTrust({
-          publicIdentity: target.publicIdentity,
-          displayLabel: target.slug,
-          observed: tupleFromPublishedActor(target),
-          allowFirstContactTrust: true,
-        });
-
-        params.reporter.verbose?.(`Encrypting first-contact request for ${target.slug}`);
+        const existingRequestIds = new Set(
+          snapshot.contactRequests.map(request => request.id.toString())
+        );
+        const pendingThreadId = generateClientThreadId();
+        params.reporter.verbose?.(`Encrypting atomic first-contact request for ${target.slug}`);
         const prepared = await prepareEncryptedMessage({
-          threadId: pendingRequest.threadId,
+          threadId: pendingThreadId,
           senderActorId: ownActor.id,
           senderPublicIdentity: ownActor.publicIdentity,
           senderSeq: 1n,
@@ -1035,11 +931,15 @@ export async function sendMessageToSlug(params: {
           latestKnownSecretVersion: null,
           rotateSecret: false,
         });
-
-        params.reporter.verbose?.(`Sending hidden first-contact message to ${target.slug}`);
-        await conn.reducers.sendEncryptedMessage({
+        params.reporter.verbose?.(
+          `Creating pending contact request with first message for ${target.slug}`
+        );
+        await conn.reducers.requestDirectContactWithFirstMessage({
           agentDbId: ownActor.id,
-          threadId: pendingRequest.threadId,
+          otherAgentPublicIdentity: target.publicIdentity,
+          threadId: pendingThreadId,
+          membershipLocked: undefined,
+          title: params.title?.trim() ? params.title.trim() : undefined,
           secretVersion: prepared.secretVersion,
           signingKeyVersion: prepared.signingKeyVersion,
           senderSeq: 1n,
@@ -1050,14 +950,59 @@ export async function sendMessageToSlug(params: {
           replyToMessageId: undefined,
           attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
         });
+        pendingRequest = await waitForContactRequest({
+          read,
+          requesterActorId: ownActor.id,
+          targetPublicIdentity: target.publicIdentity,
+          existingRequestIds,
+        });
 
         cacheSenderSecret(
-          pendingRequest.threadId,
+          pendingThreadId,
           ownActor.publicIdentity,
           prepared.senderSecret.secretVersion,
           prepared.senderSecret.secretHex
         );
         params.reporter.success(`Contact request sent to ${target.slug}`);
+
+        const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+        const targetOwnedActor = snapshot.actors.find(
+          actor => actor.publicIdentity === target.publicIdentity && ownActorIds.has(actor.id)
+        ) ?? null;
+
+        if (targetOwnedActor) {
+          params.reporter.verbose?.(`Auto-approving contact request from owned agent ${target.slug}`);
+          await conn.reducers.approveContactRequest({
+            agentDbId: targetOwnedActor.id,
+            requestId: pendingRequest.id,
+          });
+          const approvedRequest = await waitForContactRequestStatus({
+            read,
+            requestId: pendingRequest.id,
+            status: 'approved',
+          });
+          return {
+            sent: false,
+            approvalRequired: false,
+            profile: profile.name,
+            selectionMode: 'new',
+            to: {
+              slug: target.slug,
+              publicIdentity: target.publicIdentity,
+              displayName: target.displayName ?? null,
+            },
+            threadId: approvedRequest.threadId.toString(),
+            requestId: approvedRequest.id.toString(),
+            requestStatus: 'approved',
+            createdDirectThread: false,
+            targetLookup: {
+              input: targetLookup.input,
+              inputKind: targetLookup.inputKind,
+              matchedActors: targetLookup.matchedActors,
+              selected: targetLookup.selectedActor,
+            },
+          };
+        }
 
         return {
           sent: false,
@@ -1081,74 +1026,43 @@ export async function sendMessageToSlug(params: {
           },
         };
       }
+    }
 
-      if (!thread) {
-        throw connectivityError('Direct thread is not visible after creation.', {
-          code: 'DIRECT_THREAD_NOT_VISIBLE',
+    if (pendingRequest) {
+      if (pendingRequest.messageCount > 0n) {
+        throw userError('A pending contact request already exists for this actor pair.', {
+          code: 'CONTACT_REQUEST_PENDING',
         });
       }
 
-      snapshot = read();
-      const senderParticipant = findParticipant(snapshot.participants, thread.id, ownActor.id);
-      if (!senderParticipant) {
-        throw connectivityError('Current actor is not visible as a participant in the direct thread.', {
-          code: 'DIRECT_THREAD_PARTICIPANT_MISSING',
-        });
-      }
-
-      const recipientActors = snapshot.participants
-        .filter(participant => participant.threadId === thread.id && participant.active)
-        .map(participant => snapshot.actors.find(actor => actor.id === participant.agentDbId))
-        .filter((actor): actor is VisibleAgentRow => Boolean(actor));
-      const ownActorIdsForThread = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
-      for (const recipient of recipientActors) {
-        if (recipient.id === ownActor.id) continue;
-        await requirePeerKeyTrust({
-          publicIdentity: recipient.publicIdentity,
-          displayLabel: recipient.slug,
-          observed: tupleFromVisibleActor(recipient),
-          allowFirstContactTrust: ownActorIdsForThread.has(recipient.id),
-        });
-      }
-      const recipients = recipientActors.map(toActorPublicKeys);
-
-      const latestSenderMessage = [...snapshot.messages]
-        .filter(message => message.threadId === thread.id && message.senderAgentDbId === ownActor.id)
-        .sort((left, right) => compareBigIntDesc(left.senderSeq, right.senderSeq))[0];
-
-      const existingSecret = latestSenderMessage
-        ? getCachedSenderSecret(thread.id, ownActor.publicIdentity, latestSenderMessage.secretVersion)
-        : null;
-      const requiresSecretRotation = senderSecretRotationRequired({
-        senderActor: ownActor,
-        thread,
-        latestSenderMessage,
-        participants: snapshot.participants,
-        actors: snapshot.actors,
-        envelopes: snapshot.secretEnvelopes,
+      await requirePeerKeyTrust({
+        publicIdentity: target.publicIdentity,
+        displayLabel: target.slug,
+        observed: tupleFromPublishedActor(target),
+        allowFirstContactTrust: true,
       });
 
-      params.reporter.verbose?.(`Encrypting message for ${target.slug}`);
+      params.reporter.verbose?.(`Encrypting first-contact request for ${target.slug}`);
       const prepared = await prepareEncryptedMessage({
-        threadId: thread.id,
+        threadId: pendingRequest.threadId,
         senderActorId: ownActor.id,
         senderPublicIdentity: ownActor.publicIdentity,
-        senderSeq: senderParticipant.lastSentSeq + 1n,
+        senderSeq: 1n,
         payload,
         keyPair,
-        recipients,
-        existingSecret,
-        latestKnownSecretVersion: latestSenderMessage?.secretVersion ?? null,
-        rotateSecret: requiresSecretRotation,
+        recipients: [toActorPublicKeys(ownActor), toPublishedActorPublicKeys(target)],
+        existingSecret: null,
+        latestKnownSecretVersion: null,
+        rotateSecret: false,
       });
 
-      params.reporter.verbose?.(`Sending encrypted message to ${target.slug}`);
+      params.reporter.verbose?.(`Sending hidden first-contact message to ${target.slug}`);
       await conn.reducers.sendEncryptedMessage({
         agentDbId: ownActor.id,
-        threadId: thread.id,
+        threadId: pendingRequest.threadId,
         secretVersion: prepared.secretVersion,
         signingKeyVersion: prepared.signingKeyVersion,
-        senderSeq: senderParticipant.lastSentSeq + 1n,
+        senderSeq: 1n,
         ciphertext: prepared.ciphertext,
         iv: prepared.iv,
         cipherAlgorithm: prepared.cipherAlgorithm,
@@ -1158,34 +1072,27 @@ export async function sendMessageToSlug(params: {
       });
 
       cacheSenderSecret(
-        thread.id,
+        pendingRequest.threadId,
         ownActor.publicIdentity,
         prepared.senderSecret.secretVersion,
         prepared.senderSecret.secretHex
       );
-
-      const sentMessage = await waitForSentMessage({
-        read,
-        threadId: thread.id,
-        senderActorId: ownActor.id,
-        senderSeq: senderParticipant.lastSentSeq + 1n,
-      });
-      params.reporter.success(`Encrypted message sent to ${target.slug}`);
+      params.reporter.success(`Contact request sent to ${target.slug}`);
 
       return {
-        sent: true,
-        approvalRequired: false,
+        sent: false,
+        approvalRequired: true,
         profile: profile.name,
-        selectionMode,
+        selectionMode: 'new',
         to: {
           slug: target.slug,
           publicIdentity: target.publicIdentity,
           displayName: target.displayName ?? null,
         },
-        threadId: thread.id.toString(),
-        messageId: sentMessage.id.toString(),
-        threadSeq: sentMessage.threadSeq.toString(),
-        createdDirectThread,
+        threadId: pendingRequest.threadId.toString(),
+        requestId: pendingRequest.id.toString(),
+        requestStatus: 'pending',
+        createdDirectThread: false,
         targetLookup: {
           input: targetLookup.input,
           inputKind: targetLookup.inputKind,
@@ -1193,9 +1100,119 @@ export async function sendMessageToSlug(params: {
           selected: targetLookup.selectedActor,
         },
       };
-    } finally {
-      subscription.unsubscribe();
     }
+
+    if (!thread) {
+      throw connectivityError('Direct thread is not visible after creation.', {
+        code: 'DIRECT_THREAD_NOT_VISIBLE',
+      });
+    }
+
+    snapshot = await read();
+    const senderParticipant = findParticipant(snapshot.participants, thread.id, ownActor.id);
+    if (!senderParticipant) {
+      throw connectivityError('Current actor is not visible as a participant in the direct thread.', {
+        code: 'DIRECT_THREAD_PARTICIPANT_MISSING',
+      });
+    }
+
+    const recipientActors = snapshot.participants
+      .filter(participant => participant.threadId === thread.id && participant.active)
+      .map(participant => snapshot.actors.find(actor => actor.id === participant.agentDbId))
+      .filter((actor): actor is VisibleAgentRow => Boolean(actor));
+    const ownActorIdsForThread = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+    for (const recipient of recipientActors) {
+      if (recipient.id === ownActor.id) continue;
+      await requirePeerKeyTrust({
+        publicIdentity: recipient.publicIdentity,
+        displayLabel: recipient.slug,
+        observed: tupleFromVisibleActor(recipient),
+        allowFirstContactTrust: ownActorIdsForThread.has(recipient.id),
+      });
+    }
+    const recipients = recipientActors.map(toActorPublicKeys);
+
+    const latestSenderMessage = [...snapshot.messages]
+      .filter(message => message.threadId === thread.id && message.senderAgentDbId === ownActor.id)
+      .sort((left, right) => compareBigIntDesc(left.senderSeq, right.senderSeq))[0];
+
+    const existingSecret = latestSenderMessage
+      ? getCachedSenderSecret(thread.id, ownActor.publicIdentity, latestSenderMessage.secretVersion)
+      : null;
+    const requiresSecretRotation = senderSecretRotationRequired({
+      senderActor: ownActor,
+      thread,
+      latestSenderMessage,
+      participants: snapshot.participants,
+      actors: snapshot.actors,
+      envelopes: snapshot.secretEnvelopes,
+    });
+
+    params.reporter.verbose?.(`Encrypting message for ${target.slug}`);
+    const prepared = await prepareEncryptedMessage({
+      threadId: thread.id,
+      senderActorId: ownActor.id,
+      senderPublicIdentity: ownActor.publicIdentity,
+      senderSeq: senderParticipant.lastSentSeq + 1n,
+      payload,
+      keyPair,
+      recipients,
+      existingSecret,
+      latestKnownSecretVersion: latestSenderMessage?.secretVersion ?? null,
+      rotateSecret: requiresSecretRotation,
+    });
+
+    params.reporter.verbose?.(`Sending encrypted message to ${target.slug}`);
+    await conn.reducers.sendEncryptedMessage({
+      agentDbId: ownActor.id,
+      threadId: thread.id,
+      secretVersion: prepared.secretVersion,
+      signingKeyVersion: prepared.signingKeyVersion,
+      senderSeq: senderParticipant.lastSentSeq + 1n,
+      ciphertext: prepared.ciphertext,
+      iv: prepared.iv,
+      cipherAlgorithm: prepared.cipherAlgorithm,
+      signature: prepared.signature,
+      replyToMessageId: undefined,
+      attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
+    });
+
+    cacheSenderSecret(
+      thread.id,
+      ownActor.publicIdentity,
+      prepared.senderSecret.secretVersion,
+      prepared.senderSecret.secretHex
+    );
+
+    const sentMessage = await waitForSentMessage({
+      read,
+      threadId: thread.id,
+      senderActorId: ownActor.id,
+      senderSeq: senderParticipant.lastSentSeq + 1n,
+    });
+    params.reporter.success(`Encrypted message sent to ${target.slug}`);
+
+    return {
+      sent: true,
+      approvalRequired: false,
+      profile: profile.name,
+      selectionMode,
+      to: {
+        slug: target.slug,
+        publicIdentity: target.publicIdentity,
+        displayName: target.displayName ?? null,
+      },
+      threadId: thread.id.toString(),
+      messageId: sentMessage.id.toString(),
+      threadSeq: sentMessage.threadSeq.toString(),
+      createdDirectThread,
+      targetLookup: {
+        input: targetLookup.input,
+        inputKind: targetLookup.inputKind,
+        matchedActors: targetLookup.matchedActors,
+        selected: targetLookup.selectedActor,
+      },
+    };
   } finally {
     disconnectConnection(conn);
   }
@@ -1235,146 +1252,140 @@ export async function sendMessageToThread(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread state');
-    const subscription = await subscribeMessageTables(conn);
-
-    try {
-      const read = () => readMessageRows(conn);
-      const snapshot = read();
-      const ownActor = requireOwnedActor({
-        actors: snapshot.actors,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
+    params.reporter.verbose?.('Reading latest thread state');
+    const read = () => readLatestMessageRows(conn);
+    const snapshot = await read();
+    const ownActor = requireOwnedActor({
+      actors: snapshot.actors,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
+    const thread = requireVisibleThread(snapshot.threads, requestedThreadId);
+    const senderParticipant = findParticipant(snapshot.participants, requestedThreadId, ownActor.id);
+    if (!senderParticipant?.active) {
+      throw userError(`Actor is not an active participant in thread ${requestedThreadId.toString()}.`, {
+        code: 'THREAD_PARTICIPANT_REQUIRED',
       });
-      const thread = requireVisibleThread(snapshot.threads, requestedThreadId);
-      const senderParticipant = findParticipant(snapshot.participants, requestedThreadId, ownActor.id);
-      if (!senderParticipant?.active) {
-        throw userError(`Actor is not an active participant in thread ${requestedThreadId.toString()}.`, {
-          code: 'THREAD_PARTICIPANT_REQUIRED',
-        });
-      }
-
-      const keyPair = await requireLocalActorKeyPairForSending({
-        profile,
-        ownActor,
-      });
-
-      const payload = buildEncryptedPayload({
-        message: params.message,
-        contentType: params.contentType,
-        headerLines: params.headerLines,
-      });
-      const recipientActors = snapshot.participants
-        .filter(participant => participant.threadId === requestedThreadId && participant.active)
-        .map(participant => snapshot.actors.find(actor => actor.id === participant.agentDbId))
-        .filter((actor): actor is VisibleAgentRow => Boolean(actor));
-      if (recipientActors.length === 0) {
-        throw connectivityError('No active participants are visible for this thread.', {
-          code: 'THREAD_PARTICIPANTS_NOT_VISIBLE',
-        });
-      }
-      const ownActorIdsForReply = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
-      for (const recipient of recipientActors) {
-        if (recipient.id === ownActor.id) continue;
-        await requirePeerKeyTrust({
-          publicIdentity: recipient.publicIdentity,
-          displayLabel: recipient.slug,
-          observed: tupleFromVisibleActor(recipient),
-          allowFirstContactTrust: ownActorIdsForReply.has(recipient.id),
-        });
-      }
-      const recipients = recipientActors.map(toActorPublicKeys);
-
-      const latestSenderMessage = [...snapshot.messages]
-        .filter(message => message.threadId === requestedThreadId && message.senderAgentDbId === ownActor.id)
-        .sort((left, right) => compareBigIntDesc(left.senderSeq, right.senderSeq))[0];
-
-      const existingSecret = latestSenderMessage
-        ? getCachedSenderSecret(
-            requestedThreadId,
-            ownActor.publicIdentity,
-            latestSenderMessage.secretVersion
-          )
-        : null;
-      const requiresSecretRotation = senderSecretRotationRequired({
-        senderActor: ownActor,
-        thread,
-        latestSenderMessage,
-        participants: snapshot.participants,
-        actors: snapshot.actors,
-        envelopes: snapshot.secretEnvelopes,
-      });
-
-      params.reporter.verbose?.(`Encrypting message for thread ${requestedThreadId.toString()}`);
-      const prepared = await prepareEncryptedMessage({
-        threadId: requestedThreadId,
-        senderActorId: ownActor.id,
-        senderPublicIdentity: ownActor.publicIdentity,
-        senderSeq: senderParticipant.lastSentSeq + 1n,
-        payload,
-        keyPair,
-        recipients,
-        existingSecret,
-        latestKnownSecretVersion: latestSenderMessage?.secretVersion ?? null,
-        rotateSecret: requiresSecretRotation,
-      });
-
-      params.reporter.verbose?.(`Sending encrypted message to thread ${requestedThreadId.toString()}`);
-      await conn.reducers.sendEncryptedMessage({
-        agentDbId: ownActor.id,
-        threadId: requestedThreadId,
-        secretVersion: prepared.secretVersion,
-        signingKeyVersion: prepared.signingKeyVersion,
-        senderSeq: senderParticipant.lastSentSeq + 1n,
-        ciphertext: prepared.ciphertext,
-        iv: prepared.iv,
-        cipherAlgorithm: prepared.cipherAlgorithm,
-        signature: prepared.signature,
-        replyToMessageId: undefined,
-        attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
-      });
-
-      cacheSenderSecret(
-        requestedThreadId,
-        ownActor.publicIdentity,
-        prepared.senderSecret.secretVersion,
-        prepared.senderSecret.secretHex
-      );
-
-      const sentMessage = await waitForSentMessage({
-        read,
-        threadId: requestedThreadId,
-        senderActorId: ownActor.id,
-        senderSeq: senderParticipant.lastSentSeq + 1n,
-      });
-
-      const activeParticipantsByThreadId = buildParticipantsByThreadId(
-        snapshot.participants.filter(participant => participant.active)
-      );
-      const actorsById = new Map(snapshot.actors.map(actor => [actor.id, actor] as const));
-      const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
-      const label = summarizeThread(
-        thread,
-        activeParticipantsByThreadId.get(thread.id) ?? [],
-        actorsById,
-        ownActorIds
-      );
-
-      params.reporter.success(`Encrypted message sent to thread ${requestedThreadId.toString()}`);
-
-      return {
-        sent: true,
-        profile: profile.name,
-        actorSlug: ownActor.slug,
-        threadId: requestedThreadId.toString(),
-        threadKind: thread.kind,
-        label,
-        messageId: sentMessage.id.toString(),
-        threadSeq: sentMessage.threadSeq.toString(),
-      };
-    } finally {
-      subscription.unsubscribe();
     }
+
+    const keyPair = await requireLocalActorKeyPairForSending({
+      profile,
+      ownActor,
+    });
+
+    const payload = buildEncryptedPayload({
+      message: params.message,
+      contentType: params.contentType,
+      headerLines: params.headerLines,
+    });
+    const recipientActors = snapshot.participants
+      .filter(participant => participant.threadId === requestedThreadId && participant.active)
+      .map(participant => snapshot.actors.find(actor => actor.id === participant.agentDbId))
+      .filter((actor): actor is VisibleAgentRow => Boolean(actor));
+    if (recipientActors.length === 0) {
+      throw connectivityError('No active participants are visible for this thread.', {
+        code: 'THREAD_PARTICIPANTS_NOT_VISIBLE',
+      });
+    }
+    const ownActorIdsForReply = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+    for (const recipient of recipientActors) {
+      if (recipient.id === ownActor.id) continue;
+      await requirePeerKeyTrust({
+        publicIdentity: recipient.publicIdentity,
+        displayLabel: recipient.slug,
+        observed: tupleFromVisibleActor(recipient),
+        allowFirstContactTrust: ownActorIdsForReply.has(recipient.id),
+      });
+    }
+    const recipients = recipientActors.map(toActorPublicKeys);
+
+    const latestSenderMessage = [...snapshot.messages]
+      .filter(message => message.threadId === requestedThreadId && message.senderAgentDbId === ownActor.id)
+      .sort((left, right) => compareBigIntDesc(left.senderSeq, right.senderSeq))[0];
+
+    const existingSecret = latestSenderMessage
+      ? getCachedSenderSecret(
+          requestedThreadId,
+          ownActor.publicIdentity,
+          latestSenderMessage.secretVersion
+        )
+      : null;
+    const requiresSecretRotation = senderSecretRotationRequired({
+      senderActor: ownActor,
+      thread,
+      latestSenderMessage,
+      participants: snapshot.participants,
+      actors: snapshot.actors,
+      envelopes: snapshot.secretEnvelopes,
+    });
+
+    params.reporter.verbose?.(`Encrypting message for thread ${requestedThreadId.toString()}`);
+    const prepared = await prepareEncryptedMessage({
+      threadId: requestedThreadId,
+      senderActorId: ownActor.id,
+      senderPublicIdentity: ownActor.publicIdentity,
+      senderSeq: senderParticipant.lastSentSeq + 1n,
+      payload,
+      keyPair,
+      recipients,
+      existingSecret,
+      latestKnownSecretVersion: latestSenderMessage?.secretVersion ?? null,
+      rotateSecret: requiresSecretRotation,
+    });
+
+    params.reporter.verbose?.(`Sending encrypted message to thread ${requestedThreadId.toString()}`);
+    await conn.reducers.sendEncryptedMessage({
+      agentDbId: ownActor.id,
+      threadId: requestedThreadId,
+      secretVersion: prepared.secretVersion,
+      signingKeyVersion: prepared.signingKeyVersion,
+      senderSeq: senderParticipant.lastSentSeq + 1n,
+      ciphertext: prepared.ciphertext,
+      iv: prepared.iv,
+      cipherAlgorithm: prepared.cipherAlgorithm,
+      signature: prepared.signature,
+      replyToMessageId: undefined,
+      attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
+    });
+
+    cacheSenderSecret(
+      requestedThreadId,
+      ownActor.publicIdentity,
+      prepared.senderSecret.secretVersion,
+      prepared.senderSecret.secretHex
+    );
+
+    const sentMessage = await waitForSentMessage({
+      read,
+      threadId: requestedThreadId,
+      senderActorId: ownActor.id,
+      senderSeq: senderParticipant.lastSentSeq + 1n,
+    });
+
+    const activeParticipantsByThreadId = buildParticipantsByThreadId(
+      snapshot.participants.filter(participant => participant.active)
+    );
+    const actorsById = new Map(snapshot.actors.map(actor => [actor.id, actor] as const));
+    const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+    const label = summarizeThread(
+      thread,
+      activeParticipantsByThreadId.get(thread.id) ?? [],
+      actorsById,
+      ownActorIds
+    );
+
+    params.reporter.success(`Encrypted message sent to thread ${requestedThreadId.toString()}`);
+
+    return {
+      sent: true,
+      profile: profile.name,
+      actorSlug: ownActor.slug,
+      threadId: requestedThreadId.toString(),
+      threadKind: thread.kind,
+      label,
+      messageId: sentMessage.id.toString(),
+      threadSeq: sentMessage.threadSeq.toString(),
+    };
   } finally {
     disconnectConnection(conn);
   }

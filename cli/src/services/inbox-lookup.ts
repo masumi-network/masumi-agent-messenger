@@ -11,8 +11,8 @@ import { resolvePublishedActorLookup } from './published-actor-lookup';
 import {
   connectAuthenticated,
   disconnectConnection,
+  readLatestMessageRows,
   readMessageRows,
-  subscribeMessageTables,
 } from './spacetimedb';
 
 const MAX_LOOKUP_RESULTS = 100;
@@ -179,76 +179,70 @@ export async function lookupInboxes(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to inbox message state');
-    const subscription = await subscribeMessageTables(conn);
+    params.reporter.verbose?.('Reading latest inbox message state');
+    params.reporter.verbose?.('Collecting inboxes');
+    const snapshot = await readLatestMessageRows(conn);
+    const result = buildInboxLookupEntries({
+      snapshot,
+      normalizedEmail,
+      profileName: profile.name,
+      query: params.query,
+      limit: params.limit,
+    });
+    const defaultActor = findDefaultActorByEmail(snapshot.actors, normalizedEmail);
+    const ownPublicIdentities = new Set(
+      snapshot.actors
+        .filter(actor => actor.inboxId === defaultActor?.inboxId)
+        .map(actor => actor.publicIdentity)
+    );
+    const existingPublicIdentities = new Set(
+      result.results.map(item => item.publicIdentity)
+    );
+    let discoveredResults: DiscoveredInboxLookupItem[] = [];
+    let discoveryError: string | null = null;
 
-    try {
-      params.reporter.verbose?.('Collecting inboxes');
-      const snapshot = readMessageRows(conn);
-      const result = buildInboxLookupEntries({
-        snapshot,
-        normalizedEmail,
-        profileName: profile.name,
-        query: params.query,
-        limit: params.limit,
-      });
-      const defaultActor = findDefaultActorByEmail(snapshot.actors, normalizedEmail);
-      const ownPublicIdentities = new Set(
-        snapshot.actors
-          .filter(actor => actor.inboxId === defaultActor?.inboxId)
-          .map(actor => actor.publicIdentity)
-      );
-      const existingPublicIdentities = new Set(
-        result.results.map(item => item.publicIdentity)
-      );
-      let discoveredResults: DiscoveredInboxLookupItem[] = [];
-      let discoveryError: string | null = null;
-
-      if (params.query?.trim()) {
-        try {
-          const lookup = await resolvePublishedActorLookup({
-            identifier: params.query,
-            lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-            lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
-            invalidMessage: 'Inbox slug or email is invalid.',
-            invalidCode: 'INVALID_AGENT_IDENTIFIER',
-            notFoundCode: 'ACTOR_NOT_FOUND',
-            fallbackMessage: 'Unable to search verified inbox agents.',
-          });
-          discoveredResults = buildDiscoveredInboxLookupItems({
-            matchedActors: lookup.matchedActors,
-            existingPublicIdentities,
-            ownedPublicIdentities: ownPublicIdentities,
-            limit: result.limit,
-          });
-        } catch (error) {
-          if (
-            error instanceof CliError &&
-            (error.code === 'INVALID_AGENT_IDENTIFIER' || error.code === 'ACTOR_NOT_FOUND')
-          ) {
-            discoveredResults = [];
-          } else {
-            discoveryError =
-              error instanceof Error
-                ? error.message
-                : 'Unable to search verified inbox agents.';
-          }
+    if (params.query?.trim()) {
+      try {
+        const lookup = await resolvePublishedActorLookup({
+          identifier: params.query,
+          lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
+          lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+          invalidMessage: 'Inbox slug or email is invalid.',
+          invalidCode: 'INVALID_AGENT_IDENTIFIER',
+          notFoundCode: 'ACTOR_NOT_FOUND',
+          fallbackMessage: 'Unable to search verified inbox agents.',
+        });
+        discoveredResults = buildDiscoveredInboxLookupItems({
+          matchedActors: lookup.matchedActors,
+          existingPublicIdentities,
+          ownedPublicIdentities: ownPublicIdentities,
+          limit: result.limit,
+        });
+      } catch (error) {
+        if (
+          error instanceof CliError &&
+          (error.code === 'INVALID_AGENT_IDENTIFIER' || error.code === 'ACTOR_NOT_FOUND')
+        ) {
+          discoveredResults = [];
+        } else {
+          discoveryError =
+            error instanceof Error
+              ? error.message
+              : 'Unable to search verified inbox agents.';
         }
       }
-
-      params.reporter.success(
-        `Loaded ${result.totalInboxes} inbox${result.totalInboxes === 1 ? '' : 'es'}`
-      );
-
-      return {
-        ...result,
-        discoveredCount: discoveredResults.length,
-        discoveredResults,
-        discoveryError,
-      };
-    } finally {
-      subscription.unsubscribe();
     }
+
+    params.reporter.success(
+      `Loaded ${result.totalInboxes} inbox${result.totalInboxes === 1 ? '' : 'es'}`
+    );
+
+    return {
+      ...result,
+      discoveredCount: discoveredResults.length,
+      discoveredResults,
+      discoveryError,
+    };
   } catch (error) {
     if (isCliError(error)) {
       throw error;

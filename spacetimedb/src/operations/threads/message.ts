@@ -16,7 +16,9 @@ const {
   CONTACT_REQUEST_RATE_WINDOW_MS,
   CONTACT_REQUEST_RATE_MAX_PER_WINDOW,
   SecretEnvelopeAttachment,
+  VisibleMessageSnapshot,
   VisibleMessageRow,
+  dedupeRowsById,
   enforceRateLimit,
   requireNonEmpty,
   requireMaxLength,
@@ -35,7 +37,13 @@ const {
   findPendingContactRequestForActors,
   isDirectContactAllowed,
   buildVisibleThreadIdsForInbox,
+  buildVisibleThreadParticipantIdsForInbox,
+  buildVisibleAgentIdsForInbox,
   getActiveThreadParticipants,
+  getVisibleContactRequestsForInbox,
+  toSanitizedVisibleAgentRow,
+  toVisibleContactRequestRow,
+  toVisibleThreadInviteRow,
   createDirectThreadRecord,
   requireActiveThreadParticipant,
   getSenderLastSentState,
@@ -87,6 +95,202 @@ export const visibleMessages = spacetimedb.view(
             )
           )
       );
+    });
+  }
+);
+
+function emptyVisibleMessageSnapshot() {
+  return {
+    actors: [],
+    bundles: [],
+    participants: [],
+    readStates: [],
+    secretEnvelopes: [],
+    threads: [],
+    contactRequests: [],
+    threadInvites: [],
+    messages: [],
+  };
+}
+
+export const readVisibleMessageSnapshot = spacetimedb.procedure(
+  {},
+  VisibleMessageSnapshot,
+  ctx => {
+    return ctx.withTx(tx => {
+      const inbox = getReadableInbox(tx);
+      if (!inbox) {
+        return emptyVisibleMessageSnapshot();
+      }
+
+      const ownActorIds = getOwnActorIdsForInbox(tx, inbox.id);
+      const visibleThreadIds = buildVisibleThreadIdsForInbox(tx, inbox.id);
+      const visibleAgentIds = buildVisibleAgentIdsForInbox(tx, inbox.id);
+
+      const actors = Array.from(visibleAgentIds)
+        .map(agentDbId => tx.db.agent.id.find(agentDbId))
+        .filter((actor): actor is NonNullable<typeof actor> => Boolean(actor))
+        .map(actor => toSanitizedVisibleAgentRow(tx, inbox.id, actor));
+
+      const bundles = Array.from(visibleAgentIds).flatMap(agentDbId =>
+        Array.from(tx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(agentDbId)).map(
+          bundle => ({
+            id: bundle.id,
+            agentDbId: bundle.agentDbId,
+            publicIdentity: bundle.publicIdentity,
+            encryptionPublicKey: bundle.encryptionPublicKey,
+            encryptionKeyVersion: bundle.encryptionKeyVersion,
+            encryptionAlgorithm: bundle.encryptionAlgorithm,
+            signingPublicKey: bundle.signingPublicKey,
+            signingKeyVersion: bundle.signingKeyVersion,
+            signingAlgorithm: bundle.signingAlgorithm,
+            createdAt: bundle.createdAt,
+          })
+        )
+      );
+
+      const participants = Array.from(buildVisibleThreadParticipantIdsForInbox(tx, inbox.id))
+        .map(participantId => tx.db.threadParticipant.id.find(participantId))
+        .filter((participant): participant is NonNullable<typeof participant> =>
+          Boolean(participant)
+        )
+        .map(participant => ({
+          id: participant.id,
+          threadId: participant.threadId,
+          agentDbId: participant.agentDbId,
+          joinedAt: participant.joinedAt,
+          lastSentSeq: participant.lastSentSeq,
+          lastSentMembershipVersion: participant.lastSentMembershipVersion,
+          lastSentSecretVersion: participant.lastSentSecretVersion,
+          isAdmin: participant.isAdmin,
+          active: participant.active,
+        }));
+
+      const readStates = Array.from(ownActorIds).flatMap(agentDbId =>
+        Array.from(tx.db.threadReadState.thread_read_state_agent_db_id.filter(agentDbId))
+          .filter(readState => visibleThreadIds.has(readState.threadId))
+          .map(readState => ({
+            id: readState.id,
+            threadId: readState.threadId,
+            agentDbId: readState.agentDbId,
+            lastReadThreadSeq: readState.lastReadThreadSeq,
+            archived: readState.archived,
+            updatedAt: readState.updatedAt,
+          }))
+      );
+
+      const secretEnvelopes = dedupeRowsById(
+        Array.from(ownActorIds)
+          .flatMap(agentDbId => [
+            ...Array.from(
+              tx.db.threadSecretEnvelope.thread_secret_envelope_sender_agent_db_id.filter(
+                agentDbId
+              )
+            ),
+            ...Array.from(
+              tx.db.threadSecretEnvelope.thread_secret_envelope_recipient_agent_db_id.filter(
+                agentDbId
+              )
+            ),
+          ])
+          .filter(envelope => visibleThreadIds.has(envelope.threadId))
+      ).map(envelope => ({
+        id: envelope.id,
+        threadId: envelope.threadId,
+        membershipVersion: envelope.membershipVersion,
+        secretVersion: envelope.secretVersion,
+        senderAgentDbId: envelope.senderAgentDbId,
+        recipientAgentDbId: envelope.recipientAgentDbId,
+        senderEncryptionKeyVersion: envelope.senderEncryptionKeyVersion,
+        recipientEncryptionKeyVersion: envelope.recipientEncryptionKeyVersion,
+        signingKeyVersion: envelope.signingKeyVersion,
+        wrappedSecretCiphertext: envelope.wrappedSecretCiphertext,
+        wrappedSecretIv: envelope.wrappedSecretIv,
+        wrapAlgorithm: envelope.wrapAlgorithm,
+        signature: envelope.signature,
+        createdAt: envelope.createdAt,
+      }));
+
+      const threads = Array.from(visibleThreadIds)
+        .map(threadId => tx.db.thread.id.find(threadId))
+        .filter((thread): thread is NonNullable<typeof thread> => Boolean(thread));
+
+      const contactRequests = getVisibleContactRequestsForInbox(tx, inbox.id).map(request =>
+        toVisibleContactRequestRow(tx, inbox.id, request)
+      );
+
+      const incomingInvites = Array.from(
+        tx.db.threadInvite.thread_invite_invitee_inbox_id.filter(inbox.id)
+      );
+      const outgoingInvites = Array.from(ownActorIds).flatMap(agentDbId =>
+        Array.from(tx.db.threadInvite.thread_invite_inviter_agent_db_id.filter(agentDbId))
+      );
+      const threadInvites = dedupeRowsById([...incomingInvites, ...outgoingInvites]).map(
+        invite => toVisibleThreadInviteRow(tx, invite)
+      );
+
+      const ownSenderVersionKeys = new Set(
+        Array.from(ownActorIds)
+          .flatMap(agentDbId =>
+            Array.from(
+              tx.db.threadSecretEnvelope.thread_secret_envelope_recipient_agent_db_id.filter(
+                agentDbId
+              )
+            )
+          )
+          .filter(envelope => visibleThreadIds.has(envelope.threadId))
+          .map(envelope =>
+            buildSenderSecretVisibilityKey(
+              envelope.membershipVersion,
+              envelope.senderAgentDbId,
+              envelope.secretVersion
+            )
+          )
+      );
+
+      const messages = Array.from(visibleThreadIds).flatMap(threadId => {
+        return Array.from(tx.db.message.message_thread_id.filter(threadId))
+          .filter(
+            message =>
+              ownActorIds.has(message.senderAgentDbId) ||
+              ownSenderVersionKeys.has(
+                buildSenderSecretVisibilityKey(
+                  message.membershipVersion,
+                  message.senderAgentDbId,
+                  message.secretVersion
+                )
+              )
+          )
+          .map(message => ({
+            id: message.id,
+            threadId: message.threadId,
+            threadSeq: message.threadSeq,
+            membershipVersion: message.membershipVersion,
+            senderAgentDbId: message.senderAgentDbId,
+            senderSeq: message.senderSeq,
+            secretVersion: message.secretVersion,
+            secretVersionStart: message.secretVersionStart,
+            signingKeyVersion: message.signingKeyVersion,
+            ciphertext: message.ciphertext,
+            iv: message.iv,
+            cipherAlgorithm: message.cipherAlgorithm,
+            signature: message.signature,
+            replyToMessageId: message.replyToMessageId,
+            createdAt: message.createdAt,
+          }));
+      });
+
+      return {
+        actors,
+        bundles,
+        participants,
+        readStates,
+        secretEnvelopes,
+        threads,
+        contactRequests,
+        threadInvites,
+        messages,
+      };
     });
   }
 );

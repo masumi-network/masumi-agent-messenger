@@ -17,6 +17,7 @@ import type {
   VisibleThreadReadStateRow,
   VisibleThreadRow,
   VisibleThreadInviteRow,
+  VisibleMessageSnapshot,
 } from '../../../webapp/src/module_bindings/types';
 import { ensureAuthenticatedSession } from './auth';
 import { getStoredActorKeyPair } from './actor-keys';
@@ -28,12 +29,11 @@ import { resolvePublishedActorLookup } from './published-actor-lookup';
 import {
   connectAuthenticated,
   disconnectConnection,
-  readMessageRows,
-  subscribeMessageTables,
+  readLatestMessageRows,
 } from './spacetimedb';
 import type { EncryptedMessageHeader } from '../../../shared/message-format';
 
-type MessageSnapshot = ReturnType<typeof readMessageRows>;
+type MessageSnapshot = VisibleMessageSnapshot;
 
 export type ActorLookupMetadata = {
   input: string;
@@ -348,14 +348,14 @@ function isApprovalRequiredForFirstContactError(error: unknown): boolean {
 }
 
 async function waitForThread(params: {
-  read: () => MessageSnapshot;
+  read: () => Promise<MessageSnapshot>;
   predicate: (snapshot: MessageSnapshot) => VisibleThreadRow | null;
   timeoutMs?: number;
 }): Promise<VisibleThreadRow> {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10_000);
 
   while (Date.now() < timeoutAt) {
-    const match = params.predicate(params.read());
+    const match = params.predicate(await params.read());
     if (match) {
       return match;
     }
@@ -433,7 +433,7 @@ function buildRepresentedThreadPublicIdentities(
 }
 
 async function waitForThreadMembership(params: {
-  read: () => MessageSnapshot;
+  read: () => Promise<MessageSnapshot>;
   threadId: bigint;
   expectedPublicIdentities: Set<string>;
   timeoutMs?: number;
@@ -441,7 +441,7 @@ async function waitForThreadMembership(params: {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10_000);
 
   while (Date.now() < timeoutAt) {
-    const snapshot = params.read();
+    const snapshot = await params.read();
     const represented = buildRepresentedThreadPublicIdentities(snapshot, params.threadId);
     const complete = Array.from(params.expectedPublicIdentities).every(publicIdentity =>
       represented.has(publicIdentity)
@@ -483,11 +483,8 @@ export async function listThreads(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread state');
-    const subscription = await subscribeMessageTables(conn);
-
-    try {
-      const snapshot = readMessageRows(conn);
+    params.reporter.verbose?.('Reading latest thread state');
+    const snapshot = await readLatestMessageRows(conn);
       const actor = resolveOwnedActor({
         snapshot,
         normalizedEmail,
@@ -562,9 +559,6 @@ export async function listThreads(params: {
         totalThreads: threads.length,
         threads,
       };
-    } finally {
-      subscription.unsubscribe();
-    }
   } catch (error) {
     if (isCliError(error)) {
       throw error;
@@ -603,11 +597,8 @@ export async function countThreadMessages(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread message state');
-    const subscription = await subscribeMessageTables(conn);
-
-    try {
-      const snapshot = readMessageRows(conn);
+    params.reporter.verbose?.('Reading latest thread message state');
+    const snapshot = await readLatestMessageRows(conn);
       const actor = resolveOwnedActor({
         snapshot,
         normalizedEmail,
@@ -662,9 +653,6 @@ export async function countThreadMessages(params: {
         lastMessageSeq: thread.lastMessageSeq.toString(),
         lastMessageAt: timestampToISOString(thread.lastMessageAt),
       };
-    } finally {
-      subscription.unsubscribe();
-    }
   } catch (error) {
     if (isCliError(error)) {
       throw error;
@@ -705,11 +693,8 @@ export async function readThreadHistory(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread history');
-    const subscription = await subscribeMessageTables(conn);
-
-    try {
-      const snapshot = readMessageRows(conn);
+    params.reporter.verbose?.('Reading latest thread history');
+    const snapshot = await readLatestMessageRows(conn);
       const actor = resolveOwnedActor({
         snapshot,
         normalizedEmail,
@@ -814,9 +799,6 @@ export async function readThreadHistory(params: {
         totalMessages: messages.length,
         messages,
       };
-    } finally {
-      subscription.unsubscribe();
-    }
   } catch (error) {
     if (isCliError(error)) {
       throw error;
@@ -881,100 +863,94 @@ export async function createDirectThread(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread state');
-    const subscription = await subscribeMessageTables(conn);
+    params.reporter.verbose?.('Reading latest thread state');
+    const read = () => readLatestMessageRows(conn);
+    const snapshot = await read();
+    const actor = resolveOwnedActor({
+      snapshot,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
+    const targetLookup = await resolvePublishedActorLookup({
+      identifier: params.to,
+      lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
+      lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+      invalidMessage: 'Inbox slug or email is invalid.',
+      invalidCode: 'INVALID_AGENT_IDENTIFIER',
+      notFoundCode: 'ACTOR_NOT_FOUND',
+      fallbackMessage: 'Unable to resolve inbox slug or email.',
+    });
+    const target = targetLookup.selected;
+    if (target.publicIdentity === actor.publicIdentity) {
+      throw userError('Use a different inbox slug or email for a direct thread.', {
+        code: 'DIRECT_THREAD_SELF',
+      });
+    }
+
+    const beforeThreadIds = new Set(
+      snapshot.threads
+        .filter(thread => {
+          return (
+            thread.kind === 'direct' &&
+            thread.dedupeKey === buildDirectKey(actor, {
+              publicIdentity: target.publicIdentity,
+            })
+          );
+        })
+        .map(thread => thread.id.toString())
+    );
 
     try {
-      const read = () => readMessageRows(conn);
-      const snapshot = read();
-      const actor = resolveOwnedActor({
-        snapshot,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
+      await conn.reducers.createDirectThread({
+        agentDbId: actor.id,
+        otherAgentPublicIdentity: target.publicIdentity,
+        membershipLocked: undefined,
+        title: params.title?.trim() || undefined,
       });
-      const targetLookup = await resolvePublishedActorLookup({
-        identifier: params.to,
-        lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-        lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
-        invalidMessage: 'Inbox slug or email is invalid.',
-        invalidCode: 'INVALID_AGENT_IDENTIFIER',
-        notFoundCode: 'ACTOR_NOT_FOUND',
-        fallbackMessage: 'Unable to resolve inbox slug or email.',
-      });
-      const target = targetLookup.selected;
-      if (target.publicIdentity === actor.publicIdentity) {
-        throw userError('Use a different inbox slug or email for a direct thread.', {
-          code: 'DIRECT_THREAD_SELF',
-        });
+    } catch (error) {
+      if (isApprovalRequiredForFirstContactError(error)) {
+        throw userError(
+          'This recipient requires approval for first contact. Use `masumi-agent-messenger thread start <agent> "<message>"` to create the approval request with a first encrypted message.',
+          {
+            code: 'DIRECT_THREAD_APPROVAL_REQUIRED',
+          }
+        );
       }
-
-      const beforeThreadIds = new Set(
-        snapshot.threads
-          .filter(thread => {
-            return (
-              thread.kind === 'direct' &&
-              thread.dedupeKey === buildDirectKey(actor, {
-                publicIdentity: target.publicIdentity,
-              })
-            );
-          })
-          .map(thread => thread.id.toString())
-      );
-
-      try {
-        await conn.reducers.createDirectThread({
-          agentDbId: actor.id,
-          otherAgentPublicIdentity: target.publicIdentity,
-          membershipLocked: undefined,
-          title: params.title?.trim() || undefined,
-        });
-      } catch (error) {
-        if (isApprovalRequiredForFirstContactError(error)) {
-          throw userError(
-            'This recipient requires approval for first contact. Use `masumi-agent-messenger thread start <agent> "<message>"` to create the approval request with a first encrypted message.',
-            {
-              code: 'DIRECT_THREAD_APPROVAL_REQUIRED',
-            }
-          );
-        }
-        throw error;
-      }
-
-      const thread = await waitForThread({
-        read,
-        predicate: nextSnapshot =>
-          nextSnapshot.threads.find(row => {
-            return (
-              row.kind === 'direct' &&
-              row.dedupeKey === buildDirectKey(actor, {
-                publicIdentity: target.publicIdentity,
-              }) &&
-              !beforeThreadIds.has(row.id.toString())
-            );
-          }) ?? null,
-      });
-
-      params.reporter.success(`Created direct thread ${thread.id.toString()}`);
-
-      return {
-        profile: profile.name,
-        actorSlug: actor.slug,
-        threadId: thread.id.toString(),
-        label: params.title?.trim() || target.displayName || target.slug,
-        kind: 'direct',
-        locked: thread.membershipLocked,
-        participants: [actor.slug, target.slug].sort((left, right) => left.localeCompare(right)),
-        invitedParticipants: [],
-        targetLookup: {
-          input: targetLookup.input,
-          inputKind: targetLookup.inputKind,
-          matchedActors: targetLookup.matchedActors,
-          selected: targetLookup.selectedActor,
-        },
-      };
-    } finally {
-      subscription.unsubscribe();
+      throw error;
     }
+
+    const thread = await waitForThread({
+      read,
+      predicate: nextSnapshot =>
+        nextSnapshot.threads.find(row => {
+          return (
+            row.kind === 'direct' &&
+            row.dedupeKey === buildDirectKey(actor, {
+              publicIdentity: target.publicIdentity,
+            }) &&
+            !beforeThreadIds.has(row.id.toString())
+          );
+        }) ?? null,
+    });
+
+    params.reporter.success(`Created direct thread ${thread.id.toString()}`);
+
+    return {
+      profile: profile.name,
+      actorSlug: actor.slug,
+      threadId: thread.id.toString(),
+      label: params.title?.trim() || target.displayName || target.slug,
+      kind: 'direct',
+      locked: thread.membershipLocked,
+      participants: [actor.slug, target.slug].sort((left, right) => left.localeCompare(right)),
+      invitedParticipants: [],
+      targetLookup: {
+        input: targetLookup.input,
+        inputKind: targetLookup.inputKind,
+        matchedActors: targetLookup.matchedActors,
+        selected: targetLookup.selectedActor,
+      },
+    };
   } catch (error) {
     if (isCliError(error)) {
       throw error;
@@ -1019,84 +995,78 @@ export async function createGroupThread(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread state');
-    const subscription = await subscribeMessageTables(conn);
+    params.reporter.verbose?.('Reading latest thread state');
+    const read = () => readLatestMessageRows(conn);
+    const snapshot = await read();
+    const actor = resolveOwnedActor({
+      snapshot,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
+    const resolvedParticipants = await Promise.all(
+      Array.from(new Set(params.participants)).map(identifier =>
+        resolvePublishedActorLookup({
+          identifier,
+          lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
+          lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+          invalidMessage: 'Participant slug or email is invalid.',
+          invalidCode: 'INVALID_AGENT_IDENTIFIER',
+          notFoundCode: 'ACTOR_NOT_FOUND',
+          fallbackMessage: 'Unable to resolve participant slug or email.',
+        })
+      )
+    );
+    const participantPublicIdentities = resolvedParticipants
+      .filter(participant => participant.selected.publicIdentity !== actor.publicIdentity)
+      .map(participant => participant.selected.publicIdentity);
 
-    try {
-      const read = () => readMessageRows(conn);
-      const snapshot = read();
-      const actor = resolveOwnedActor({
-        snapshot,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
-      });
-      const resolvedParticipants = await Promise.all(
-        Array.from(new Set(params.participants)).map(identifier =>
-          resolvePublishedActorLookup({
-            identifier,
-            lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-            lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
-            invalidMessage: 'Participant slug or email is invalid.',
-            invalidCode: 'INVALID_AGENT_IDENTIFIER',
-            notFoundCode: 'ACTOR_NOT_FOUND',
-            fallbackMessage: 'Unable to resolve participant slug or email.',
-          })
-        )
-      );
-      const participantPublicIdentities = resolvedParticipants
-        .filter(participant => participant.selected.publicIdentity !== actor.publicIdentity)
-        .map(participant => participant.selected.publicIdentity);
+    const beforeThreadIds = new Set(snapshot.threads.map(thread => thread.id.toString()));
+    await conn.reducers.createGroupThread({
+      agentDbId: actor.id,
+      participantPublicIdentities,
+      membershipLocked: params.locked,
+      title: params.title?.trim() || undefined,
+    });
 
-      const beforeThreadIds = new Set(snapshot.threads.map(thread => thread.id.toString()));
-      await conn.reducers.createGroupThread({
-        agentDbId: actor.id,
-        participantPublicIdentities,
-        membershipLocked: params.locked,
-        title: params.title?.trim() || undefined,
-      });
+    const thread = await waitForThread({
+      read,
+      predicate: nextSnapshot =>
+        nextSnapshot.threads.find(row => {
+          return (
+            row.kind === 'group' &&
+            row.creatorAgentDbId === actor.id &&
+            !beforeThreadIds.has(row.id.toString())
+          );
+        }) ?? null,
+    });
+    const membershipSnapshot = await waitForThreadMembership({
+      read,
+      threadId: thread.id,
+      expectedPublicIdentities: new Set([
+        actor.publicIdentity,
+        ...participantPublicIdentities,
+      ]),
+    });
+    const membership = summarizeThreadMembership(membershipSnapshot, thread.id);
 
-      const thread = await waitForThread({
-        read,
-        predicate: nextSnapshot =>
-          nextSnapshot.threads.find(row => {
-            return (
-              row.kind === 'group' &&
-              row.creatorAgentDbId === actor.id &&
-              !beforeThreadIds.has(row.id.toString())
-            );
-          }) ?? null,
-      });
-      const membershipSnapshot = await waitForThreadMembership({
-        read,
-        threadId: thread.id,
-        expectedPublicIdentities: new Set([
-          actor.publicIdentity,
-          ...participantPublicIdentities,
-        ]),
-      });
-      const membership = summarizeThreadMembership(membershipSnapshot, thread.id);
+    params.reporter.success(`Created group thread ${thread.id.toString()}`);
 
-      params.reporter.success(`Created group thread ${thread.id.toString()}`);
-
-      return {
-        profile: profile.name,
-        actorSlug: actor.slug,
-        threadId: thread.id.toString(),
-        label: params.title?.trim() || `Group thread ${thread.id.toString()}`,
-        kind: 'group',
-        locked: thread.membershipLocked,
-        participants: membership.participants,
-        invitedParticipants: membership.invitedParticipants,
-        participantLookups: resolvedParticipants.map(participant => ({
-          input: participant.input,
-          inputKind: participant.inputKind,
-          matchedActors: participant.matchedActors,
-          selected: participant.selectedActor,
-        })),
-      };
-    } finally {
-      subscription.unsubscribe();
-    }
+    return {
+      profile: profile.name,
+      actorSlug: actor.slug,
+      threadId: thread.id.toString(),
+      label: params.title?.trim() || `Group thread ${thread.id.toString()}`,
+      kind: 'group',
+      locked: thread.membershipLocked,
+      participants: membership.participants,
+      invitedParticipants: membership.invitedParticipants,
+      participantLookups: resolvedParticipants.map(participant => ({
+        input: participant.input,
+        inputKind: participant.inputKind,
+        matchedActors: participant.matchedActors,
+        selected: participant.selectedActor,
+      })),
+    };
   } catch (error) {
     if (isCliError(error)) {
       throw error;
@@ -1136,71 +1106,66 @@ export async function addThreadParticipant(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread state');
-    const subscription = await subscribeMessageTables(conn);
+    params.reporter.verbose?.('Reading latest thread state');
+    const read = () => readLatestMessageRows(conn);
+    const snapshot = await read();
+    const actor = resolveOwnedActor({
+      snapshot,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+      threadId: requestedThreadId,
+    });
+    requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
+    const targetLookup = await resolvePublishedActorLookup({
+      identifier: params.participant,
+      lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
+      lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+      invalidMessage: 'Participant slug or email is invalid.',
+      invalidCode: 'INVALID_AGENT_IDENTIFIER',
+      notFoundCode: 'ACTOR_NOT_FOUND',
+      fallbackMessage: 'Unable to resolve participant slug or email.',
+    });
+    const target = targetLookup.selected;
 
-    try {
-      const snapshot = readMessageRows(conn);
-      const actor = resolveOwnedActor({
-        snapshot,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
-        threadId: requestedThreadId,
-      });
-      requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
-      const targetLookup = await resolvePublishedActorLookup({
-        identifier: params.participant,
-        lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-        lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
-        invalidMessage: 'Participant slug or email is invalid.',
-        invalidCode: 'INVALID_AGENT_IDENTIFIER',
-        notFoundCode: 'ACTOR_NOT_FOUND',
-        fallbackMessage: 'Unable to resolve participant slug or email.',
-      });
-      const target = targetLookup.selected;
+    await conn.reducers.addThreadParticipant({
+      agentDbId: actor.id,
+      threadId: requestedThreadId,
+      participantPublicIdentity: target.publicIdentity,
+    });
 
-      await conn.reducers.addThreadParticipant({
-        agentDbId: actor.id,
-        threadId: requestedThreadId,
-        participantPublicIdentity: target.publicIdentity,
-      });
-
-      const membershipSnapshot = await waitForThreadMembership({
-        read: () => readMessageRows(conn),
-        threadId: requestedThreadId,
-        expectedPublicIdentities: new Set([target.publicIdentity]),
-      });
-      const thread = requireThread(membershipSnapshot, requestedThreadId);
-      const membership = summarizeThreadMembership(membershipSnapshot, requestedThreadId);
-      const targetIsActive = membershipSnapshot.participants.some(participant => {
-        const participantActor = membershipSnapshot.actors.find(
-          candidate => candidate.id === participant.agentDbId
-        );
-        return (
-          participant.threadId === requestedThreadId &&
-          participant.active &&
-          participantActor?.publicIdentity === target.publicIdentity
-        );
-      });
-      return {
-        profile: profile.name,
-        actorSlug: actor.slug,
-        threadId: thread.id.toString(),
-        label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
-        participant: target.slug,
-        action: targetIsActive ? 'added' : 'invited',
-        participants: membership.participants,
-        invitedParticipants: membership.invitedParticipants,
-        participantLookup: {
-          input: targetLookup.input,
-          inputKind: targetLookup.inputKind,
-          matchedActors: targetLookup.matchedActors,
-          selected: targetLookup.selectedActor,
-        },
-      };
-    } finally {
-      subscription.unsubscribe();
-    }
+    const membershipSnapshot = await waitForThreadMembership({
+      read,
+      threadId: requestedThreadId,
+      expectedPublicIdentities: new Set([target.publicIdentity]),
+    });
+    const thread = requireThread(membershipSnapshot, requestedThreadId);
+    const membership = summarizeThreadMembership(membershipSnapshot, requestedThreadId);
+    const targetIsActive = membershipSnapshot.participants.some(participant => {
+      const participantActor = membershipSnapshot.actors.find(
+        candidate => candidate.id === participant.agentDbId
+      );
+      return (
+        participant.threadId === requestedThreadId &&
+        participant.active &&
+        participantActor?.publicIdentity === target.publicIdentity
+      );
+    });
+    return {
+      profile: profile.name,
+      actorSlug: actor.slug,
+      threadId: thread.id.toString(),
+      label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
+      participant: target.slug,
+      action: targetIsActive ? 'added' : 'invited',
+      participants: membership.participants,
+      invitedParticipants: membership.invitedParticipants,
+      participantLookup: {
+        input: targetLookup.input,
+        inputKind: targetLookup.inputKind,
+        matchedActors: targetLookup.matchedActors,
+        selected: targetLookup.selectedActor,
+      },
+    };
   } catch (error) {
     if (isCliError(error)) {
       throw error;
@@ -1246,57 +1211,51 @@ export async function removeThreadParticipant(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread state');
-    const subscription = await subscribeMessageTables(conn);
+    params.reporter.verbose?.('Reading latest thread state');
+    const snapshot = await readLatestMessageRows(conn);
+    const actor = resolveOwnedActor({
+      snapshot,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+      threadId: requestedThreadId,
+    });
+    requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
 
-    try {
-      const snapshot = readMessageRows(conn);
-      const actor = resolveOwnedActor({
-        snapshot,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
-        threadId: requestedThreadId,
-      });
-      requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
-
-      const threadParticipants = snapshot.participants.filter(row => {
-        return row.threadId === requestedThreadId && row.active;
-      });
-      const actorsById = new Map(snapshot.actors.map(row => [row.id, row] as const));
-      const targetActor = threadParticipants
-        .map(participant => actorsById.get(participant.agentDbId))
-        .find(candidate => candidate?.slug === requestedParticipantSlug);
-      if (!targetActor) {
-        throw userError(
-          `No active participant \`${requestedParticipantSlug}\` is visible in this thread.`,
-          {
-            code: 'THREAD_PARTICIPANT_NOT_FOUND',
-          }
-        );
-      }
-
-      await conn.reducers.removeThreadParticipant({
-        agentDbId: actor.id,
-        threadId: requestedThreadId,
-        participantAgentDbId: targetActor.id,
-      });
-
-      const nextSnapshot = readMessageRows(conn);
-      const thread = requireThread(nextSnapshot, requestedThreadId);
-      const membership = summarizeThreadMembership(nextSnapshot, requestedThreadId);
-      return {
-        profile: profile.name,
-        actorSlug: actor.slug,
-        threadId: thread.id.toString(),
-        label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
-        participant: targetActor.slug,
-        action: 'removed',
-        participants: membership.participants,
-        invitedParticipants: membership.invitedParticipants,
-      };
-    } finally {
-      subscription.unsubscribe();
+    const threadParticipants = snapshot.participants.filter(row => {
+      return row.threadId === requestedThreadId && row.active;
+    });
+    const actorsById = new Map(snapshot.actors.map(row => [row.id, row] as const));
+    const targetActor = threadParticipants
+      .map(participant => actorsById.get(participant.agentDbId))
+      .find(candidate => candidate?.slug === requestedParticipantSlug);
+    if (!targetActor) {
+      throw userError(
+        `No active participant \`${requestedParticipantSlug}\` is visible in this thread.`,
+        {
+          code: 'THREAD_PARTICIPANT_NOT_FOUND',
+        }
+      );
     }
+
+    await conn.reducers.removeThreadParticipant({
+      agentDbId: actor.id,
+      threadId: requestedThreadId,
+      participantAgentDbId: targetActor.id,
+    });
+
+    const nextSnapshot = await readLatestMessageRows(conn);
+    const thread = requireThread(nextSnapshot, requestedThreadId);
+    const membership = summarizeThreadMembership(nextSnapshot, requestedThreadId);
+    return {
+      profile: profile.name,
+      actorSlug: actor.slug,
+      threadId: thread.id.toString(),
+      label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
+      participant: targetActor.slug,
+      action: 'removed',
+      participants: membership.participants,
+      invitedParticipants: membership.invitedParticipants,
+    };
   } catch (error) {
     if (isCliError(error)) {
       throw error;
@@ -1336,37 +1295,31 @@ export async function markThreadRead(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread state');
-    const subscription = await subscribeMessageTables(conn);
+    params.reporter.verbose?.('Reading latest thread state');
+    const snapshot = await readLatestMessageRows(conn);
+    const actor = resolveOwnedActor({
+      snapshot,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+      threadId: requestedThreadId,
+    });
+    const thread = requireThread(snapshot, requestedThreadId);
+    requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
 
-    try {
-      const snapshot = readMessageRows(conn);
-      const actor = resolveOwnedActor({
-        snapshot,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
-        threadId: requestedThreadId,
-      });
-      const thread = requireThread(snapshot, requestedThreadId);
-      requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
+    const throughSeq = params.throughSeq ? parseThreadId(params.throughSeq) : thread.lastMessageSeq;
+    await conn.reducers.markThreadRead({
+      agentDbId: actor.id,
+      threadId: requestedThreadId,
+      upToThreadSeq: throughSeq,
+    });
 
-      const throughSeq = params.throughSeq ? parseThreadId(params.throughSeq) : thread.lastMessageSeq;
-      await conn.reducers.markThreadRead({
-        agentDbId: actor.id,
-        threadId: requestedThreadId,
-        upToThreadSeq: throughSeq,
-      });
-
-      return {
-        profile: profile.name,
-        actorSlug: actor.slug,
-        threadId: thread.id.toString(),
-        label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
-        throughSeq: throughSeq.toString(),
-      };
-    } finally {
-      subscription.unsubscribe();
-    }
+    return {
+      profile: profile.name,
+      actorSlug: actor.slug,
+      threadId: thread.id.toString(),
+      label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
+      throughSeq: throughSeq.toString(),
+    };
   } catch (error) {
     if (isCliError(error)) {
       throw error;
@@ -1406,36 +1359,30 @@ export async function setThreadArchived(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread state');
-    const subscription = await subscribeMessageTables(conn);
+    params.reporter.verbose?.('Reading latest thread state');
+    const snapshot = await readLatestMessageRows(conn);
+    const actor = resolveOwnedActor({
+      snapshot,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+      threadId: requestedThreadId,
+    });
+    const thread = requireThread(snapshot, requestedThreadId);
+    requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
 
-    try {
-      const snapshot = readMessageRows(conn);
-      const actor = resolveOwnedActor({
-        snapshot,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
-        threadId: requestedThreadId,
-      });
-      const thread = requireThread(snapshot, requestedThreadId);
-      requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
+    await conn.reducers.setThreadArchived({
+      agentDbId: actor.id,
+      threadId: requestedThreadId,
+      archived: params.archived,
+    });
 
-      await conn.reducers.setThreadArchived({
-        agentDbId: actor.id,
-        threadId: requestedThreadId,
-        archived: params.archived,
-      });
-
-      return {
-        profile: profile.name,
-        actorSlug: actor.slug,
-        threadId: thread.id.toString(),
-        label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
-        archived: params.archived,
-      };
-    } finally {
-      subscription.unsubscribe();
-    }
+    return {
+      profile: profile.name,
+      actorSlug: actor.slug,
+      threadId: thread.id.toString(),
+      label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
+      archived: params.archived,
+    };
   } catch (error) {
     if (isCliError(error)) {
       throw error;
@@ -1474,33 +1421,27 @@ export async function deleteThread(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to thread state');
-    const subscription = await subscribeMessageTables(conn);
+    params.reporter.verbose?.('Reading latest thread state');
+    const snapshot = await readLatestMessageRows(conn);
+    const actor = resolveOwnedActor({
+      snapshot,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+      threadId: requestedThreadId,
+    });
+    const thread = requireThread(snapshot, requestedThreadId);
 
-    try {
-      const snapshot = readMessageRows(conn);
-      const actor = resolveOwnedActor({
-        snapshot,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
-        threadId: requestedThreadId,
-      });
-      const thread = requireThread(snapshot, requestedThreadId);
+    await conn.reducers.deleteThread({
+      agentDbId: actor.id,
+      threadId: requestedThreadId,
+    });
 
-      await conn.reducers.deleteThread({
-        agentDbId: actor.id,
-        threadId: requestedThreadId,
-      });
-
-      return {
-        profile: profile.name,
-        actorSlug: actor.slug,
-        threadId: thread.id.toString(),
-        label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
-      };
-    } finally {
-      subscription.unsubscribe();
-    }
+    return {
+      profile: profile.name,
+      actorSlug: actor.slug,
+      threadId: thread.id.toString(),
+      label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
+    };
   } catch (error) {
     if (isCliError(error)) {
       throw error;

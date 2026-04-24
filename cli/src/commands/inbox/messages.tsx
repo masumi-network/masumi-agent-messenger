@@ -105,6 +105,7 @@ export function registerThreadLatestCommand(command: Command): void {
               slug: options.slug,
               threadId: options.threadId,
               readUnsupported: options.readUnsupported,
+              readMode: 'latest',
             }),
           toHuman: result => {
             const paginated = paginateNewMessages(result, {
@@ -141,16 +142,17 @@ export function registerThreadLatestCommand(command: Command): void {
       }
 
       await runCommandAction<PaginatedNewMessageFeed>({
-          title: 'Masumi thread latest',
-          options,
-          run: async ({ reporter }) =>
-            paginateNewMessages(
-              await readNewMessages({
-                profileName: options.profile,
+        title: 'Masumi thread latest',
+        options,
+        run: async ({ reporter }) =>
+          paginateNewMessages(
+            await readNewMessages({
+              profileName: options.profile,
               reporter,
               slug: options.slug,
               threadId: options.threadId,
               readUnsupported: options.readUnsupported,
+              readMode: 'latest',
             }),
             {
               page,

@@ -13,6 +13,7 @@ import * as LookupPublishedAgentBySlugProcedure from "../lookup_published_agent_
 import * as LookupPublishedAgentSigningKeysProcedure from "../lookup_published_agent_signing_keys_procedure";
 import * as LookupPublishedAgentsByEmailProcedure from "../lookup_published_agents_by_email_procedure";
 import * as LookupPublishedPublicRouteBySlugProcedure from "../lookup_published_public_route_by_slug_procedure";
+import * as ReadVisibleMessageSnapshotProcedure from "../read_visible_message_snapshot_procedure";
 import * as ResolveDeviceShareRequestByCodeProcedure from "../resolve_device_share_request_by_code_procedure";
 
 export type ClaimDeviceKeyBundleArgs = __Infer<typeof ClaimDeviceKeyBundleProcedure.params>;
@@ -29,6 +30,8 @@ export type LookupPublishedAgentsByEmailArgs = __Infer<typeof LookupPublishedAge
 export type LookupPublishedAgentsByEmailResult = __Infer<typeof LookupPublishedAgentsByEmailProcedure.returnType>;
 export type LookupPublishedPublicRouteBySlugArgs = __Infer<typeof LookupPublishedPublicRouteBySlugProcedure.params>;
 export type LookupPublishedPublicRouteBySlugResult = __Infer<typeof LookupPublishedPublicRouteBySlugProcedure.returnType>;
+export type ReadVisibleMessageSnapshotArgs = __Infer<typeof ReadVisibleMessageSnapshotProcedure.params>;
+export type ReadVisibleMessageSnapshotResult = __Infer<typeof ReadVisibleMessageSnapshotProcedure.returnType>;
 export type ResolveDeviceShareRequestByCodeArgs = __Infer<typeof ResolveDeviceShareRequestByCodeProcedure.params>;
 export type ResolveDeviceShareRequestByCodeResult = __Infer<typeof ResolveDeviceShareRequestByCodeProcedure.returnType>;
 

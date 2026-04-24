@@ -492,6 +492,12 @@ export function readMessageRows(conn: DbConnection): {
   };
 }
 
+export async function readLatestMessageRows(
+  conn: DbConnection
+): Promise<ReturnType<typeof readMessageRows>> {
+  return conn.procedures.readVisibleMessageSnapshot({});
+}
+
 export function readContactRows(conn: DbConnection): {
   actors: VisibleAgentRow[];
   contactRequests: VisibleContactRequestRow[];

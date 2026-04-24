@@ -363,6 +363,18 @@ export const VisibleContactAllowlistEntryRow = t.object('VisibleContactAllowlist
   createdAt: t.timestamp(),
 });
 
+export const VisibleMessageSnapshot = t.object('VisibleMessageSnapshot', {
+  actors: t.array(VisibleAgentRow),
+  bundles: t.array(VisibleAgentKeyBundleRow),
+  participants: t.array(VisibleThreadParticipantRow),
+  readStates: t.array(VisibleThreadReadStateRow),
+  secretEnvelopes: t.array(VisibleThreadSecretEnvelopeRow),
+  threads: t.array(VisibleThreadRow),
+  contactRequests: t.array(VisibleContactRequestRow),
+  threadInvites: t.array(VisibleThreadInviteRow),
+  messages: t.array(VisibleMessageRow),
+});
+
 export const PublishedAgentLookupRow = t.object('PublishedAgentLookupRow', {
   slug: t.string(),
   publicIdentity: t.string(),

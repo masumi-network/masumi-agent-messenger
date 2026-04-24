@@ -445,6 +445,7 @@ export function registerThreadCommands(program: Command): void {
                 actorSlug,
                 threadId: options.threadId,
                 readUnsupported: options.readUnsupported,
+                readMode: 'latest',
               }),
               {
                 page: parseOptionalInteger(options.page),
@@ -540,6 +541,7 @@ export function registerThreadCommands(program: Command): void {
                 actorSlug,
                 threadId,
                 readUnsupported: options.readUnsupported,
+                readMode: 'latest',
               });
 
               lastFeed = paginateNewMessages(feed, { page: 1, pageSize });

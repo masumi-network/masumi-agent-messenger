@@ -39,6 +39,7 @@ import { createSecretStore } from './secret-store';
 import {
   connectAuthenticated,
   disconnectConnection,
+  readLatestMessageRows,
   readMessageRows,
   subscribeMessageTables,
 } from './spacetimedb';
@@ -581,6 +582,7 @@ export async function readNewMessages(params: {
   slug?: string;
   threadId?: string;
   readUnsupported?: boolean;
+  readMode?: 'latest' | 'subscription';
 }): Promise<NewMessageFeed> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
   const normalizedEmail = normalizeEmail(claims.email ?? '');
@@ -605,12 +607,23 @@ export async function readNewMessages(params: {
   params.reporter.verbose?.('Connected to SpacetimeDB');
 
   try {
-    params.reporter.verbose?.('Subscribing to message state');
-    const subscription = await subscribeMessageTables(conn);
+    const readMode = params.readMode ?? 'subscription';
+    let unsubscribe: (() => void) | undefined;
+    let snapshot: ReturnType<typeof readMessageRows>;
+    if (readMode === 'latest') {
+      params.reporter.verbose?.('Reading latest message state');
+      snapshot = await readLatestMessageRows(conn);
+    } else {
+      params.reporter.verbose?.('Subscribing to message state');
+      const subscription = await subscribeMessageTables(conn);
+      unsubscribe = () => {
+        subscription.unsubscribe();
+      };
+      snapshot = readMessageRows(conn);
+    }
 
     try {
       params.reporter.verbose?.('Collecting unread messages');
-      const snapshot = readMessageRows(conn);
       const { defaultActor, ownActorIds, unreadMessages } = selectUnreadIncomingMessages(
         snapshot,
         normalizedEmail,
@@ -718,7 +731,7 @@ export async function readNewMessages(params: {
         messages,
       };
     } finally {
-      subscription.unsubscribe();
+      unsubscribe?.();
     }
   } catch (error) {
     if (isCliError(error)) {

@@ -925,6 +925,37 @@ export const VisibleMessageRow = __t.object("VisibleMessageRow", {
 });
 export type VisibleMessageRow = __Infer<typeof VisibleMessageRow>;
 
+export const VisibleMessageSnapshot = __t.object("VisibleMessageSnapshot", {
+  get actors() {
+    return __t.array(VisibleAgentRow);
+  },
+  get bundles() {
+    return __t.array(VisibleAgentKeyBundleRow);
+  },
+  get participants() {
+    return __t.array(VisibleThreadParticipantRow);
+  },
+  get readStates() {
+    return __t.array(VisibleThreadReadStateRow);
+  },
+  get secretEnvelopes() {
+    return __t.array(VisibleThreadSecretEnvelopeRow);
+  },
+  get threads() {
+    return __t.array(VisibleThreadRow);
+  },
+  get contactRequests() {
+    return __t.array(VisibleContactRequestRow);
+  },
+  get threadInvites() {
+    return __t.array(VisibleThreadInviteRow);
+  },
+  get messages() {
+    return __t.array(VisibleMessageRow);
+  },
+});
+export type VisibleMessageSnapshot = __Infer<typeof VisibleMessageSnapshot>;
+
 export const VisibleMessages = __t.object("VisibleMessages", {});
 export type VisibleMessages = __Infer<typeof VisibleMessages>;
 
