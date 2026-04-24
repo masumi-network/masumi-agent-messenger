@@ -21,6 +21,7 @@ import type { GlobalOptions, TaskReporter } from '../../services/command-runtime
 export type AccountFlowOptions = GlobalOptions & {
   issuer?: string;
   clientId?: string;
+  displayName?: string;
   skipAgentRegistration?: boolean;
   disableLinkedEmail?: boolean;
   publicDescription?: string;

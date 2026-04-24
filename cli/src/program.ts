@@ -6,9 +6,7 @@ import { registerThreadCommands } from './commands/thread';
 import { registerDiscoverCommands } from './commands/discover';
 import { ensureCliEnvLoaded } from './services/env';
 import { registerDoctorCommand } from './commands/doctor';
-import { registerAuthCommands } from './commands/auth';
 import { registerChannelCommands } from './commands/channel';
-import { registerInboxCommands } from './commands/inbox';
 import { CLI_BINARY_NAME, CLI_VERSION } from './package-metadata';
 
 export function buildProgram(): Command {
@@ -29,8 +27,6 @@ export function buildProgram(): Command {
     .showSuggestionAfterError();
 
   registerRootAction(program);
-  registerAuthCommands(program);
-  registerInboxCommands(program);
   registerAccountCommands(program);
   registerAgentCommands(program);
   registerThreadCommands(program);

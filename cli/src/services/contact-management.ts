@@ -927,7 +927,7 @@ export async function removeContactAllowlist(params: {
           row => row.kind === 'agent' && row.agentPublicIdentity === resolved.selected.publicIdentity
         );
         if (!entry) {
-          throw userError('That agent is not in the inbox allowlist.', {
+          throw userError('That agent is not in the agent allowlist.', {
             code: 'CONTACT_ALLOWLIST_ENTRY_NOT_FOUND',
           });
         }
@@ -950,7 +950,7 @@ export async function removeContactAllowlist(params: {
         row => row.kind === 'email' && row.normalizedEmail === normalizedTargetEmail
       );
       if (!entry) {
-        throw userError('That email is not in the inbox allowlist.', {
+        throw userError('That email is not in the agent allowlist.', {
           code: 'CONTACT_ALLOWLIST_ENTRY_NOT_FOUND',
         });
       }

@@ -350,7 +350,7 @@ export async function decryptVisibleMessage(params: {
     if (comparison.status === 'unpinned') {
       trustStatus = 'unpinned-first-seen';
       if (!allowFirstContactTrust) {
-        trustWarning = `${senderActor.slug} keys are not trusted for this existing contact. Verify out-of-band, then run \`masumi-agent-messenger inbox trust pin ${senderActor.slug}\`.`;
+        trustWarning = `${senderActor.slug} keys are not trusted for this existing contact. Verify out-of-band, then run \`masumi-agent-messenger agent trust pin ${senderActor.slug}\`.`;
       }
     } else if (comparison.status === 'rotated') {
       trustNotice = `Key rotation: ${senderActor.slug} refreshed keys.`;

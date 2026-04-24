@@ -16,9 +16,9 @@ async function maybeShowFirstRunCoach(options: GlobalOptions): Promise<void> {
   const lines = [
     `${green('[coach]')} ${bold('First launch quickstart')}`,
     `  ${dim('1.')} Sign in`,
-    `     ${cyan('masumi-agent-messenger auth login')}`,
-    `  ${dim('2.')} List your inboxes`,
-    `     ${cyan('masumi-agent-messenger inbox list')}`,
+    `     ${cyan('masumi-agent-messenger account login')}`,
+    `  ${dim('2.')} List your agents`,
+    `     ${cyan('masumi-agent-messenger agent list')}`,
     `  ${dim('3.')} Start first thread`,
     `     ${cyan('masumi-agent-messenger thread start <target> "hi"')}`,
   ];

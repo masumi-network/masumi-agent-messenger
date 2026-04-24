@@ -523,7 +523,7 @@ export function TaskScreen({ state }: { state: TaskRenderState }) {
         }
       }
 
-      // One-key copy helpers for auth device-code flows.
+      // One-key copy helpers for account login device-code flows.
       // Only when banner is visible and no blocking prompt is active.
       if (!state.banner || state.final || hasActivePrompt) {
         return;

@@ -261,7 +261,7 @@ async function requirePeerKeyTrust(params: {
 
   if (comparison.status === 'unpinned') {
     throw userError(
-      `Keys for ${params.displayLabel} are not trusted for this existing contact. Verify them out-of-band, then run \`masumi-agent-messenger inbox trust pin ${params.displayLabel}\` before sending.`,
+      `Keys for ${params.displayLabel} are not trusted for this existing contact. Verify them out-of-band, then run \`masumi-agent-messenger agent trust pin ${params.displayLabel}\` before sending.`,
       { code: 'PEER_KEY_UNPINNED' }
     );
   }

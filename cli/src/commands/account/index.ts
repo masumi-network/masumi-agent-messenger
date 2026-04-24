@@ -4,6 +4,7 @@ import {
   isPendingDeviceLoginResult,
   login,
   logout,
+  removeLocalKeys,
   requestVerificationEmailForIssuer,
   startLogin,
   waitForLogin,
@@ -18,15 +19,23 @@ import {
 import { userError } from '../../services/errors';
 import { getBirthdayCelebration } from '../../services/easter-eggs';
 import { formatRelativeTime } from '../../services/format';
-import { bootstrapInbox } from '../../services/inbox';
-import type { BootstrapResult } from '../../services/inbox-bootstrap';
+import { bootstrapInbox, inboxStatus } from '../../services/inbox';
+import type { BootstrapResult, ConfirmDefaultSlugPrompt } from '../../services/inbox-bootstrap';
 import {
   backupInboxKeys,
   defaultBackupFilePath,
   restoreInboxKeys,
 } from '../../services/key-backup';
-import { loadProfile } from '../../services/config-store';
+import { loadProfile, type BootstrapSnapshot } from '../../services/config-store';
+import { createSecretStore } from '../../services/secret-store';
 import {
+  confirmCurrentImportedRotationKey,
+  type ConfirmCurrentImportedRotationKeyResult,
+} from '../../services/imported-rotation-key-confirmation';
+import type { AgentKeyPair } from '../../../../shared/agent-crypto';
+import {
+  confirmYesNo,
+  promptMultiline,
   promptSecret,
   promptText,
 } from '../../services/prompts';
@@ -79,6 +88,87 @@ type BackupOptions = GlobalOptions & {
   file?: string;
   passphrase?: string;
 };
+
+type KeysConfirmOptions = GlobalOptions & {
+  slug?: string;
+};
+
+type KeysRemoveOptions = GlobalOptions & {
+  yes?: boolean;
+};
+
+type AccountLogoutOptions = GlobalOptions & {
+  yes?: boolean;
+};
+
+type AccountStatusOptions = AccountFlowOptions & {
+  live?: boolean;
+};
+
+function snapshotKeysRequireRecovery(
+  snapshot: BootstrapSnapshot | undefined,
+  keyPair: AgentKeyPair | null
+): boolean {
+  if (!snapshot || !keyPair) {
+    return false;
+  }
+
+  if (
+    snapshot.keyVersions.encryption !== keyPair.encryption.keyVersion ||
+    snapshot.keyVersions.signing !== keyPair.signing.keyVersion
+  ) {
+    return true;
+  }
+
+  if (!snapshot.actorKeys) {
+    return false;
+  }
+
+  return (
+    snapshot.actorKeys.encryption.publicKey !== keyPair.encryption.publicKey ||
+    snapshot.actorKeys.encryption.keyVersion !== keyPair.encryption.keyVersion ||
+    snapshot.actorKeys.signing.publicKey !== keyPair.signing.publicKey ||
+    snapshot.actorKeys.signing.keyVersion !== keyPair.signing.keyVersion
+  );
+}
+
+function describePreviousKeyConfirmStatus(
+  result: ConfirmCurrentImportedRotationKeyResult
+): string {
+  if (result.previousStatus === 'pending') {
+    return 'confirmed';
+  }
+  if (result.previousStatus === 'confirmed') {
+    return 'already confirmed';
+  }
+  return 'no pending import found';
+}
+
+function buildAccountDefaultSlugPrompt(
+  options: GlobalOptions
+): { confirmDefaultSlug?: ConfirmDefaultSlugPrompt } {
+  if (!isInteractiveAccountFlow(options)) {
+    return {};
+  }
+
+  return {
+    confirmDefaultSlug: async ({ normalizedEmail, suggestedSlug }) => {
+      const slug = await promptText({
+        question: `Public agent slug for ${normalizedEmail}`,
+        defaultValue: suggestedSlug,
+      });
+      const selectedSlug = slug.trim() || suggestedSlug;
+      const publicDescription = await promptMultiline({
+        question: `Public description for /${selectedSlug} (optional).`,
+        doneMessage: 'Press Enter on an empty line to skip or finish.',
+      });
+      return {
+        slug: selectedSlug,
+        publicDescription: publicDescription || null,
+      };
+    },
+  };
+}
 
 function registerAccountLoginCommand(command: Command): void {
   const loginCommand = command
@@ -669,6 +759,89 @@ function registerAccountBackupCommands(command: Command): void {
     });
 }
 
+function registerAccountKeysCommands(command: Command): void {
+  const keys = command
+    .command('keys')
+    .description('Local account key safety commands');
+
+  keys.action((_options, commandInstance) => {
+    showCommandHelp(commandInstance);
+  });
+
+  keys
+    .command('confirm')
+    .description('Confirm automatically imported rotated private keys before sending')
+    .option('--slug <slug>', 'Agent slug to confirm')
+    .action(async (_options, commandInstance) => {
+      const options = commandInstance.optsWithGlobals() as KeysConfirmOptions;
+      await runCommandAction({
+        title: 'Masumi account keys confirm',
+        options,
+        run: () =>
+          confirmCurrentImportedRotationKey({
+            profileName: options.profile,
+            actorSlug: options.slug,
+          }),
+        toHuman: result => ({
+          summary:
+            result.previousStatus === 'pending'
+              ? 'Imported rotated keys confirmed.'
+              : 'Imported rotated keys checked.',
+          details: renderKeyValue([
+            { key: 'Profile', value: result.profile, color: dim },
+            { key: 'Agent', value: result.slug },
+            { key: 'Status', value: describePreviousKeyConfirmStatus(result), color: dim },
+          ]),
+        }),
+      });
+    });
+
+  keys
+    .command('remove')
+    .description('Remove local device keys (dangerous, also signs out)')
+    .option('--yes', 'Skip confirmation and remove local keys')
+    .action(async (_options, commandInstance) => {
+      const options = commandInstance.optsWithGlobals() as KeysRemoveOptions;
+      await runCommandAction({
+        title: 'Masumi account keys remove',
+        options,
+        run: async ({ reporter }) => {
+          if (!options.json && !options.yes) {
+            const confirmed = await confirmYesNo({
+              defaultValue: false,
+              question:
+                'This wipes local key material for this profile, including:\n' +
+                '- Local agent key bundle\n' +
+                '- Local device key material\n' +
+                '- Local namespace key vault\n' +
+                '- Stored profile bootstrap state\n\n' +
+                'It also signs you out by removing the local OIDC session.\n\n' +
+                'Continue?',
+            });
+
+            if (!confirmed) {
+              throw userError('Key removal cancelled.', {
+                code: 'ACCOUNT_KEYS_REMOVE_CANCELLED',
+              });
+            }
+          }
+
+          return removeLocalKeys({
+            profileName: options.profile,
+            reporter,
+          });
+        },
+        toHuman: result => ({
+          summary: 'Local keys removed.',
+          details: renderKeyValue([
+            { key: 'Profile', value: result.profile, color: dim },
+            { key: 'Status', value: 'signed out', color: dim },
+          ]),
+        }),
+      });
+    });
+}
+
 export function registerAccountCommands(program: Command): void {
   const account = program
     .command('account')
@@ -682,30 +855,146 @@ export function registerAccountCommands(program: Command): void {
   registerAccountVerificationCommand(account);
   registerAccountDeviceCommands(account);
   registerAccountBackupCommands(account);
+  registerAccountKeysCommands(account);
 
   account
     .command('status')
-    .description('Show local account session status')
+    .description('Show account session, key-readiness, and optional live inbox status')
+    .option('--live', 'Connect to SpacetimeDB and show live inbox/managed-agent status')
+    .option('--skip-agent-registration', 'Skip managed agent registration during live status sync')
+    .option(
+      '--disable-linked-email',
+      'Disable linked email exposure when live status registration runs automatically'
+    )
+    .option(
+      '--public-description <text>',
+      'Public description to publish when live status registration runs automatically'
+    )
+    .option(
+      '--public-description-file <path>',
+      'Read the public description from a local file when live status registration runs automatically'
+    )
     .action(async (_options, commandInstance) => {
-      const options = commandInstance.optsWithGlobals() as GlobalOptions;
+      const options = commandInstance.optsWithGlobals() as AccountStatusOptions;
+      if (options.live) {
+        const prompts = buildAccountRegistrationPrompts();
+        await runCommandAction({
+          title: 'Masumi account live status',
+          options,
+          run: async ({ reporter }) => {
+            const registration = await resolveAccountRegistrationSettings(options);
+            return inboxStatus({
+              profileName: options.profile,
+              reporter,
+              ...registration,
+              ...prompts,
+            });
+          },
+          toHuman: result => ({
+            summary: result.authenticated
+              ? result.connected && result.actor
+                ? `Live inbox active as ${cyan(result.actor.slug)}.`
+                : yellow('Signed in, but no default agent is bootstrapped.')
+              : yellow('Not signed in.'),
+            details: renderKeyValue([
+              { key: 'Profile', value: result.profile, color: dim },
+              {
+                key: 'Connected',
+                value: result.connected ? green('yes') : yellow('no'),
+              },
+              ...(result.inbox
+                ? [{ key: 'Email', value: result.inbox.displayEmail }]
+                : []),
+              ...(result.actor
+                ? [
+                    { key: 'Agent', value: result.actor.slug, color: cyan },
+                    {
+                      key: 'Managed agent',
+                      value: result.agentRegistration.status,
+                      color:
+                        result.agentRegistration.status === 'registered'
+                          ? green
+                          : yellow,
+                    },
+                  ]
+                : []),
+              ...(result.agentRegistration.agentIdentifier
+                ? [
+                    {
+                      key: 'Agent ID',
+                      value: result.agentRegistration.agentIdentifier,
+                      color: dim,
+                    },
+                  ]
+                : []),
+              {
+                key: 'Encryption key',
+                value: result.keyVersions.encryption ?? 'n/a',
+                color: dim,
+              },
+              {
+                key: 'Signing key',
+                value: result.keyVersions.signing ?? 'n/a',
+                color: dim,
+              },
+            ]),
+          }),
+        });
+        return;
+      }
+
       await runCommandAction({
         title: 'Masumi account status',
         options,
-        run: ({ reporter }) =>
-          authStatus({
+        preferPlainReporter: true,
+        run: async ({ reporter }) => {
+          const status = await authStatus({
             profileName: options.profile,
             reporter,
-          }),
+          });
+
+          const profile = await loadProfile(options.profile);
+          const secretStore = createSecretStore();
+          const agentKeyPair = await secretStore.getAgentKeyPair(profile.name);
+          const namespaceVault = await secretStore.getNamespaceKeyVault(profile.name);
+          const localKeysReady = Boolean(agentKeyPair && namespaceVault);
+          const recoveryRequired =
+            status.authenticated &&
+            (!localKeysReady ||
+              snapshotKeysRequireRecovery(profile.bootstrapSnapshot, agentKeyPair));
+          const nextAction = !status.authenticated
+            ? 'masumi-agent-messenger account login'
+            : recoveryRequired
+              ? 'masumi-agent-messenger account recover'
+              : profile.activeAgentSlug
+                ? 'masumi-agent-messenger thread list'
+                : 'masumi-agent-messenger agent list';
+
+          return {
+            ...status,
+            activeAgentSlug: profile.activeAgentSlug,
+            localKeysReady,
+            recoveryRequired,
+            nextAction,
+          };
+        },
         toHuman: result => ({
           summary: result.authenticated
             ? `Signed in as ${cyan(result.email ?? result.subject ?? 'unknown')}.`
             : yellow('Not signed in.'),
-          details: result.authenticated
-            ? renderKeyValue([
-                { key: 'Profile', value: result.profile, color: dim },
-                { key: 'Issuer', value: result.issuer ?? 'n/a', color: dim },
-              ])
-            : renderKeyValue([{ key: 'Profile', value: result.profile, color: dim }]),
+          details: renderKeyValue([
+            { key: 'Profile', value: result.profile, color: dim },
+            { key: 'Issuer', value: result.issuer ?? 'n/a', color: dim },
+            {
+              key: 'Local keys',
+              value: result.localKeysReady ? green('ready') : yellow('missing'),
+            },
+            {
+              key: 'Recovery',
+              value: result.recoveryRequired ? yellow('required') : green('not required'),
+            },
+            { key: 'Next', value: result.nextAction, color: dim },
+          ]),
         }),
       });
     });
@@ -713,6 +1002,7 @@ export function registerAccountCommands(program: Command): void {
   account
     .command('sync')
     .description('Create or resync the default agent using the current OIDC session')
+    .option('--display-name <name>', 'Display name for the default agent when creating it')
     .option('--skip-agent-registration', 'Skip managed agent registration during sync')
     .option(
       '--disable-linked-email',
@@ -737,8 +1027,10 @@ export function registerAccountCommands(program: Command): void {
           const registration = await resolveAccountRegistrationSettings(options);
           let result = await bootstrapInbox({
             profileName: options.profile,
+            displayName: options.displayName,
             reporter,
             ...registration,
+            ...buildAccountDefaultSlugPrompt(options),
             ...prompts,
           });
 
@@ -784,7 +1076,7 @@ export function registerAccountCommands(program: Command): void {
       const options = commandInstance.optsWithGlobals() as AccountFlowOptions;
       if (!isInteractiveAccountFlow(options)) {
         throw userError(
-          'Run `masumi-agent-messenger account recover` in an interactive terminal, or use `masumi-agent-messenger account device`, `masumi-agent-messenger account backup import`, or `masumi-agent-messenger agent key rotate` directly.',
+          'Run `masumi-agent-messenger account recover` in an interactive terminal, or use `masumi-agent-messenger account device`, `masumi-agent-messenger account backup import`, or `masumi-agent-messenger agent key rotate <slug>` directly.',
           {
             code: 'AUTH_RECOVER_INTERACTIVE_REQUIRED',
           }
@@ -835,19 +1127,39 @@ export function registerAccountCommands(program: Command): void {
   account
     .command('logout')
     .description('Clear local account session (keeps private keys)')
+    .option('--yes', 'Skip confirmation and clear local account session')
     .action(async (_options, commandInstance) => {
-      const options = commandInstance.optsWithGlobals() as GlobalOptions;
+      const options = commandInstance.optsWithGlobals() as AccountLogoutOptions;
       await runCommandAction({
         title: 'Masumi account logout',
         options,
-        run: ({ reporter }) =>
-          logout({
+        run: async ({ reporter }) => {
+          if (!options.json && !options.yes) {
+            const confirmed = await confirmYesNo({
+              defaultValue: false,
+              question:
+                'This will remove the local OIDC session for this profile.\n' +
+                'Local agent keys and device key material will be kept.\n' +
+                'Use `masumi-agent-messenger account keys remove` to wipe local keys from this device.\n\n' +
+                'Continue?',
+            });
+
+            if (!confirmed) {
+              throw userError('Logout cancelled.', { code: 'ACCOUNT_LOGOUT_CANCELLED' });
+            }
+          }
+
+          return logout({
             profileName: options.profile,
             reporter,
-          }),
+          });
+        },
         toHuman: result => ({
           summary: 'Signed out.',
-          details: renderKeyValue([{ key: 'Profile', value: result.profile, color: dim }]),
+          details: renderKeyValue([
+            { key: 'Profile', value: result.profile, color: dim },
+            { key: 'Local keys', value: 'kept', color: dim },
+          ]),
         }),
       });
     });

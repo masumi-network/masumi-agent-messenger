@@ -31,7 +31,6 @@ type ChannelOptions = GlobalOptions & {
   discoverable?: boolean;
   permission?: string;
   publicJoinPermission?: string;
-  defaultJoinPermission?: string;
   contentType?: string;
   authenticated?: boolean;
   beforeChannelSeq?: string;
@@ -75,23 +74,12 @@ function resolvePublicJoinPermissionOption(
   options: ChannelOptions,
   fallback?: string
 ): string | undefined {
-  if (
-    options.publicJoinPermission !== undefined &&
-    options.defaultJoinPermission !== undefined &&
-    options.publicJoinPermission !== options.defaultJoinPermission
-  ) {
-    throw userError(
-      'Use either --public-join-permission or --default-join-permission, not both.',
-      { code: 'CHANNEL_JOIN_PERMISSION_CONFLICT' }
-    );
-  }
-  return options.publicJoinPermission ?? options.defaultJoinPermission ?? fallback;
+  return options.publicJoinPermission ?? fallback;
 }
 
 export function registerChannelCommands(program: Command): void {
   const channel = program
     .command('channel')
-    .alias('channels')
     .description('Public and approval-required channel commands');
 
   channel.action((_options, commandInstance) => {
@@ -275,49 +263,12 @@ export function registerChannelCommands(program: Command): void {
     .option('--description <text>', 'Channel description')
     .option('--approval-required', 'Require admin approval to join')
     .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write')
-    .option('--default-join-permission <permission>', 'Alias for --public-join-permission')
     .option('--no-discoverable', 'Hide from discovery/search surfaces')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
       const publicJoinPermission = resolvePublicJoinPermissionOption(options, 'read');
       await runCommandAction({
         title: 'Masumi channel create',
-        options,
-        run: ({ reporter }) =>
-          createChannel({
-            profileName: options.profile,
-            actorSlug: options.agent,
-            slug,
-            title: options.title,
-            description: options.description,
-            accessMode: options.approvalRequired ? 'approval_required' : 'public',
-            publicJoinPermission,
-            discoverable: options.discoverable !== false,
-            reporter,
-          }),
-        toHuman: result => ({
-          summary: `Channel ${result.slug ?? slug} ${result.status}.`,
-          details: [],
-        }),
-      });
-    });
-
-  channel
-    .command('add')
-    .description('Add a channel from an owned agent')
-    .argument('<slug>', 'Channel slug')
-    .option('--agent <slug>', 'Owned agent slug to create from')
-    .option('--title <title>', 'Channel title')
-    .option('--description <text>', 'Channel description')
-    .option('--approval-required', 'Require admin approval to join')
-    .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write')
-    .option('--default-join-permission <permission>', 'Alias for --public-join-permission')
-    .option('--no-discoverable', 'Hide from discovery/search surfaces')
-    .action(async function (this: Command, slug: string) {
-      const options = this.optsWithGlobals() as ChannelOptions;
-      const publicJoinPermission = resolvePublicJoinPermissionOption(options, 'read');
-      await runCommandAction({
-        title: 'Masumi channel add',
         options,
         run: ({ reporter }) =>
           createChannel({
@@ -372,7 +323,6 @@ export function registerChannelCommands(program: Command): void {
     .option('--public', 'Allow direct public joins')
     .option('--approval-required', 'Require admin approval to join')
     .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write')
-    .option('--default-join-permission <permission>', 'Alias for --public-join-permission')
     .option('--discoverable', 'Show in discovery/search surfaces')
     .option('--no-discoverable', 'Hide from discovery/search surfaces')
     .action(async function (this: Command, slug: string) {

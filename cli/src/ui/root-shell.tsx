@@ -1858,7 +1858,7 @@ function ModeBar({ mode, width }: { mode: FooterMode; width?: number }) {
 }
 
 const SIDEBAR_LABELS: Record<SidebarNavItem, string> = {
-  inboxes: 'Inbox',
+  inboxes: 'Threads',
   channels: 'Channels',
   agents: 'My Agents',
   discover: 'Discover',
@@ -6010,7 +6010,7 @@ export function RootShell({
 
   const sectionTitle =
     route.type === 'inboxes'
-      ? 'Inbox'
+      ? 'Threads'
       : route.type === 'channels'
         ? 'Channels'
       : route.type === 'agents'
@@ -6265,7 +6265,7 @@ export function RootShell({
             ...(selectedRequest.direction === 'incoming'
               ? [{ key: 'A/Enter', label: 'approve' }, { key: 'X', label: 'reject' }]
               : []),
-            { key: 'Esc', label: 'inbox overview' },
+            { key: 'Esc', label: 'threads overview' },
             { key: 'Tab', label: 'sidebar' },
           ],
         };
@@ -6281,7 +6281,7 @@ export function RootShell({
               ...(!selectedThread.locked
                 ? [{ key: '+/-', label: 'add/remove member' }]
                 : []),
-              { key: 'Esc', label: 'inbox overview' },
+              { key: 'Esc', label: 'threads overview' },
               { key: 'Tab', label: 'sidebar' },
             ],
           };
@@ -6300,7 +6300,7 @@ export function RootShell({
               ? [{ key: '↑/↓', label: 'page messages' }]
               : []),
             ...(selectedThread.unreadMessages > 0 ? [{ key: 'M', label: 'mark read' }] : []),
-            { key: 'Esc', label: 'inbox overview' },
+            { key: 'Esc', label: 'threads overview' },
             { key: 'Tab', label: 'sidebar' },
           ],
         };
@@ -6308,7 +6308,7 @@ export function RootShell({
 
       if (inboxSection === 'pending' && selectedRequest) {
         return {
-          label: 'Inbox Overview',
+          label: 'Threads Overview',
           detail:
             selectedRequest.direction === 'incoming'
               ? selectedRequest.requesterDisplayName ?? selectedRequest.requesterSlug
@@ -6330,7 +6330,7 @@ export function RootShell({
           ? 'thread'
           : 'item';
       return {
-        label: 'Inbox Overview',
+        label: 'Threads Overview',
         detail: `${inboxSection} · ${threadFilter}`,
         items: [
           ...(inboxSectionItems.length > 1
@@ -6533,7 +6533,7 @@ export function RootShell({
             All owned agents are deregistering or deregistered.
           </Text>
           <Text color="gray">
-            Create or recover a usable inbox agent before sending chats or joining channels.
+            Create or recover a usable agent before sending chats or joining channels.
           </Text>
           <Box marginTop={1} flexDirection="column">
             {ownedActors.map(actor => (
@@ -6602,7 +6602,7 @@ export function RootShell({
 
         {route.type === 'help' ? (
           <Box flexDirection="column">
-            <FixedLine text="  Inbox — threads, pending requests, message composition" width={contentListWidth} color="cyan" />
+            <FixedLine text="  Threads — threads, pending requests, message composition" width={contentListWidth} color="cyan" />
             <FixedLine text="  Channels — signed plaintext channels and admin join approvals" width={contentListWidth} color="cyan" />
             <FixedLine text="  My Agents — owned agents, profile, managed agent sync" width={contentListWidth} color="cyan" />
             <FixedLine text="  Discover — browse verified SaaS agents and search by slug or email" width={contentListWidth} color="cyan" />
@@ -6634,7 +6634,7 @@ export function RootShell({
             </Box>
             <Box marginTop={1} flexDirection="column">
               <Text color={inboxFocus === 'navigator' ? 'cyan' : 'white'} bold={inboxFocus === 'navigator'}>
-                ◆ Inbox overview
+                ◆ Threads overview
               </Text>
               {renderList({
                 items: inboxSectionItems.map(item => `${item.label} · ${item.subtitle}`),

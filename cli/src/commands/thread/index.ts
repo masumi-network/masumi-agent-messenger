@@ -47,6 +47,8 @@ import { showCommandHelp } from '../menu';
 
 type ThreadOptions = GlobalOptions & {
   agent?: string;
+  to?: string;
+  message?: string;
   threadId?: string;
   title?: string;
   participant?: string[];
@@ -65,6 +67,7 @@ type ThreadOptions = GlobalOptions & {
   compose?: boolean;
   incoming?: boolean;
   outgoing?: boolean;
+  requestId?: string;
 };
 
 function parseOptionalInteger(value: string | undefined): number | undefined {
@@ -179,6 +182,15 @@ function renderUnreadMessageBody(
     lines.push(message.text);
   }
   return lines.join('\n  ') || '[Unable to render message]';
+}
+
+function describeMatchedActor(params: {
+  slug: string;
+  displayName: string | null;
+}): string {
+  return params.displayName?.trim()
+    ? `${params.displayName} (${params.slug})`
+    : params.slug;
 }
 
 export function registerThreadCommands(program: Command): void {
@@ -397,7 +409,6 @@ export function registerThreadCommands(program: Command): void {
 
   thread
     .command('unread')
-    .alias('latest')
     .description('Show the unread message feed for the selected agent')
     .option('--agent <slug>', 'Owned agent slug to use for unread state')
     .option('--thread-id <id>', 'Only unread messages for this thread id')
@@ -411,19 +422,6 @@ export function registerThreadCommands(program: Command): void {
       'Reveal decrypted bodies and header values even when the payload is outside the current inbox contract'
     )
     .action(async (_options, commandInstance) => {
-      // `thread latest` is kept as a deprecated alias. Emit a one-time
-      // deprecation warning when invoked under the old name so scripts
-      // migrating to `thread unread` get a soft nudge.
-      if (commandInstance.name() === 'latest' || process.argv.includes('latest')) {
-        const invokedAsLatest = process.argv
-          .slice(process.argv.indexOf(commandInstance.parent?.name() ?? 'thread'))
-          .includes('latest');
-        if (invokedAsLatest && !commandInstance.optsWithGlobals().json) {
-          process.stderr.write(
-            '[warn] `masumi-agent-messenger thread latest` is deprecated. Use `masumi-agent-messenger thread unread`.\n'
-          );
-        }
-      }
       const options = commandInstance.optsWithGlobals() as ThreadOptions;
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       if (options.watch && options.json) {
@@ -700,6 +698,154 @@ export function registerThreadCommands(program: Command): void {
             { key: 'Thread', value: `#${result.threadId}`, color: dim },
             ...(result.approvalRequired
               ? [{ key: 'Request', value: `#${result.requestId}`, color: dim }]
+              : []),
+            {
+              key: 'Content-Type',
+              value: options.contentType?.trim().length
+                ? options.contentType
+                : 'text/plain',
+              color: dim,
+            },
+            {
+              key: 'Headers',
+              value: options.header && options.header.length > 0 ? options.header.join('; ') : 'none',
+              color: dim,
+            },
+          ]),
+        }),
+      });
+    });
+
+  thread
+    .command('send')
+    .description('Send an encrypted direct message to an agent or direct thread')
+    .argument('[to]', 'Recipient agent slug or exact email')
+    .argument('[message...]', 'Plaintext message body')
+    .option('--agent <slug>', 'Owned agent slug that will send the message')
+    .option('--to <identifier>', 'Recipient agent slug or exact email')
+    .option('--message <text>', 'Plaintext message body')
+    .option('--thread-id <id>', 'Send to a specific existing direct thread id')
+    .option('--new', 'Always create a fresh direct thread before sending')
+    .option('--title <title>', 'Direct thread title to use when a new thread is created')
+    .option('--content-type <mime>', 'Encrypted message content type (defaults to text/plain)')
+    .option(
+      '--header <header>',
+      'Encrypted message header in "Name: Value" form',
+      (value: string, existing: string[] = []) => [...existing, value],
+      []
+    )
+    .option(
+      '--force-unsupported',
+      'Send even when the recipient does not advertise support for the chosen content type or headers'
+    )
+    .action(async function (
+      this: Command,
+      toArg: string | undefined,
+      messageArg: string[] | undefined
+    ) {
+      const options = this.optsWithGlobals() as ThreadOptions;
+      const to = toArg?.trim() || options.to?.trim();
+      const message = (messageArg ?? []).join(' ').trim() || options.message?.trim();
+      if (!message) {
+        throw userError('Message text is required.', {
+          code: 'SEND_MESSAGE_REQUIRED',
+        });
+      }
+
+      if (options.threadId && !to) {
+        if (options.new) {
+          throw userError('Use either `--new` or `--thread-id`, not both.', {
+            code: 'SEND_THREAD_SELECTION_CONFLICT',
+          });
+        }
+        const threadId = options.threadId;
+        await runCommandAction({
+          title: 'Masumi thread send',
+          options,
+          run: ({ reporter }) =>
+            sendMessageToThread({
+              profileName: options.profile,
+              actorSlug: options.agent,
+              threadId,
+              message,
+              contentType: options.contentType,
+              headerLines: options.header ?? [],
+              forceUnsupported: Boolean(options.forceUnsupported),
+              reporter,
+            }),
+          toHuman: result => ({
+            summary: `Sent in thread ${bold(`#${result.threadId}`)}.`,
+            details: renderKeyValue([
+              { key: 'Label', value: result.label },
+              { key: 'Agent', value: result.actorSlug, color: cyan },
+              {
+                key: 'Content-Type',
+                value: options.contentType?.trim().length
+                  ? options.contentType
+                  : 'text/plain',
+                color: dim,
+              },
+              {
+                key: 'Headers',
+                value: options.header && options.header.length > 0 ? options.header.join('; ') : 'none',
+                color: dim,
+              },
+            ]),
+          }),
+        });
+        return;
+      }
+
+      if (!to) {
+        throw userError('Recipient agent slug or email is required.', {
+          code: 'SEND_TO_REQUIRED',
+        });
+      }
+
+      await runCommandAction({
+        title: 'Masumi thread send',
+        options,
+        run: ({ reporter }) =>
+          sendMessageToSlug({
+            profileName: options.profile,
+            actorSlug: options.agent,
+            to,
+            message,
+            contentType: options.contentType,
+            headerLines: options.header ?? [],
+            forceUnsupported: Boolean(options.forceUnsupported),
+            title: options.title,
+            createNew: options.new,
+            threadId: options.threadId,
+            reporter,
+          }),
+        toHuman: result => ({
+          summary: result.approvalRequired
+            ? `Thread request sent to ${senderColor(result.to.slug)}.`
+            : result.createdDirectThread
+              ? `Sent to ${senderColor(result.to.slug)} (new thread).`
+              : `Sent to ${senderColor(result.to.slug)}.`,
+          details: renderKeyValue([
+            { key: 'To', value: result.to.displayName ?? result.to.slug, color: cyan },
+            { key: 'Thread', value: `#${result.threadId}`, color: dim },
+            ...(result.approvalRequired
+              ? [{ key: 'Request', value: `#${result.requestId}`, color: dim }]
+              : []),
+            ...(result.targetLookup.inputKind === 'email'
+              ? [
+                  { key: 'Lookup', value: result.targetLookup.input },
+                  {
+                    key: 'Matched',
+                    value: result.targetLookup.matchedActors
+                      .map(actor =>
+                        describeMatchedActor({
+                          slug: actor.slug,
+                          displayName: actor.displayName,
+                        })
+                      )
+                      .join(', '),
+                  },
+                ]
               : []),
             {
               key: 'Content-Type',
@@ -1166,17 +1312,24 @@ export function registerThreadCommands(program: Command): void {
   approval
     .command('approve')
     .description('Approve an incoming thread request')
-    .argument('<approvalId>', 'Request id, or invite:<id> for a group invite')
+    .argument('[approvalId]', 'Request id, or invite:<id> for a group invite')
     .option('--agent <slug>', 'Owned agent slug to use as context')
-    .action(async function (this: Command, approvalId: string) {
+    .option('--request-id <id>', 'Contact request id')
+    .action(async function (this: Command, approvalIdArg: string | undefined) {
       const options = this.optsWithGlobals() as ThreadOptions;
-      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
+      const approvalId = approvalIdArg ?? options.requestId;
+      if (!approvalId) {
+        throw userError('Approval id is required.', {
+          code: 'THREAD_APPROVAL_ID_REQUIRED',
+        });
+      }
       const parsedApprovalId = parseThreadApprovalId(approvalId);
       await runCommandAction({
         title: 'Masumi thread approval approve',
         options,
         run: async ({ reporter }) => {
           if (parsedApprovalId.kind === 'invite') {
+            const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
             return resolveThreadInvite({
                 profileName: options.profile,
                 reporter,
@@ -1186,6 +1339,9 @@ export function registerThreadCommands(program: Command): void {
             });
           }
 
+          const actorSlug = options.agent
+            ? await resolvePreferredAgentSlug(options.profile, options.agent)
+            : undefined;
           return resolveContactRequest({
             profileName: options.profile,
             reporter,
@@ -1207,17 +1363,24 @@ export function registerThreadCommands(program: Command): void {
   approval
     .command('reject')
     .description('Reject an incoming thread request')
-    .argument('<approvalId>', 'Request id, or invite:<id> for a group invite')
+    .argument('[approvalId]', 'Request id, or invite:<id> for a group invite')
     .option('--agent <slug>', 'Owned agent slug to use as context')
-    .action(async function (this: Command, approvalId: string) {
+    .option('--request-id <id>', 'Contact request id')
+    .action(async function (this: Command, approvalIdArg: string | undefined) {
       const options = this.optsWithGlobals() as ThreadOptions;
-      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
+      const approvalId = approvalIdArg ?? options.requestId;
+      if (!approvalId) {
+        throw userError('Approval id is required.', {
+          code: 'THREAD_APPROVAL_ID_REQUIRED',
+        });
+      }
       const parsedApprovalId = parseThreadApprovalId(approvalId);
       await runCommandAction({
         title: 'Masumi thread approval reject',
         options,
         run: async ({ reporter }) => {
           if (parsedApprovalId.kind === 'invite') {
+            const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
             return resolveThreadInvite({
                 profileName: options.profile,
                 reporter,
@@ -1227,6 +1390,9 @@ export function registerThreadCommands(program: Command): void {
             });
           }
 
+          const actorSlug = options.agent
+            ? await resolvePreferredAgentSlug(options.profile, options.agent)
+            : undefined;
           return resolveContactRequest({
             profileName: options.profile,
             reporter,

@@ -195,7 +195,7 @@ export async function requireImportedRotationKeyConfirmed(params: {
     `Rotated private keys for \`${params.identity.slug}\` were imported automatically on this CLI profile. Confirm them locally before sending.`,
     {
       code: 'IMPORTED_ROTATION_KEYS_UNCONFIRMED',
-      hint: `masumi-agent-messenger auth keys confirm --slug ${params.identity.slug}`,
+      hint: `masumi-agent-messenger account keys confirm --slug ${params.identity.slug}`,
     }
   );
 }

@@ -214,8 +214,8 @@ export async function requestDeviceShare(params: {
       code: verificationCode,
       label: 'Verification code',
       hint:
-        `Enter in trusted device CLI: masumi-agent-messenger auth device approve --code ${verificationCode}\n` +
-        'Then run `masumi-agent-messenger auth device claim` here to import the shared keys.',
+        `Enter in trusted device CLI: masumi-agent-messenger account device approve --code ${verificationCode}\n` +
+        'Then run `masumi-agent-messenger account device claim` here to import the shared keys.',
     });
     params.reporter.verbose?.(`Device ID: ${deviceMaterial.deviceId}`);
     params.reporter.verbose?.(`Code expires at ${expiresAt.toISOString()}`);
@@ -304,7 +304,7 @@ export async function claimDeviceShare(params: {
           : 0;
         if (pendingImportedRotationKeyCount > 0) {
           params.reporter.info(
-            `Rotated private keys require local confirmation before sending. Run \`masumi-agent-messenger auth keys confirm --slug ${snapshot.actors[0]?.identity.slug ?? '<slug>'}\`.`
+            `Rotated private keys require local confirmation before sending. Run \`masumi-agent-messenger account keys confirm --slug ${snapshot.actors[0]?.identity.slug ?? '<slug>'}\`.`
           );
         }
         params.reporter.clearBanner?.();

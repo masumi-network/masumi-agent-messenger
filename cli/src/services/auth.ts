@@ -252,7 +252,7 @@ function isOidcIdTokenError(error: unknown): boolean {
 }
 
 function invalidLocalSessionError(cause?: unknown) {
-  return userError('Local OIDC session is invalid. Run `masumi-agent-messenger auth login` again.', {
+  return userError('Local OIDC session is invalid. Run `masumi-agent-messenger account login` again.', {
     code: 'AUTH_REQUIRED',
     cause,
   });
@@ -569,7 +569,7 @@ export async function ensureAuthenticatedSession(params: {
   }
 
   if (!storedSession) {
-    throw userError('No local OIDC session found. Run `masumi-agent-messenger auth login` first.', {
+    throw userError('No local OIDC session found. Run `masumi-agent-messenger account login` first.', {
       code: 'AUTH_REQUIRED',
     });
   }
@@ -617,7 +617,7 @@ export async function ensureAuthenticatedSession(params: {
 
     if (!refreshed) {
       await secretStore.deleteOidcSession(profile.name);
-      throw userError('OIDC session expired. Run `masumi-agent-messenger auth login` again.', {
+      throw userError('OIDC session expired. Run `masumi-agent-messenger account login` again.', {
         code: 'AUTH_REQUIRED',
       });
     }

@@ -147,10 +147,10 @@ Server-only files (`*.server.ts`) must not be imported from client components.
 2. New keypair generated locally.
 3. New `threadSecretEnvelope` rows created for each participant, wrapping the new secret under each recipient's current public key.
 4. Subsequent messages use the new `secretVersion`.
-5. When rotated private keys are shared to another approved device, that device imports them automatically but marks them pending local confirmation before sending. Web users can confirm in the composer guard; CLI/automation users run `masumi-agent-messenger auth keys confirm --slug <slug> --json`.
+5. When rotated private keys are shared to another approved device, that device imports them automatically but marks them pending local confirmation before sending. Web users can confirm in the composer guard; CLI/automation users run `masumi-agent-messenger account keys confirm --slug <slug> --json`.
 
 ### Device key sharing
-1. New device calls `auth device request` (CLI) or triggers the share flow in the webapp.
+1. New device calls `account device request` (CLI) or triggers the share flow in the webapp.
 2. Existing trusted device approves using the verification code.
 3. Encrypted key bundle is deposited into `deviceKeyBundle`.
 4. New device claims the bundle and imports keys locally.

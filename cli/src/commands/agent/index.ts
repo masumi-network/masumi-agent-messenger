@@ -1,5 +1,7 @@
 import type { Command } from 'commander';
 import { getMasumiInboxAgentNetwork } from '../../../../shared/inbox-agent-registration';
+import { normalizeInboxSlug } from '../../../../shared/inbox-slug';
+import { ensureAuthenticatedSession } from '../../services/auth';
 import {
   getOwnedAgentProfile,
   listOwnedAgents,
@@ -17,6 +19,14 @@ import {
   removeContactAllowlist,
 } from '../../services/contact-management';
 import { userError } from '../../services/errors';
+import {
+  confirmPeerKeyRotation,
+  listTrustedPeers,
+  loadPeerKeyTrustStore,
+  unpinPeerKeys,
+  type PeerKeyTuple,
+} from '../../services/peer-key-trust';
+import { resolvePublishedActorLookup } from '../../services/published-actor-lookup';
 import {
   createInboxIdentity,
   deregisterInboxAgent,
@@ -41,9 +51,14 @@ import {
   renderEmptyWithTry,
   renderKeyValue,
   renderTable,
+  senderColor,
   yellow,
   type TableColumn,
 } from '../../services/render';
+import {
+  connectAuthenticated,
+  disconnectConnection,
+} from '../../services/spacetimedb';
 import { isInteractiveHumanMode } from '../menu';
 import { showCommandHelp } from '../menu';
 
@@ -95,6 +110,8 @@ type AgentRotateOptions = AgentContextOptions & {
 
 type AgentMessageMutateOptions = AgentContextOptions;
 
+type AgentTrustOptions = GlobalOptions;
+
 function normalizeLinkedEmailVisibility(
   value: string | undefined
 ): boolean | undefined {
@@ -124,6 +141,44 @@ function splitAllowlistIdentifier(identifier: string): { agent?: string; email?:
 
   const normalized = trimmed.toLowerCase();
   return normalized.includes('@') ? { email: normalized } : { agent: normalized };
+}
+
+async function resolvePublishedPeer(params: {
+  profileName: string;
+  target: string;
+}): Promise<{ publicIdentity: string; slug: string; tuple: PeerKeyTuple }> {
+  const { profile, session } = await ensureAuthenticatedSession(params);
+  const { conn } = await connectAuthenticated({
+    host: profile.spacetimeHost,
+    databaseName: profile.spacetimeDbName,
+    sessionToken: session.idToken,
+  });
+
+  try {
+    const lookup = await resolvePublishedActorLookup({
+      identifier: params.target,
+      lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
+      lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+      invalidMessage: 'Peer slug or email is invalid.',
+      invalidCode: 'INVALID_PEER_IDENTIFIER',
+      notFoundCode: 'PEER_NOT_FOUND',
+      fallbackMessage: 'No published agent found for that slug or email.',
+    });
+    const target = lookup.selected;
+
+    return {
+      publicIdentity: target.publicIdentity,
+      slug: target.slug,
+      tuple: {
+        encryptionPublicKey: target.encryptionPublicKey,
+        encryptionKeyVersion: target.encryptionKeyVersion,
+        signingPublicKey: target.signingPublicKey,
+        signingKeyVersion: target.signingKeyVersion,
+      },
+    };
+  } finally {
+    disconnectConnection(conn);
+  }
 }
 
 function formatMessageCapabilitiesList(
@@ -318,7 +373,7 @@ export function registerAgentCommands(program: Command): void {
                 ? `${bold(String(result.agents.length))} owned agent${
                     result.agents.length === 1 ? '' : 's'
                   }.`
-                : renderEmptyWithTry('No owned agents found.', 'masumi-agent-messenger auth sync'),
+                : renderEmptyWithTry('No owned agents found.', 'masumi-agent-messenger account sync'),
             details:
               result.agents.length === 0
                 ? []
@@ -1080,6 +1135,144 @@ export function registerAgentCommands(program: Command): void {
       });
     });
 
+  const trust = agent
+    .command('trust')
+    .description('Manage pinned peer key trust');
+  trust.action((_options, commandInstance) => {
+    showCommandHelp(commandInstance);
+  });
+
+  trust
+    .command('list')
+    .description('List peers with pinned key tuples')
+    .action(async (_options, commandInstance) => {
+      const options = commandInstance.optsWithGlobals() as AgentTrustOptions;
+      await runCommandAction({
+        title: 'Masumi agent trust list',
+        options,
+        run: async () => {
+          const peers = await listTrustedPeers();
+          return {
+            total: peers.length,
+            peers: peers.map(entry => ({
+              publicIdentity: entry.publicIdentity,
+              pinnedAt: entry.pinnedAt,
+              currentEncryptionKeyVersion: entry.current.encryptionKeyVersion,
+              currentSigningKeyVersion: entry.current.signingKeyVersion,
+              historicalVersions: entry.history.length,
+            })),
+          };
+        },
+        toHuman: result => {
+          if (result.total === 0) {
+            return {
+              summary: renderEmptyWithTry(
+                'No pinned peers yet.',
+                'masumi-agent-messenger agent trust pin <slug>'
+              ),
+              details: [],
+            };
+          }
+          return {
+            summary: `${bold(String(result.total))} pinned peer${result.total === 1 ? '' : 's'}.`,
+            details: renderTable(
+              result.peers.map(peer => ({
+                publicIdentity: peer.publicIdentity,
+                encryption: peer.currentEncryptionKeyVersion,
+                signing: peer.currentSigningKeyVersion,
+                historical: String(peer.historicalVersions),
+                pinned: peer.pinnedAt,
+              })),
+              [
+                { header: 'Peer', key: 'publicIdentity', color: cyan },
+                { header: 'Encryption key', key: 'encryption', color: senderColor },
+                { header: 'Signing key', key: 'signing', color: senderColor },
+                { header: 'History', key: 'historical' },
+                { header: 'Pinned at', key: 'pinned' },
+              ]
+            ),
+          };
+        },
+      });
+    });
+
+  trust
+    .command('pin')
+    .description('Pin a peer\'s current keys; rotated keys are accepted automatically')
+    .argument('<slug>', 'Peer agent slug')
+    .action(async function (this: Command, slug: string) {
+      const options = this.optsWithGlobals() as AgentTrustOptions;
+      const normalized = normalizeInboxSlug(slug);
+      if (!normalized) {
+        throw userError('Peer slug is invalid.', { code: 'INVALID_PEER_IDENTIFIER' });
+      }
+      await runCommandAction({
+        title: `Masumi agent trust pin ${normalized}`,
+        options,
+        run: async () => {
+          const resolved = await resolvePublishedPeer({
+            profileName: options.profile,
+            target: normalized,
+          });
+          const store = await loadPeerKeyTrustStore();
+          const existing = store.peers[resolved.publicIdentity];
+          const status: 'first-pin' | 'updated' | 'unchanged' = !existing
+            ? 'first-pin'
+            : existing.current.encryptionKeyVersion === resolved.tuple.encryptionKeyVersion &&
+                existing.current.signingKeyVersion === resolved.tuple.signingKeyVersion &&
+                existing.current.encryptionPublicKey === resolved.tuple.encryptionPublicKey &&
+                existing.current.signingPublicKey === resolved.tuple.signingPublicKey
+              ? 'unchanged'
+              : 'updated';
+          await confirmPeerKeyRotation(resolved.publicIdentity, resolved.tuple);
+          return {
+            slug: resolved.slug,
+            publicIdentity: resolved.publicIdentity,
+            encryptionKeyVersion: resolved.tuple.encryptionKeyVersion,
+            signingKeyVersion: resolved.tuple.signingKeyVersion,
+            status,
+          };
+        },
+        toHuman: result => ({
+          summary:
+            result.status === 'first-pin'
+              ? `Pinned ${bold(result.slug)} keys (encryption ${result.encryptionKeyVersion}, signing ${result.signingKeyVersion}).`
+              : result.status === 'updated'
+                ? `Updated rotated keys for ${bold(result.slug)}.`
+                : `${bold(result.slug)} keys were already pinned; no change.`,
+          details: [],
+        }),
+      });
+    });
+
+  trust
+    .command('reset')
+    .description('Remove a peer from the pinned trust store')
+    .argument('<slug>', 'Peer agent slug')
+    .action(async function (this: Command, slug: string) {
+      const options = this.optsWithGlobals() as AgentTrustOptions;
+      const normalized = normalizeInboxSlug(slug);
+      if (!normalized) {
+        throw userError('Peer slug is invalid.', { code: 'INVALID_PEER_IDENTIFIER' });
+      }
+      await runCommandAction({
+        title: `Masumi agent trust reset ${normalized}`,
+        options,
+        run: async () => {
+          const resolved = await resolvePublishedPeer({
+            profileName: options.profile,
+            target: normalized,
+          });
+          const removed = await unpinPeerKeys(resolved.publicIdentity);
+          return { slug: resolved.slug, removed };
+        },
+        toHuman: result =>
+          result.removed
+            ? { summary: `Removed ${bold(result.slug)} from pinned peers.`, details: [] }
+            : { summary: `${bold(result.slug)} was not pinned; nothing changed.`, details: [] },
+      });
+    });
+
   const key = agent.command('key').description('Owned agent key-management commands');
   key.action((_options, commandInstance) => {
     showCommandHelp(commandInstance);
@@ -1088,7 +1281,7 @@ export function registerAgentCommands(program: Command): void {
   key
     .command('rotate')
     .description('Rotate agent encryption and signing keys')
-    .argument('[slug]', 'Owned agent slug (defaults to the active agent)')
+    .argument('[slug]', 'Owned agent slug to rotate (required unless --agent is set)')
     .option('--agent <slug>', 'Owned agent slug whose keys should rotate')
     .option(
       '--share-device <id>',
@@ -1104,8 +1297,15 @@ export function registerAgentCommands(program: Command): void {
     )
     .action(async function (this: Command, slugArg: string | undefined) {
       const options = this.optsWithGlobals() as AgentRotateOptions;
-      const actorSlug =
-        (slugArg ?? options.agent) ?? (await resolvePreferredAgentSlug(options.profile));
+      const actorSlug = (slugArg ?? options.agent)?.trim();
+      if (!actorSlug) {
+        throw userError(
+          'Agent slug is required for key rotation. Pass `masumi-agent-messenger agent key rotate <slug>` or `--agent <slug>`.',
+          {
+            code: 'AGENT_KEY_ROTATE_SLUG_REQUIRED',
+          }
+        );
+      }
       await runCommandAction({
         title: 'Masumi agent key rotate',
         options,
@@ -1127,7 +1327,7 @@ export function registerAgentCommands(program: Command): void {
             reporter.info(
               `Impacted devices: ${revokeDeviceIds.map(d => cyan(d)).join(', ')}`
             );
-            reporter.info(`Backup reminder: masumi-agent-messenger auth backup export`);
+            reporter.info(`Backup reminder: masumi-agent-messenger account backup export`);
           }
 
           const result = await rotateInboxKeys({
@@ -1163,7 +1363,7 @@ export function registerAgentCommands(program: Command): void {
                   },
                   {
                     key: 'Backup reminder',
-                    value: 'Run `masumi-agent-messenger auth backup export` before revoking more devices.',
+                    value: 'Run `masumi-agent-messenger account backup export` before revoking more devices.',
                     color: yellow,
                   },
                 ]

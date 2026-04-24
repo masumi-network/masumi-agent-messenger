@@ -510,7 +510,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Your sign-in session expired or was revoked. Run `masumi-agent-messenger auth login` again.',
+      message: 'Your sign-in session expired or was revoked. Run `masumi-agent-messenger account login` again.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
@@ -547,7 +547,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger auth login` again.',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` again.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
@@ -572,7 +572,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger auth login` again.',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` again.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
@@ -591,7 +591,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger auth login` again.',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` again.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');

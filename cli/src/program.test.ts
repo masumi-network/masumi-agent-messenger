@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import type { Command } from 'commander';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createEmptyMasumiRegistrationResult } from '../../shared/inbox-agent-registration';
 import type {
@@ -177,10 +178,44 @@ async function loadProgramWithMocks(params: {
   const login = vi.fn(async () => params.loginResult ?? makeAuthenticatedInboxResult());
   const startLogin = vi.fn(async () => makePendingDeviceLoginResult());
   const waitForLogin = vi.fn(async () => params.waitResult ?? makeAuthenticatedInboxResult());
+  const bootstrapInbox = vi.fn(async () => makeAuthenticatedInboxResult());
+  const inboxStatus = vi.fn(async () => ({
+    authenticated: true,
+    connected: true,
+    inbox: {
+      id: '1',
+      normalizedEmail: 'agent@example.com',
+      displayEmail: 'agent@example.com',
+    },
+    actor: {
+      id: '1',
+      slug: 'agent',
+      publicIdentity: 'agent',
+      displayName: 'Agent',
+    },
+    agentRegistration: createEmptyMasumiRegistrationResult(),
+    keyVersions: {
+      encryption: 'enc-v1',
+      signing: 'sig-v1',
+    },
+    profile: 'default',
+  }));
+  const promptText = vi.fn(async (input: { defaultValue?: string }) => input.defaultValue ?? 'prompt-value');
+  const promptMultiline = vi.fn(async () => '');
+  const promptSecret = vi.fn(async () => 'secret');
+  const confirmYesNo = vi.fn(async () => true);
+  const promptChoice = vi.fn(async (input: { defaultValue?: string }) => input.defaultValue ?? 'device_share');
+  const waitForEnterMessage = vi.fn(async () => {});
   const logout = vi.fn(async () => ({
     authenticated: false as const,
     cleared: true as const,
     profile: 'default',
+  }));
+  const removeLocalKeys = vi.fn(async () => ({
+    profile: 'default',
+    removedAgentKeys: 1,
+    removedNamespaceVault: true,
+    removedDeviceKeyMaterial: true,
   }));
   const ensureAuthenticatedSession = vi.fn(async () => ({
     profile: {
@@ -212,6 +247,25 @@ async function loadProgramWithMocks(params: {
       },
     },
     registration: createEmptyMasumiRegistrationResult(),
+  }));
+  const rotateInboxKeys = vi.fn(async (input: {
+    actorSlug?: string;
+    shareDeviceIds?: string[];
+    revokeDeviceIds?: string[];
+  }) => ({
+    profile: 'default',
+    actor: {
+      slug: input.actorSlug ?? 'agent',
+    },
+    sharedDeviceIds: input.shareDeviceIds ?? [],
+    revokedDeviceIds: input.revokeDeviceIds ?? [],
+  }));
+  const resolveRotationDeviceSelection = vi.fn(async (input: {
+    explicitShareDeviceIds?: string[];
+    explicitRevokeDeviceIds?: string[];
+  }) => ({
+    shareDeviceIds: input.explicitShareDeviceIds ?? [],
+    revokeDeviceIds: input.explicitRevokeDeviceIds ?? [],
   }));
 
   const resolvePreferredAgentSlug = vi.fn(
@@ -436,11 +490,24 @@ async function loadProgramWithMocks(params: {
     action: input.action,
     slug: 'support-bot',
   }));
+  const resolveThreadInvite = vi.fn(async (input: { inviteId: string; action: string }) => ({
+    profile: 'default',
+    inviteId: input.inviteId,
+    action: input.action,
+    slug: 'support-bot',
+    threadId: '42',
+  }));
   const listContactRequests = vi.fn(async () => ({
     profile: 'default',
     slug: 'agent',
     total: 0,
     requests: [],
+  }));
+  const listThreadInvites = vi.fn(async () => ({
+    profile: 'default',
+    slug: 'agent',
+    total: 0,
+    invites: [],
   }));
   const listContactAllowlist = vi.fn(async () => ({
     profile: 'default',
@@ -632,10 +699,32 @@ async function loadProgramWithMocks(params: {
     peers: {},
   }));
   const unpinPeerKeys = vi.fn(async () => true);
+  const confirmCurrentImportedRotationKey = vi.fn(async () => ({
+    profile: 'default',
+    slug: 'support-bot',
+    publicIdentity: 'support-bot:public-identity',
+    previousStatus: 'pending' as const,
+    confirmedAt: '2026-04-18T00:00:00.000Z',
+    encryptionKeyVersion: 'enc-v1',
+    signingKeyVersion: 'sig-v1',
+  }));
 
   vi.doMock('./services/command-runtime', () => ({
     runCommandAction,
   }));
+
+  vi.doMock('./services/prompts', async importOriginal => {
+    const actual = await importOriginal<typeof import('./services/prompts')>();
+    return {
+      ...actual,
+      confirmYesNo,
+      promptChoice,
+      promptMultiline,
+      promptSecret,
+      promptText,
+      waitForEnterMessage,
+    };
+  });
 
   vi.doMock('./commands/root-shell', () => ({
     runRootShell,
@@ -650,10 +739,24 @@ async function loadProgramWithMocks(params: {
       startLogin,
       waitForLogin,
       logout,
+      removeLocalKeys,
       ensureAuthenticatedSession,
       requestVerificationEmailForIssuer,
     };
   });
+
+  vi.doMock('./services/inbox', async importOriginal => {
+    const actual = await importOriginal<typeof import('./services/inbox')>();
+    return {
+      ...actual,
+      bootstrapInbox,
+      inboxStatus,
+    };
+  });
+
+  vi.doMock('./services/imported-rotation-key-confirmation', () => ({
+    confirmCurrentImportedRotationKey,
+  }));
 
   vi.doMock('./services/spacetimedb', () => ({
     connectAnonymous,
@@ -680,8 +783,13 @@ async function loadProgramWithMocks(params: {
     return {
       ...actual,
       createInboxIdentity,
+      rotateInboxKeys,
     };
   });
+
+  vi.doMock('./services/key-rotation-device-selection', () => ({
+    resolveRotationDeviceSelection,
+  }));
 
   vi.doMock('./services/agent-state', () => ({
     resolvePreferredAgentSlug,
@@ -720,7 +828,9 @@ async function loadProgramWithMocks(params: {
     return {
       ...actual,
       resolveContactRequest,
+      resolveThreadInvite,
       listContactRequests,
+      listThreadInvites,
       listContactAllowlist,
       addContactAllowlist,
       removeContactAllowlist,
@@ -760,10 +870,21 @@ async function loadProgramWithMocks(params: {
       login,
       startLogin,
       waitForLogin,
+      bootstrapInbox,
+      inboxStatus,
+      promptText,
+      promptMultiline,
+      promptSecret,
+      confirmYesNo,
+      promptChoice,
+      waitForEnterMessage,
       logout,
+      removeLocalKeys,
       ensureAuthenticatedSession,
       requestVerificationEmailForIssuer,
       createInboxIdentity,
+      rotateInboxKeys,
+      resolveRotationDeviceSelection,
       resolvePreferredAgentSlug,
       useOwnedAgent,
       listOwnedAgents,
@@ -774,6 +895,8 @@ async function loadProgramWithMocks(params: {
       sendMessageToSlug,
       sendMessageToThread,
       resolveContactRequest,
+      resolveThreadInvite,
+      listThreadInvites,
       listContactAllowlist,
       addContactAllowlist,
       removeContactAllowlist,
@@ -807,8 +930,10 @@ async function loadProgramWithMocks(params: {
       comparePinnedPeer,
       confirmPeerKeyRotation,
       isInboundSignatureTrusted,
+      listTrustedPeers,
       loadPeerKeyTrustStore,
       unpinPeerKeys,
+      confirmCurrentImportedRotationKey,
     },
   };
 }
@@ -853,7 +978,6 @@ describe('CLI help', () => {
     expect(help).toContain('discover');
     expect(help).not.toContain('\nauth');
     expect(help).not.toContain('\ninbox');
-    expect(help).not.toContain('\nthread');
   });
 
   it('shows the account help', async () => {
@@ -865,6 +989,7 @@ describe('CLI help', () => {
     expect(help).toContain('verification');
     expect(help).toContain('device');
     expect(help).toContain('backup');
+    expect(help).toContain('keys');
     expect(help).toContain('sync');
     expect(help).toContain('recover');
     expect(help).toContain('logout');
@@ -883,6 +1008,7 @@ describe('CLI help', () => {
     expect(help).toContain('message');
     expect(help).toContain('network');
     expect(help).toContain('allowlist');
+    expect(help).toContain('trust');
     expect(help).toContain('key');
   });
 
@@ -894,8 +1020,9 @@ describe('CLI help', () => {
     expect(help).toContain('list');
     expect(help).toContain('show');
     expect(help).toContain('count');
-    expect(help).toContain('latest');
+    expect(help).toContain('unread');
     expect(help).toContain('start');
+    expect(help).toContain('send');
     expect(help).toContain('reply');
     expect(help).toContain('group');
     expect(help).toContain('participant');
@@ -922,7 +1049,7 @@ describe('CLI help', () => {
     expect(help).toContain('show');
     expect(help).toContain('messages');
     expect(help).toContain('create');
-    expect(help).toContain('add');
+    expect(help).not.toContain(' add ');
     expect(help).toContain('join');
     expect(help).toContain('request');
     expect(help).toContain('approvals');
@@ -954,29 +1081,26 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('parses auth code complete polling codes from --polling-code', async () => {
+  it('parses account login start device-code flow', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await buildProgram().parseAsync([
       'node',
       'masumi-agent-messenger',
       '--json',
-      'auth',
-      'code',
-      'complete',
-      '--polling-code',
-      'polling-456',
+      'account',
+      'login',
+      'start',
     ]);
 
-    expect(mocks.waitForLogin).toHaveBeenCalledWith(
+    expect(mocks.startLogin).toHaveBeenCalledWith(
       expect.objectContaining({
-        pollingCode: 'polling-456',
         profileName: 'default',
       })
     );
   });
 
-  it('uses prompt registration for auth code complete in an interactive TTY', async () => {
+  it('uses prompt registration for account login complete in an interactive TTY', async () => {
     const restoreTty = setInteractiveTty(true);
 
     try {
@@ -985,8 +1109,8 @@ describe('CLI command parsing', () => {
       await buildProgram().parseAsync([
         'node',
         'masumi-agent-messenger',
-        'auth',
-        'code',
+        'account',
+        'login',
         'complete',
         '--polling-code',
         'polling-interactive',
@@ -1003,7 +1127,7 @@ describe('CLI command parsing', () => {
     }
   });
 
-  it('uses automatic auth registration when stdin is not interactive', async () => {
+  it('uses automatic account registration when stdin is not interactive', async () => {
     const restoreTty = setTtyStreams({
       stdin: false,
       stdout: true,
@@ -1016,8 +1140,8 @@ describe('CLI command parsing', () => {
       await buildProgram().parseAsync([
         'node',
         'masumi-agent-messenger',
-        'auth',
-        'code',
+        'account',
+        'login',
         'complete',
         '--polling-code',
         'polling-noninteractive',
@@ -1034,7 +1158,7 @@ describe('CLI command parsing', () => {
     }
   });
 
-  it('uses automatic account registration when stdin is not interactive', async () => {
+  it('preserves automatic account registration with global flags', async () => {
     const restoreTty = setTtyStreams({
       stdin: false,
       stdout: true,
@@ -1075,6 +1199,146 @@ describe('CLI command parsing', () => {
       code: 'POLLING_CODE_REQUIRED',
     });
     expect(mocks.waitForLogin).not.toHaveBeenCalled();
+  });
+
+  it('parses account status --live as the live inbox status replacement', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'account',
+      'status',
+      '--live',
+      '--public-description',
+      'Live status profile',
+    ]);
+
+    expect(mocks.inboxStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        registrationMode: 'auto',
+        desiredLinkedEmailVisibility: true,
+        desiredPublicDescription: 'Live status profile',
+      })
+    );
+    expect(mocks.authStatus).not.toHaveBeenCalled();
+  });
+
+  it('preserves account sync display-name bootstrap input', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'account',
+      'sync',
+      '--display-name',
+      'Default Agent',
+    ]);
+
+    expect(mocks.bootstrapInbox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        displayName: 'Default Agent',
+        registrationMode: 'auto',
+      })
+    );
+  });
+
+  it('preserves the interactive account sync default slug prompt', async () => {
+    const restoreTty = setInteractiveTty(true);
+
+    try {
+      const { buildProgram, mocks } = await loadProgramWithMocks();
+
+      await buildProgram().parseAsync([
+        'node',
+        'masumi-agent-messenger',
+        'account',
+        'sync',
+      ]);
+
+      type BootstrapCall = {
+        confirmDefaultSlug?: (params: {
+          normalizedEmail: string;
+          suggestedSlug: string;
+        }) => Promise<string | { slug: string; publicDescription?: string | null }>;
+        registrationMode?: string;
+      };
+      const bootstrapCalls = mocks.bootstrapInbox.mock.calls as unknown as Array<[BootstrapCall]>;
+      const bootstrapCall = bootstrapCalls[0]?.[0];
+      expect(bootstrapCall).toEqual(expect.objectContaining({
+        registrationMode: 'prompt',
+        confirmDefaultSlug: expect.any(Function),
+      }));
+
+      mocks.promptText.mockResolvedValueOnce('custom-agent');
+      mocks.promptMultiline.mockResolvedValueOnce('Custom public description');
+      const result = await bootstrapCall?.confirmDefaultSlug?.({
+        normalizedEmail: 'agent@example.com',
+        suggestedSlug: 'agent',
+      });
+
+      expect(mocks.promptText).toHaveBeenCalledWith({
+        question: 'Public agent slug for agent@example.com',
+        defaultValue: 'agent',
+      });
+      expect(mocks.promptMultiline).toHaveBeenCalledWith({
+        question: 'Public description for /custom-agent (optional).',
+        doneMessage: 'Press Enter on an empty line to skip or finish.',
+      });
+      expect(result).toEqual({
+        slug: 'custom-agent',
+        publicDescription: 'Custom public description',
+      });
+    } finally {
+      restoreTty();
+    }
+  });
+
+  it('parses account keys confirm with an explicit slug', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'account',
+      'keys',
+      'confirm',
+      '--slug',
+      'support-bot',
+    ]);
+
+    expect(mocks.confirmCurrentImportedRotationKey).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'support-bot',
+      })
+    );
+  });
+
+  it('parses account keys remove with non-interactive confirmation', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'account',
+      'keys',
+      'remove',
+      '--yes',
+    ]);
+
+    expect(mocks.removeLocalKeys).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+      })
+    );
   });
 
   it('parses agent create positional slugs', async () => {
@@ -1216,6 +1480,123 @@ describe('CLI command parsing', () => {
     );
   });
 
+  it('parses thread send positional targets with explicit agent context', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'thread',
+      'send',
+      'support-bot',
+      'hello',
+      'there',
+      '--agent',
+      'deploy-agent',
+    ]);
+
+    expect(mocks.sendMessageToSlug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'support-bot',
+        message: 'hello there',
+        actorSlug: 'deploy-agent',
+        profileName: 'default',
+      })
+    );
+  });
+
+  it('parses thread send --to, --message, content type, and headers', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'thread',
+      'send',
+      '--to',
+      'support@example.com',
+      '--message',
+      '{"ok":true}',
+      '--content-type',
+      'application/json',
+      '--header',
+      'X-Workflow: deploy',
+      '--header',
+      'X-Trace: 123',
+      '--force-unsupported',
+    ]);
+
+    expect(mocks.sendMessageToSlug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'support@example.com',
+        message: '{"ok":true}',
+        contentType: 'application/json',
+        headerLines: ['X-Workflow: deploy', 'X-Trace: 123'],
+        forceUnsupported: true,
+      })
+    );
+  });
+
+  it('parses thread send --thread-id with a validated target', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'thread',
+      'send',
+      'support-bot',
+      'validated',
+      '--thread-id',
+      '42',
+      '--title',
+      'Support',
+      '--new',
+    ]);
+
+    expect(mocks.sendMessageToSlug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'support-bot',
+        message: 'validated',
+        threadId: '42',
+        title: 'Support',
+        createNew: true,
+      })
+    );
+    expect(mocks.sendMessageToThread).not.toHaveBeenCalled();
+  });
+
+  it('parses thread send --thread-id without a target as a direct thread send', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'thread',
+      'send',
+      '--thread-id',
+      '42',
+      '--message',
+      'reply by id',
+      '--agent',
+      'deploy-agent',
+    ]);
+
+    expect(mocks.sendMessageToThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: '42',
+        message: 'reply by id',
+        actorSlug: 'deploy-agent',
+        profileName: 'default',
+      })
+    );
+    expect(mocks.sendMessageToSlug).not.toHaveBeenCalled();
+  });
+
   it('parses thread count with explicit agent context', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
@@ -1309,33 +1690,6 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('parses channel add as a create alias', async () => {
-    const { buildProgram, mocks } = await loadProgramWithMocks();
-
-    await buildProgram().parseAsync([
-      'node',
-      'masumi-agent-messenger',
-      '--json',
-      'channel',
-      'add',
-      'release-room',
-      '--agent',
-      'deploy-agent',
-      '--approval-required',
-    ]);
-
-    expect(mocks.createChannel).toHaveBeenCalledWith(
-      expect.objectContaining({
-        profileName: 'default',
-        actorSlug: 'deploy-agent',
-        slug: 'release-room',
-        accessMode: 'approval_required',
-        publicJoinPermission: 'read',
-        discoverable: true,
-      })
-    );
-  });
-
   it('parses channel update settings', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
@@ -1349,7 +1703,7 @@ describe('CLI command parsing', () => {
       '--agent',
       'deploy-agent',
       '--public',
-      '--default-join-permission',
+      '--public-join-permission',
       'read_write',
       '--discoverable',
     ]);
@@ -1442,14 +1796,14 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('parses the plural channels alias for sending', async () => {
+  it('parses channel send', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await buildProgram().parseAsync([
       'node',
       'masumi-agent-messenger',
       '--json',
-      'channels',
+      'channel',
       'send',
       'release-room',
       'ship',
@@ -1471,15 +1825,15 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('parses inbox request approvals without requiring inbox slug context', async () => {
+  it('parses thread approval contact requests without requiring agent context', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await buildProgram().parseAsync([
       'node',
       'masumi-agent-messenger',
       '--json',
-      'inbox',
-      'request',
+      'thread',
+      'approval',
       'approve',
       '--request-id',
       '42',
@@ -1491,17 +1845,18 @@ describe('CLI command parsing', () => {
         action: 'approve',
       })
     );
+    expect(mocks.resolvePreferredAgentSlug).not.toHaveBeenCalled();
   });
 
-  it('accepts the request id format printed by inbox request list', async () => {
+  it('accepts the request id format printed by thread approval list', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await buildProgram().parseAsync([
       'node',
       'masumi-agent-messenger',
       '--json',
-      'inbox',
-      'request',
+      'thread',
+      'approval',
       'reject',
       '--request-id',
       '#42',
@@ -1560,14 +1915,104 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('pins first-contact inbox trust without --force', async () => {
+  it('requires an explicit agent slug for agent key rotation', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await expect(
+      buildProgram().parseAsync([
+        'node',
+        'masumi-agent-messenger',
+        '--json',
+        'agent',
+        'key',
+        'rotate',
+      ])
+    ).rejects.toMatchObject({
+      code: 'AGENT_KEY_ROTATE_SLUG_REQUIRED',
+    });
+
+    expect(mocks.resolvePreferredAgentSlug).not.toHaveBeenCalled();
+    expect(mocks.rotateInboxKeys).not.toHaveBeenCalled();
+  });
+
+  it('parses agent key rotation with an explicit slug', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await buildProgram().parseAsync([
       'node',
       'masumi-agent-messenger',
       '--json',
-      'inbox',
+      'agent',
+      'key',
+      'rotate',
+      'support-bot',
+      '--share-device',
+      'device-a',
+      '--revoke-device',
+      'device-b',
+    ]);
+
+    expect(mocks.resolveRotationDeviceSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        explicitShareDeviceIds: ['device-a'],
+        explicitRevokeDeviceIds: ['device-b'],
+      })
+    );
+    expect(mocks.rotateInboxKeys).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'support-bot',
+        shareDeviceIds: ['device-a'],
+        revokeDeviceIds: ['device-b'],
+      })
+    );
+  });
+
+  it('parses agent key rotation with an explicit --agent selector', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'agent',
+      'key',
+      'rotate',
+      '--agent',
+      'support-bot',
+    ]);
+
+    expect(mocks.rotateInboxKeys).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorSlug: 'support-bot',
+      })
+    );
+  });
+
+  it('lists pinned agent trust entries', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'agent',
+      'trust',
+      'list',
+    ]);
+
+    expect(mocks.listTrustedPeers).toHaveBeenCalledTimes(1);
+  });
+
+  it('pins first-contact agent trust without --force', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'agent',
       'trust',
       'pin',
       'Support-Bot',
@@ -1584,7 +2029,7 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('accepts rotated inbox trust keys without --force', async () => {
+  it('accepts rotated agent trust keys without --force', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
     mocks.loadPeerKeyTrustStore.mockResolvedValueOnce({
       version: 1,
@@ -1607,7 +2052,7 @@ describe('CLI command parsing', () => {
       'node',
       'masumi-agent-messenger',
       '--json',
-      'inbox',
+      'agent',
       'trust',
       'pin',
       'Support-Bot',
@@ -1622,53 +2067,14 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('accepts --force for rotated inbox trust keys as compatibility', async () => {
-    const { buildProgram, mocks } = await loadProgramWithMocks();
-    mocks.loadPeerKeyTrustStore.mockResolvedValueOnce({
-      version: 1,
-      peers: {
-        'support-bot:public-identity': {
-          publicIdentity: 'support-bot:public-identity',
-          pinnedAt: '2026-04-18T00:00:00.000Z',
-          current: {
-            encryptionPublicKey: 'old-enc-public-key',
-            encryptionKeyVersion: 'old-enc-v1',
-            signingPublicKey: 'old-sig-public-key',
-            signingKeyVersion: 'old-sig-v1',
-          },
-          history: [],
-        },
-      },
-    });
-
-    await buildProgram().parseAsync([
-      'node',
-      'masumi-agent-messenger',
-      '--json',
-      'inbox',
-      'trust',
-      'pin',
-      '--force',
-      'Support-Bot',
-    ]);
-
-    expect(mocks.confirmPeerKeyRotation).toHaveBeenCalledWith(
-      'support-bot:public-identity',
-      expect.objectContaining({
-        encryptionKeyVersion: 'enc-v1',
-        signingKeyVersion: 'sig-v1',
-      })
-    );
-  });
-
-  it('resets pinned inbox trust by resolved public identity', async () => {
+  it('resets pinned agent trust by resolved public identity', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await buildProgram().parseAsync([
       'node',
       'masumi-agent-messenger',
       '--json',
-      'inbox',
+      'agent',
       'trust',
       'reset',
       'Support-Bot',
@@ -1679,6 +2085,106 @@ describe('CLI command parsing', () => {
     });
     expect(mocks.unpinPeerKeys).toHaveBeenCalledWith('support-bot:public-identity');
     expect(mocks.disconnectConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects removed legacy command paths and options', async () => {
+    const { buildProgram } = await loadProgramWithMocks();
+    const removedArgv = [
+      ['node', 'masumi-agent-messenger', 'auth', 'login'],
+      ['node', 'masumi-agent-messenger', 'auth', 'code', 'start'],
+      [
+        'node',
+        'masumi-agent-messenger',
+        'auth',
+        'code',
+        'complete',
+        '--polling-code',
+        'polling-code',
+      ],
+      ['node', 'masumi-agent-messenger', 'auth', 'resend-verification'],
+      ['node', 'masumi-agent-messenger', 'auth', 'sync'],
+      ['node', 'masumi-agent-messenger', 'auth', 'recover'],
+      ['node', 'masumi-agent-messenger', 'auth', 'status'],
+      ['node', 'masumi-agent-messenger', 'auth', 'logout'],
+      ['node', 'masumi-agent-messenger', 'auth', 'device', 'request'],
+      ['node', 'masumi-agent-messenger', 'auth', 'device', 'claim'],
+      ['node', 'masumi-agent-messenger', 'auth', 'device', 'approve'],
+      ['node', 'masumi-agent-messenger', 'auth', 'device', 'list'],
+      ['node', 'masumi-agent-messenger', 'auth', 'device', 'revoke'],
+      ['node', 'masumi-agent-messenger', 'auth', 'backup', 'export'],
+      ['node', 'masumi-agent-messenger', 'auth', 'backup', 'import'],
+      ['node', 'masumi-agent-messenger', 'auth', 'keys', 'confirm', '--slug', 'support-bot'],
+      ['node', 'masumi-agent-messenger', 'auth', 'keys-remove'],
+      ['node', 'masumi-agent-messenger', 'auth', 'rotate'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'create', 'support-bot'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'list'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'status'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'bootstrap'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'send', 'support-bot', 'hi'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'latest'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'agent', 'register'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'agent', 'deregister'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'public', 'show'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'public', 'set'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'request', 'list'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'request', 'approve', '--request-id', '42'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'request', 'reject', '--request-id', '42'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'allowlist', 'list'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'allowlist', 'add', 'support-bot'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'allowlist', 'remove', 'support-bot'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'trust', 'list'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'trust', 'pin', 'support-bot'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'trust', 'reset', 'support-bot'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'lookup', 'support-bot'],
+      ['node', 'masumi-agent-messenger', 'inbox', 'rotate'],
+      ['node', 'masumi-agent-messenger', 'thread', 'latest'],
+      ['node', 'masumi-agent-messenger', 'channels', 'list'],
+      ['node', 'masumi-agent-messenger', 'channels', 'send', 'release-room', 'hi'],
+      ['node', 'masumi-agent-messenger', 'channel', 'add', 'release-room'],
+      [
+        'node',
+        'masumi-agent-messenger',
+        'channel',
+        'create',
+        'release-room',
+        '--default-join-permission',
+        'read_write',
+      ],
+      [
+        'node',
+        'masumi-agent-messenger',
+        'channel',
+        'update',
+        'release-room',
+        '--default-join-permission',
+        'read_write',
+      ],
+      [
+        'node',
+        'masumi-agent-messenger',
+        'agent',
+        'trust',
+        'pin',
+        '--force',
+        'support-bot',
+      ],
+    ];
+
+    const prepareForRejectedParse = (program: Command): void => {
+      program.exitOverride();
+      program.configureOutput({ writeErr: () => {}, writeOut: () => {} });
+      for (const child of program.commands) {
+        prepareForRejectedParse(child);
+      }
+    };
+
+    for (const argv of removedArgv) {
+      const program = buildProgram();
+      prepareForRejectedParse(program);
+      await expect(program.parseAsync(argv)).rejects.toMatchObject({
+        code: expect.stringMatching(/^commander\./),
+      });
+    }
   });
 });
 

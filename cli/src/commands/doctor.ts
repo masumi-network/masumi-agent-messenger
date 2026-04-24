@@ -155,11 +155,11 @@ export function registerDoctorCommand(program: Command): void {
 
           const localKeysReady = Boolean(agentKeyPair && namespaceVault);
           const nextAction = !status.authenticated
-            ? 'masumi-agent-messenger auth login'
+            ? 'masumi-agent-messenger account login'
             : !localKeysReady
-              ? 'masumi-agent-messenger auth recover'
+              ? 'masumi-agent-messenger account recover'
               : !activeAgent
-                ? 'masumi-agent-messenger inbox list'
+                ? 'masumi-agent-messenger agent list'
                 : 'masumi-agent-messenger thread list';
 
           return {
