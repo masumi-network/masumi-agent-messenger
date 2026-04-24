@@ -68,6 +68,15 @@ export default tseslint.config(
     plugins: { 'react-hooks': reactHooks },
     rules: {
       ...reactHooks.configs.recommended.rules,
+      '@typescript-eslint/no-use-before-define': [
+        'error',
+        {
+          functions: false,
+          classes: true,
+          variables: true,
+          typedefs: false,
+        },
+      ],
       'react-hooks/set-state-in-effect': 'warn',
     },
   },

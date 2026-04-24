@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck && pnpm lint && pnpm build",
     "preview": "vite preview",
     "start": "node server.mjs",
     "test:security:static": "vitest run tests/security/static",

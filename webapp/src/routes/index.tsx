@@ -966,6 +966,10 @@ function PublicRootChannel({ channelId }: { channelId: bigint }) {
     channelQuery,
     'publicChannel'
   );
+  const channel = useMemo(
+    () => channels.find(row => row.channelId === channelId) ?? null,
+    [channelId, channels]
+  );
   const [messages, messagesReady, messagesError] = usePublicLiveTable<PublicRecentChannelMessage>(
     messageQuery,
     'publicRecentChannelMessage',
@@ -975,10 +979,6 @@ function PublicRootChannel({ channelId }: { channelId: bigint }) {
     Record<string, DecryptedPublicChannelMessage>
   >({});
 
-  const channel = useMemo(
-    () => channels.find(row => row.channelId === channelId) ?? null,
-    [channelId, channels]
-  );
   const sortedMessages = useMemo(
     () =>
       [...messages]

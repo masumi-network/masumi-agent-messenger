@@ -1826,6 +1826,21 @@ function AuthenticatedInboxPage() {
     }
   }
 
+  const resolveVisiblePublishedActors = useCallback(async (identifier: string): Promise<{
+    matches: ResolvedPublishedActor[];
+    selected: ResolvedPublishedActor;
+  }> => {
+    if (!liveConnection || !authenticatedSession) {
+      throw new Error('Sign in and connect to SpacetimeDB before looking up inbox slugs or emails.');
+    }
+
+    return resolvePublishedActorsForIdentifier({
+      identifier,
+      liveConnection,
+      session: authenticatedSession,
+    });
+  }, [authenticatedSession, liveConnection]);
+
   async function handleAddAllowlistAgent() {
     if (!activeActor || !allowlistAgentInput.trim() || !liveConnection) {
       return;
@@ -2703,30 +2718,6 @@ function AuthenticatedInboxPage() {
     }
   };
 
-  const handleThreadTimelineScroll = (event: UIEvent<HTMLElement>) => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) {
-      return;
-    }
-    const nearBottom =
-      target.scrollHeight - target.clientHeight - target.scrollTop <= THREAD_LIST_SCROLL_LOAD_THRESHOLD_PX;
-    const nearTop = target.scrollTop <= THREAD_LIST_SCROLL_LOAD_THRESHOLD_PX;
-
-    shouldAutoScrollTimelineRef.current = nearBottom;
-    if (nearBottom) {
-      setTimelineUnseenCount(0);
-    }
-
-    if (nearTop && canLoadOlderTimeline) {
-      setThreadTimelinePage(page => Math.min(page + 1, threadTimelinePageCount));
-      return;
-    }
-
-    if (nearBottom && canLoadNewerTimeline) {
-      setThreadTimelinePage(page => Math.max(1, page - 1));
-    }
-  };
-
   const scrollTimelineToBottom = useCallback(() => {
     const el = threadTimelineScrollRef.current;
     if (!el) return;
@@ -2819,21 +2810,6 @@ function AuthenticatedInboxPage() {
       setSelectedThreadId(visibleThreads[0]?.id ?? null);
     });
   }, [pendingVisibleThreadCount, selectedThreadId, visibleThreads]);
-
-  const resolveVisiblePublishedActors = useCallback(async (identifier: string): Promise<{
-    matches: ResolvedPublishedActor[];
-    selected: ResolvedPublishedActor;
-  }> => {
-    if (!liveConnection || !authenticatedSession) {
-      throw new Error('Sign in and connect to SpacetimeDB before looking up inbox slugs or emails.');
-    }
-
-    return resolvePublishedActorsForIdentifier({
-      identifier,
-      liveConnection,
-      session: authenticatedSession,
-    });
-  }, [authenticatedSession, liveConnection]);
 
   useEffect(() => {
     const requestedLookup = search.lookup?.trim() ?? '';
@@ -2987,6 +2963,29 @@ function AuthenticatedInboxPage() {
   );
   const canLoadOlderTimeline = threadTimelinePage < threadTimelinePageCount;
   const canLoadNewerTimeline = threadTimelinePage > 1;
+  const handleThreadTimelineScroll = (event: UIEvent<HTMLElement>) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const nearBottom =
+      target.scrollHeight - target.clientHeight - target.scrollTop <= THREAD_LIST_SCROLL_LOAD_THRESHOLD_PX;
+    const nearTop = target.scrollTop <= THREAD_LIST_SCROLL_LOAD_THRESHOLD_PX;
+
+    shouldAutoScrollTimelineRef.current = nearBottom;
+    if (nearBottom) {
+      setTimelineUnseenCount(0);
+    }
+
+    if (nearTop && canLoadOlderTimeline) {
+      setThreadTimelinePage(page => Math.min(page + 1, threadTimelinePageCount));
+      return;
+    }
+
+    if (nearBottom && canLoadNewerTimeline) {
+      setThreadTimelinePage(page => Math.max(1, page - 1));
+    }
+  };
   const latestTimelineItemSignature = useMemo(() => {
     const latestItem = selectedThreadTimeline[selectedThreadTimeline.length - 1];
     if (!latestItem) {

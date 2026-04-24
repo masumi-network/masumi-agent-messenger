@@ -4,8 +4,11 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
+    "prepare": "husky",
     "dev": "pnpm --filter @masumi-agent-messenger/webapp dev",
     "build": "pnpm --filter @masumi-agent-messenger/webapp build",
+    "typecheck": "pnpm --filter @masumi-agent-messenger/webapp typecheck",
+    "check": "pnpm typecheck && pnpm lint && pnpm build",
     "preview": "pnpm --filter @masumi-agent-messenger/webapp preview",
     "start": "pnpm --filter @masumi-agent-messenger/webapp start",
     "cli:dev": "pnpm --filter @masumi_network/masumi-agent-messenger dev",
@@ -35,6 +38,7 @@
     "@eslint/js": "^10.0.1",
     "eslint": "^10.2.1",
     "eslint-plugin-react-hooks": "^7.1.1",
+    "husky": "^9.1.7",
     "typescript-eslint": "^8.58.2"
   }
 }
