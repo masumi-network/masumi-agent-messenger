@@ -11,14 +11,11 @@ import {
 } from "spacetimedb";
 
 import {
-  ChannelMessageRow,
+  VisibleThreadPage,
 } from "./types";
 
 export const params = {
   agentDbId: __t.u64(),
-  channelId: __t.option(__t.u64()),
-  channelSlug: __t.option(__t.string()),
-  beforeChannelSeq: __t.option(__t.u64()),
-  limit: __t.u64(),
+  threadId: __t.u64(),
 };
-export const returnType = __t.array(ChannelMessageRow)
+export const returnType = VisibleThreadPage

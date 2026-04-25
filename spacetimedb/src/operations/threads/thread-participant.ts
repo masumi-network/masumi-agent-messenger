@@ -12,7 +12,7 @@ const {
   getOwnedActor,
   isDirectContactAllowed,
   requirePendingDirectContactResolvedForThreadMutation,
-  buildVisibleThreadParticipantIdsForInbox,
+  buildLatestVisibleThreadIdsForInbox,
   getThreadParticipants,
   getActiveThreadParticipants,
   requireThreadFanoutCapacity,
@@ -32,9 +32,10 @@ export const visibleThreadParticipants = spacetimedb.view(
       return [];
     }
 
-    return Array.from(buildVisibleThreadParticipantIdsForInbox(ctx, inbox.id))
-      .map(participantId => ctx.db.threadParticipant.id.find(participantId))
-      .filter((participant): participant is NonNullable<typeof participant> => Boolean(participant))
+    return Array.from(buildLatestVisibleThreadIdsForInbox(ctx, inbox.id))
+      .flatMap(threadId =>
+        Array.from(ctx.db.threadParticipant.thread_participant_thread_id.filter(threadId))
+      )
       .map(participant => ({
         id: participant.id,
         threadId: participant.threadId,

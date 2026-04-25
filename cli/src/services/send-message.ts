@@ -473,10 +473,37 @@ function findParticipant(
   );
 }
 
+type SenderSecretVersionState = {
+  membershipVersion: bigint;
+  secretVersion: string;
+};
+
+function resolveSenderState(
+  latestSenderMessage: VisibleMessageRow | undefined,
+  senderParticipant: VisibleThreadParticipantRow | null
+): SenderSecretVersionState | undefined {
+  if (latestSenderMessage) {
+    return {
+      membershipVersion: latestSenderMessage.membershipVersion,
+      secretVersion: latestSenderMessage.secretVersion,
+    };
+  }
+  if (
+    senderParticipant?.lastSentMembershipVersion !== undefined &&
+    senderParticipant.lastSentSecretVersion !== undefined
+  ) {
+    return {
+      membershipVersion: senderParticipant.lastSentMembershipVersion,
+      secretVersion: senderParticipant.lastSentSecretVersion,
+    };
+  }
+  return undefined;
+}
+
 function senderSecretRotationRequired(params: {
   senderActor: VisibleAgentRow;
   thread: VisibleThreadRow;
-  latestSenderMessage: VisibleMessageRow | undefined;
+  latestSenderState: SenderSecretVersionState | undefined;
   participants: VisibleThreadParticipantRow[];
   actors: VisibleAgentRow[];
   envelopes: VisibleThreadSecretEnvelopeRow[];
@@ -484,15 +511,15 @@ function senderSecretRotationRequired(params: {
   const {
     senderActor,
     thread,
-    latestSenderMessage,
+    latestSenderState,
     participants,
     actors,
     envelopes,
   } = params;
-  if (!latestSenderMessage) {
+  if (!latestSenderState) {
     return false;
   }
-  if (latestSenderMessage.membershipVersion !== thread.membershipVersion) {
+  if (latestSenderState.membershipVersion !== thread.membershipVersion) {
     return true;
   }
 
@@ -512,9 +539,9 @@ function senderSecretRotationRequired(params: {
   const currentVersionEnvelopes = envelopes.filter(envelope => {
     return (
       envelope.threadId === thread.id &&
-      envelope.membershipVersion === latestSenderMessage.membershipVersion &&
+      envelope.membershipVersion === latestSenderState.membershipVersion &&
       envelope.senderAgentDbId === senderActor.id &&
-      envelope.secretVersion === latestSenderMessage.secretVersion
+      envelope.secretVersion === latestSenderState.secretVersion
     );
   });
   if (currentVersionEnvelopes.length !== expectedRecipients.size) {
@@ -1135,14 +1162,15 @@ export async function sendMessageToSlug(params: {
     const latestSenderMessage = [...snapshot.messages]
       .filter(message => message.threadId === thread.id && message.senderAgentDbId === ownActor.id)
       .sort((left, right) => compareBigIntDesc(left.senderSeq, right.senderSeq))[0];
+    const latestSenderState = resolveSenderState(latestSenderMessage, senderParticipant);
 
-    const existingSecret = latestSenderMessage
-      ? getCachedSenderSecret(thread.id, ownActor.publicIdentity, latestSenderMessage.secretVersion)
+    const existingSecret = latestSenderState
+      ? getCachedSenderSecret(thread.id, ownActor.publicIdentity, latestSenderState.secretVersion)
       : null;
     const requiresSecretRotation = senderSecretRotationRequired({
       senderActor: ownActor,
       thread,
-      latestSenderMessage,
+      latestSenderState,
       participants: snapshot.participants,
       actors: snapshot.actors,
       envelopes: snapshot.secretEnvelopes,
@@ -1158,7 +1186,7 @@ export async function sendMessageToSlug(params: {
       keyPair,
       recipients,
       existingSecret,
-      latestKnownSecretVersion: latestSenderMessage?.secretVersion ?? null,
+      latestKnownSecretVersion: latestSenderState?.secretVersion ?? null,
       rotateSecret: requiresSecretRotation,
     });
 
@@ -1302,18 +1330,19 @@ export async function sendMessageToThread(params: {
     const latestSenderMessage = [...snapshot.messages]
       .filter(message => message.threadId === requestedThreadId && message.senderAgentDbId === ownActor.id)
       .sort((left, right) => compareBigIntDesc(left.senderSeq, right.senderSeq))[0];
+    const latestSenderState = resolveSenderState(latestSenderMessage, senderParticipant);
 
-    const existingSecret = latestSenderMessage
+    const existingSecret = latestSenderState
       ? getCachedSenderSecret(
           requestedThreadId,
           ownActor.publicIdentity,
-          latestSenderMessage.secretVersion
+          latestSenderState.secretVersion
         )
       : null;
     const requiresSecretRotation = senderSecretRotationRequired({
       senderActor: ownActor,
       thread,
-      latestSenderMessage,
+      latestSenderState,
       participants: snapshot.participants,
       actors: snapshot.actors,
       envelopes: snapshot.secretEnvelopes,
@@ -1329,7 +1358,7 @@ export async function sendMessageToThread(params: {
       keyPair,
       recipients,
       existingSecret,
-      latestKnownSecretVersion: latestSenderMessage?.secretVersion ?? null,
+      latestKnownSecretVersion: latestSenderState?.secretVersion ?? null,
       rotateSecret: requiresSecretRotation,
     });
 

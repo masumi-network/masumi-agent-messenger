@@ -25,7 +25,7 @@ const {
   toPublishedPublicRouteRow,
   getReadableInbox,
   getOwnedActor,
-  buildVisibleAgentIdsForInbox,
+  buildLatestVisibleAgentIdsForInbox,
   toSanitizedVisibleAgentRow,
 } = model;
 export const visibleAgents = spacetimedb.view(
@@ -37,7 +37,7 @@ export const visibleAgents = spacetimedb.view(
       return [];
     }
 
-    return Array.from(buildVisibleAgentIdsForInbox(ctx, inbox.id))
+    return Array.from(buildLatestVisibleAgentIdsForInbox(ctx, inbox.id))
       .map(agentDbId => ctx.db.agent.id.find(agentDbId))
       .filter((actor): actor is NonNullable<typeof actor> => Boolean(actor))
       .map(actor => toSanitizedVisibleAgentRow(ctx, inbox.id, actor));

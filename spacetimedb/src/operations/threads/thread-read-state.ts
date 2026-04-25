@@ -7,9 +7,10 @@ import * as model from '../../model';
 const {
   VisibleThreadReadStateRow,
   buildThreadReadStateKey,
+  getOwnActorIdsForInbox,
   getReadableInbox,
   getOwnedActor,
-  buildVisibleThreadIdsForInbox,
+  buildLatestVisibleThreadIdsForInbox,
   requireVisibleThreadParticipant,
   getThreadReadStateForActor,
 } = model;
@@ -22,10 +23,8 @@ export const visibleThreadReadStates = spacetimedb.view(
       return [];
     }
 
-    const ownActorIds = new Set(
-      Array.from(ctx.db.agent.agent_inbox_id.filter(inbox.id)).map(actor => actor.id)
-    );
-    const visibleThreadIds = buildVisibleThreadIdsForInbox(ctx, inbox.id);
+    const ownActorIds = getOwnActorIdsForInbox(ctx, inbox.id);
+    const visibleThreadIds = buildLatestVisibleThreadIdsForInbox(ctx, inbox.id);
 
     return Array.from(ownActorIds).flatMap(agentDbId =>
       Array.from(ctx.db.threadReadState.thread_read_state_agent_db_id.filter(agentDbId)).filter(

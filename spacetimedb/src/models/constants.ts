@@ -58,9 +58,18 @@ export const THREAD_INVITE_STATUSES = ['pending', 'accepted', 'rejected'] as con
 export const CHANNEL_ACCESS_MODES = ['public', 'approval_required'] as const;
 export const CHANNEL_PERMISSIONS = ['read', 'read_write', 'admin'] as const;
 export const CHANNEL_JOIN_REQUEST_STATUSES = ['pending', 'approved', 'rejected'] as const;
-export const MAX_CHANNEL_RECENT_PUBLIC_MESSAGES = 100;
-export const MAX_CHANNEL_MESSAGE_PAGE_SIZE = 100;
-export const MAX_CHANNEL_MEMBER_PAGE_SIZE = 100;
+export const MAX_VISIBLE_THREAD_PAGE_SIZE = 25;
+export const MAX_INBOX_THREAD_BACKFILL_BATCH_SIZE = 25;
+export const MAX_VISIBLE_MESSAGES_PER_THREAD = 25;
+export const MAX_CHANNEL_RECENT_PUBLIC_MESSAGES = 25;
+export const MAX_CHANNEL_MESSAGE_PAGE_SIZE = 25;
+export const MAX_CHANNEL_MEMBER_PAGE_SIZE = 25;
+export const MAX_THREAD_MESSAGE_PAGE_SIZE = 25;
+export const MAX_VISIBLE_AGENT_KEY_BUNDLES_PER_AGENT = 3;
+export const MAX_AGENT_KEY_BUNDLE_PAGE_SIZE = 25;
+export const MAX_VISIBLE_DISCOVERABLE_CHANNELS = 25;
+export const MAX_DISCOVERABLE_CHANNEL_PAGE_SIZE = 25;
+export const MAX_VISIBLE_CHANNEL_MESSAGE_CHANNELS = 10;
 export const DeviceKeyBundleExpiryMode = t.enum(
   'DeviceKeyBundleExpiryMode',
   DEVICE_KEY_BUNDLE_EXPIRY_MODES

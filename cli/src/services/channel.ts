@@ -802,7 +802,7 @@ export async function readAuthenticatedChannelMessages(params: {
       channelId,
       channelSlug: undefined,
       beforeChannelSeq: parseOptionalU64(params.beforeChannelSeq, 'beforeChannelSeq'),
-      limit: parseOptionalU64(params.limit, 'limit'),
+      limit: parseOptionalU64(params.limit, 'limit') ?? 25n,
     });
     const sortedRows = [...rows].sort((left, right) => {
       if (left.channelSeq < right.channelSeq) return -1;
@@ -854,7 +854,7 @@ export async function listChannelMembers(params: {
       channelId: channel.id,
       channelSlug: undefined,
       afterMemberId: parseOptionalU64(params.afterMemberId, 'afterMemberId'),
-      limit: parseOptionalU64(params.limit, 'limit'),
+      limit: parseOptionalU64(params.limit, 'limit') ?? 25n,
     });
     params.reporter.success(`Loaded ${members.length.toString()} channel member${members.length === 1 ? '' : 's'}`);
     return {

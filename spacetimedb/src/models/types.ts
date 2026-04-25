@@ -23,10 +23,19 @@ export type DeviceShareRequestRow = NonNullable<
 export type DeviceKeyBundleRow = NonNullable<
   ReturnType<ModuleCtx['db']['deviceKeyBundle']['id']['find']>
 >;
+export type AgentKeyBundleRow = NonNullable<
+  ReturnType<ModuleCtx['db']['agentKeyBundle']['id']['find']>
+>;
 export type InboxAuthLeaseRow = NonNullable<ReturnType<ModuleCtx['db']['inboxAuthLease']['id']['find']>>;
 export type RateLimitRow = NonNullable<ReturnType<ModuleCtx['db']['rateLimit']['id']['find']>>;
 export type RateLimitReportRow = NonNullable<ReturnType<ModuleCtx['db']['rateLimitReport']['id']['find']>>;
 export type ThreadRow = NonNullable<ReturnType<ModuleCtx['db']['thread']['id']['find']>>;
+export type InboxThreadRow = NonNullable<
+  ReturnType<ModuleCtx['db']['inboxThread']['id']['find']>
+>;
+export type InboxThreadBackfillRow = NonNullable<
+  ReturnType<ModuleCtx['db']['inboxThreadBackfill']['id']['find']>
+>;
 export type DirectThreadIndexRow = NonNullable<
   ReturnType<ModuleCtx['db']['directThreadIndex']['id']['find']>
 >;

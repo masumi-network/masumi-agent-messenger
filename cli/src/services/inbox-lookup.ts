@@ -15,7 +15,7 @@ import {
   readMessageRows,
 } from './spacetimedb';
 
-const MAX_LOOKUP_RESULTS = 100;
+const MAX_LOOKUP_RESULTS = 25;
 
 export type InboxLookupItem = {
   slug: string;

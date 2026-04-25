@@ -69,6 +69,7 @@ export const Channel = __t.object("Channel", {
   updatedAt: __t.timestamp(),
   lastMessageAt: __t.timestamp(),
   publicJoinPermission: __t.string(),
+  discoverableSortKey: __t.string(),
 });
 export type Channel = __Infer<typeof Channel>;
 
@@ -364,6 +365,27 @@ export const InboxAuthLeaseExpiry = __t.object("InboxAuthLeaseExpiry", {
 });
 export type InboxAuthLeaseExpiry = __Infer<typeof InboxAuthLeaseExpiry>;
 
+export const InboxThread = __t.object("InboxThread", {
+  id: __t.u64(),
+  inboxId: __t.u64(),
+  threadId: __t.u64(),
+  uniqueKey: __t.string(),
+  sortKey: __t.string(),
+  lastMessageAt: __t.timestamp(),
+  lastMessageSeq: __t.u64(),
+  updatedAt: __t.timestamp(),
+});
+export type InboxThread = __Infer<typeof InboxThread>;
+
+export const InboxThreadBackfill = __t.object("InboxThreadBackfill", {
+  id: __t.u64(),
+  inboxId: __t.u64(),
+  nextParticipantId: __t.u64(),
+  complete: __t.bool(),
+  updatedAt: __t.timestamp(),
+});
+export type InboxThreadBackfill = __Infer<typeof InboxThreadBackfill>;
+
 export const Message = __t.object("Message", {
   id: __t.u64(),
   threadId: __t.u64(),
@@ -560,25 +582,6 @@ export const SecretEnvelopeAttachment = __t.object("SecretEnvelopeAttachment", {
   signature: __t.string(),
 });
 export type SecretEnvelopeAttachment = __Infer<typeof SecretEnvelopeAttachment>;
-
-export const SelectedPublicRecentChannelMessageRow = __t.object("SelectedPublicRecentChannelMessageRow", {
-  id: __t.u64(),
-  channelId: __t.u64(),
-  channelSeq: __t.u64(),
-  senderAgentDbId: __t.u64(),
-  senderPublicIdentity: __t.string(),
-  senderSeq: __t.u64(),
-  senderSigningPublicKey: __t.string(),
-  senderSigningKeyVersion: __t.string(),
-  plaintext: __t.string(),
-  signature: __t.string(),
-  replyToMessageId: __t.option(__t.u64()),
-  createdAt: __t.timestamp(),
-});
-export type SelectedPublicRecentChannelMessageRow = __Infer<typeof SelectedPublicRecentChannelMessageRow>;
-
-export const SelectedPublicRecentChannelMessages = __t.object("SelectedPublicRecentChannelMessages", {});
-export type SelectedPublicRecentChannelMessages = __Infer<typeof SelectedPublicRecentChannelMessages>;
 
 export const Thread = __t.object("Thread", {
   id: __t.u64(),
@@ -981,6 +984,37 @@ export type VisibleThreadInviteRow = __Infer<typeof VisibleThreadInviteRow>;
 
 export const VisibleThreadInvites = __t.object("VisibleThreadInvites", {});
 export type VisibleThreadInvites = __Infer<typeof VisibleThreadInvites>;
+
+export const VisibleThreadMessagePage = __t.object("VisibleThreadMessagePage", {
+  get messages() {
+    return __t.array(VisibleMessageRow);
+  },
+  get secretEnvelopes() {
+    return __t.array(VisibleThreadSecretEnvelopeRow);
+  },
+  nextBeforeThreadSeq: __t.option(__t.u64()),
+});
+export type VisibleThreadMessagePage = __Infer<typeof VisibleThreadMessagePage>;
+
+export const VisibleThreadPage = __t.object("VisibleThreadPage", {
+  get actors() {
+    return __t.array(VisibleAgentRow);
+  },
+  get bundles() {
+    return __t.array(VisibleAgentKeyBundleRow);
+  },
+  get participants() {
+    return __t.array(VisibleThreadParticipantRow);
+  },
+  get readStates() {
+    return __t.array(VisibleThreadReadStateRow);
+  },
+  get threads() {
+    return __t.array(VisibleThreadRow);
+  },
+  nextAfterSortKey: __t.option(__t.string()),
+});
+export type VisibleThreadPage = __Infer<typeof VisibleThreadPage>;
 
 export const VisibleThreadParticipantRow = __t.object("VisibleThreadParticipantRow", {
   id: __t.u64(),

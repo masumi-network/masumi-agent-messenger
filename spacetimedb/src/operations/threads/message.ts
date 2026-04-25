@@ -13,10 +13,13 @@ import * as model from '../../model';
 
 const {
   MAX_THREAD_FANOUT,
+  MAX_THREAD_MESSAGE_PAGE_SIZE,
+  MAX_VISIBLE_MESSAGES_PER_THREAD,
   CONTACT_REQUEST_RATE_WINDOW_MS,
   CONTACT_REQUEST_RATE_MAX_PER_WINDOW,
   SecretEnvelopeAttachment,
   VisibleMessageSnapshot,
+  VisibleThreadMessagePage,
   VisibleMessageRow,
   dedupeRowsById,
   enforceRateLimit,
@@ -33,27 +36,171 @@ const {
   getRequiredActorByPublicIdentity,
   getReadableInbox,
   getOwnedActor,
+  getOwnedActorForRead,
   getContactRequestByThreadId,
   findPendingContactRequestForActors,
   isDirectContactAllowed,
-  buildVisibleThreadIdsForInbox,
-  buildVisibleThreadParticipantIdsForInbox,
-  buildVisibleAgentIdsForInbox,
+  getLatestVisibleThreadsForInbox,
+  ensureInboxThreadProjectionsForInbox,
+  getLatestThreadMessages,
+  getThreadMessagesInSeqRange,
   getActiveThreadParticipants,
   getVisibleContactRequestsForInbox,
   toSanitizedVisibleAgentRow,
   toVisibleContactRequestRow,
   toVisibleThreadInviteRow,
   createDirectThreadRecord,
+  requireVisibleThreadParticipant,
   requireActiveThreadParticipant,
   getSenderLastSentState,
   senderHasMessageWithSecretVersion,
   canAgentReadMessage,
+  canAnyAgentReadMessage,
   requireExactEnvelopeCoverageForVersion,
   validateAttachedSecretEnvelopes,
   insertAttachedSecretEnvelopes,
+  refreshInboxThreadProjectionsForThread,
 } = model;
 type ModuleCtx = model.ModuleCtx;
+
+function toVisibleMessageRow(message: model.MessageRow) {
+  return {
+    id: message.id,
+    threadId: message.threadId,
+    threadSeq: message.threadSeq,
+    membershipVersion: message.membershipVersion,
+    senderAgentDbId: message.senderAgentDbId,
+    senderSeq: message.senderSeq,
+    secretVersion: message.secretVersion,
+    secretVersionStart: message.secretVersionStart,
+    signingKeyVersion: message.signingKeyVersion,
+    ciphertext: message.ciphertext,
+    iv: message.iv,
+    cipherAlgorithm: message.cipherAlgorithm,
+    signature: message.signature,
+    replyToMessageId: message.replyToMessageId,
+    createdAt: message.createdAt,
+  };
+}
+
+function normalizeThreadMessagePageSize(limit: bigint) {
+  if (limit === 0n) {
+    throw new SenderError('limit is required and must be greater than zero');
+  }
+  return limit > BigInt(MAX_THREAD_MESSAGE_PAGE_SIZE)
+    ? MAX_THREAD_MESSAGE_PAGE_SIZE
+    : Number(limit);
+}
+
+function compareMessageDesc(left: model.MessageRow, right: model.MessageRow) {
+  if (left.threadSeq > right.threadSeq) return -1;
+  if (left.threadSeq < right.threadSeq) return 1;
+  if (left.id > right.id) return -1;
+  if (left.id < right.id) return 1;
+  return 0;
+}
+
+function getThreadMessageUpperBound(
+  thread: model.ThreadRow,
+  beforeThreadSeq: bigint | undefined
+) {
+  const requestedUpperBound = beforeThreadSeq ?? thread.nextThreadSeq;
+  return requestedUpperBound > thread.nextThreadSeq ? thread.nextThreadSeq : requestedUpperBound;
+}
+
+function readVisibleMessageRowsForThread(params: {
+  ctx: model.ReadDbCtx;
+  thread: model.ThreadRow;
+  beforeThreadSeq?: bigint;
+  limit: number;
+  canReadMessage: (message: model.MessageRow) => boolean;
+}) {
+  const { ctx, thread, beforeThreadSeq, limit, canReadMessage } = params;
+  const rows: model.MessageRow[] = [];
+  let scanUpperBound = getThreadMessageUpperBound(thread, beforeThreadSeq);
+
+  while (scanUpperBound > 1n && rows.length < limit) {
+    const scanWindowSize = BigInt(limit);
+    const lowerBound =
+      scanUpperBound > scanWindowSize ? scanUpperBound - scanWindowSize : 1n;
+
+    const candidates = getThreadMessagesInSeqRange(
+      ctx,
+      thread.id,
+      lowerBound,
+      scanUpperBound
+    ).sort(compareMessageDesc);
+
+    for (const message of candidates) {
+      if (canReadMessage(message)) {
+        rows.push(message);
+        if (rows.length >= limit) {
+          break;
+        }
+      }
+    }
+
+    scanUpperBound = lowerBound;
+  }
+
+  const oldestLoaded = rows[rows.length - 1];
+  return {
+    rows,
+    nextBeforeThreadSeq:
+      oldestLoaded && oldestLoaded.threadSeq > 1n ? oldestLoaded.threadSeq : undefined,
+  };
+}
+
+function getMessageSecretVersionEnvelopes(ctx: model.ReadDbCtx, message: model.MessageRow) {
+  return Array.from(
+    ctx.db.threadSecretEnvelope.thread_secret_envelope_thread_id_membership_version_sender_agent_db_id_secret_version.filter([
+      message.threadId,
+      message.membershipVersion,
+      message.senderAgentDbId,
+      message.secretVersion,
+    ])
+  );
+}
+
+function canActorReadMessageSecretVersion(
+  ctx: model.ReadDbCtx,
+  actorId: bigint,
+  message: model.MessageRow
+) {
+  if (message.senderAgentDbId === actorId) {
+    return true;
+  }
+
+  return getMessageSecretVersionEnvelopes(ctx, message).some(
+    envelope => envelope.recipientAgentDbId === actorId
+  );
+}
+
+function collectThreadPageSecretEnvelopes(params: {
+  ctx: model.ReadDbCtx;
+  viewerAgentDbId: bigint;
+  messages: model.MessageRow[];
+}) {
+  const { ctx, viewerAgentDbId, messages } = params;
+  if (messages.length === 0) {
+    return [];
+  }
+
+  return dedupeRowsById(
+    messages.flatMap(message =>
+      getMessageSecretVersionEnvelopes(ctx, message).filter(envelope => {
+        if (
+          envelope.recipientAgentDbId !== viewerAgentDbId &&
+          envelope.senderAgentDbId !== viewerAgentDbId
+        ) {
+          return false;
+        }
+        return true;
+      })
+    )
+  );
+}
+
 export const visibleMessages = spacetimedb.view(
   { public: true },
   t.array(VisibleMessageRow),
@@ -64,38 +211,11 @@ export const visibleMessages = spacetimedb.view(
     }
 
     const ownActorIds = getOwnActorIdsForInbox(ctx, inbox.id);
-    const visibleThreadIds = buildVisibleThreadIdsForInbox(ctx, inbox.id);
-    const ownSenderVersionKeys = new Set(
-      Array.from(ownActorIds).flatMap(agentDbId =>
-        Array.from(
-          ctx.db.threadSecretEnvelope.thread_secret_envelope_recipient_agent_db_id.filter(agentDbId)
-        )
-      )
-        .filter(envelope => visibleThreadIds.has(envelope.threadId))
-        .map(envelope =>
-          buildSenderSecretVisibilityKey(
-            envelope.membershipVersion,
-            envelope.senderAgentDbId,
-            envelope.secretVersion
-          )
-        )
+    return getLatestVisibleThreadsForInbox(ctx, inbox.id).flatMap(thread =>
+      getLatestThreadMessages(ctx, thread, MAX_VISIBLE_MESSAGES_PER_THREAD).filter(message =>
+        canAnyAgentReadMessage(ctx, ownActorIds, message)
+      ).map(toVisibleMessageRow)
     );
-
-    return Array.from(visibleThreadIds).flatMap(threadId => {
-      return Array.from(
-        ctx.db.message.message_thread_id.filter(threadId)
-      ).filter(
-        message =>
-          ownActorIds.has(message.senderAgentDbId) ||
-          ownSenderVersionKeys.has(
-            buildSenderSecretVisibilityKey(
-              message.membershipVersion,
-              message.senderAgentDbId,
-              message.secretVersion
-            )
-          )
-      );
-    });
   }
 );
 
@@ -123,9 +243,18 @@ export const readVisibleMessageSnapshot = spacetimedb.procedure(
         return emptyVisibleMessageSnapshot();
       }
 
+      ensureInboxThreadProjectionsForInbox(tx, inbox.id);
       const ownActorIds = getOwnActorIdsForInbox(tx, inbox.id);
-      const visibleThreadIds = buildVisibleThreadIdsForInbox(tx, inbox.id);
-      const visibleAgentIds = buildVisibleAgentIdsForInbox(tx, inbox.id);
+      const latestThreads = getLatestVisibleThreadsForInbox(tx, inbox.id);
+      const visibleThreadIds = new Set(latestThreads.map(thread => thread.id));
+      const visibleAgentIds = new Set<bigint>(ownActorIds);
+
+      const participantRows = Array.from(visibleThreadIds).flatMap(threadId =>
+        Array.from(tx.db.threadParticipant.thread_participant_thread_id.filter(threadId))
+      );
+      for (const participant of participantRows) {
+        visibleAgentIds.add(participant.agentDbId);
+      }
 
       const actors = Array.from(visibleAgentIds)
         .map(agentDbId => tx.db.agent.id.find(agentDbId))
@@ -149,22 +278,17 @@ export const readVisibleMessageSnapshot = spacetimedb.procedure(
         )
       );
 
-      const participants = Array.from(buildVisibleThreadParticipantIdsForInbox(tx, inbox.id))
-        .map(participantId => tx.db.threadParticipant.id.find(participantId))
-        .filter((participant): participant is NonNullable<typeof participant> =>
-          Boolean(participant)
-        )
-        .map(participant => ({
-          id: participant.id,
-          threadId: participant.threadId,
-          agentDbId: participant.agentDbId,
-          joinedAt: participant.joinedAt,
-          lastSentSeq: participant.lastSentSeq,
-          lastSentMembershipVersion: participant.lastSentMembershipVersion,
-          lastSentSecretVersion: participant.lastSentSecretVersion,
-          isAdmin: participant.isAdmin,
-          active: participant.active,
-        }));
+      const participants = participantRows.map(participant => ({
+        id: participant.id,
+        threadId: participant.threadId,
+        agentDbId: participant.agentDbId,
+        joinedAt: participant.joinedAt,
+        lastSentSeq: participant.lastSentSeq,
+        lastSentMembershipVersion: participant.lastSentMembershipVersion,
+        lastSentSecretVersion: participant.lastSentSecretVersion,
+        isAdmin: participant.isAdmin,
+        active: participant.active,
+      }));
 
       const readStates = Array.from(ownActorIds).flatMap(agentDbId =>
         Array.from(tx.db.threadReadState.thread_read_state_agent_db_id.filter(agentDbId))
@@ -179,21 +303,36 @@ export const readVisibleMessageSnapshot = spacetimedb.procedure(
           }))
       );
 
+      const latestMessages = latestThreads.flatMap(thread => {
+        return getLatestThreadMessages(tx, thread).filter(message =>
+          canAnyAgentReadMessage(tx, ownActorIds, message)
+        );
+      });
+      const messageSecretKeys = new Map(
+        latestMessages.map(message => [
+          `${message.threadId.toString()}:${buildSenderSecretVisibilityKey(
+            message.membershipVersion,
+            message.senderAgentDbId,
+            message.secretVersion
+          )}`,
+          message,
+        ])
+      );
       const secretEnvelopes = dedupeRowsById(
-        Array.from(ownActorIds)
-          .flatMap(agentDbId => [
-            ...Array.from(
-              tx.db.threadSecretEnvelope.thread_secret_envelope_sender_agent_db_id.filter(
-                agentDbId
-              )
-            ),
-            ...Array.from(
-              tx.db.threadSecretEnvelope.thread_secret_envelope_recipient_agent_db_id.filter(
-                agentDbId
-              )
-            ),
-          ])
-          .filter(envelope => visibleThreadIds.has(envelope.threadId))
+        Array.from(messageSecretKeys.values()).flatMap(message =>
+          Array.from(
+            tx.db.threadSecretEnvelope.thread_secret_envelope_thread_id_membership_version_sender_agent_db_id_secret_version.filter([
+              message.threadId,
+              message.membershipVersion,
+              message.senderAgentDbId,
+              message.secretVersion,
+            ])
+          ).filter(
+            envelope =>
+              ownActorIds.has(envelope.senderAgentDbId) ||
+              ownActorIds.has(envelope.recipientAgentDbId)
+          )
+        )
       ).map(envelope => ({
         id: envelope.id,
         threadId: envelope.threadId,
@@ -211,9 +350,7 @@ export const readVisibleMessageSnapshot = spacetimedb.procedure(
         createdAt: envelope.createdAt,
       }));
 
-      const threads = Array.from(visibleThreadIds)
-        .map(threadId => tx.db.thread.id.find(threadId))
-        .filter((thread): thread is NonNullable<typeof thread> => Boolean(thread));
+      const threads = latestThreads;
 
       const contactRequests = getVisibleContactRequestsForInbox(tx, inbox.id).map(request =>
         toVisibleContactRequestRow(tx, inbox.id, request)
@@ -229,56 +366,7 @@ export const readVisibleMessageSnapshot = spacetimedb.procedure(
         invite => toVisibleThreadInviteRow(tx, invite)
       );
 
-      const ownSenderVersionKeys = new Set(
-        Array.from(ownActorIds)
-          .flatMap(agentDbId =>
-            Array.from(
-              tx.db.threadSecretEnvelope.thread_secret_envelope_recipient_agent_db_id.filter(
-                agentDbId
-              )
-            )
-          )
-          .filter(envelope => visibleThreadIds.has(envelope.threadId))
-          .map(envelope =>
-            buildSenderSecretVisibilityKey(
-              envelope.membershipVersion,
-              envelope.senderAgentDbId,
-              envelope.secretVersion
-            )
-          )
-      );
-
-      const messages = Array.from(visibleThreadIds).flatMap(threadId => {
-        return Array.from(tx.db.message.message_thread_id.filter(threadId))
-          .filter(
-            message =>
-              ownActorIds.has(message.senderAgentDbId) ||
-              ownSenderVersionKeys.has(
-                buildSenderSecretVisibilityKey(
-                  message.membershipVersion,
-                  message.senderAgentDbId,
-                  message.secretVersion
-                )
-              )
-          )
-          .map(message => ({
-            id: message.id,
-            threadId: message.threadId,
-            threadSeq: message.threadSeq,
-            membershipVersion: message.membershipVersion,
-            senderAgentDbId: message.senderAgentDbId,
-            senderSeq: message.senderSeq,
-            secretVersion: message.secretVersion,
-            secretVersionStart: message.secretVersionStart,
-            signingKeyVersion: message.signingKeyVersion,
-            ciphertext: message.ciphertext,
-            iv: message.iv,
-            cipherAlgorithm: message.cipherAlgorithm,
-            signature: message.signature,
-            replyToMessageId: message.replyToMessageId,
-            createdAt: message.createdAt,
-          }));
-      });
+      const messages = latestMessages.map(toVisibleMessageRow);
 
       return {
         actors,
@@ -290,6 +378,45 @@ export const readVisibleMessageSnapshot = spacetimedb.procedure(
         contactRequests,
         threadInvites,
         messages,
+      };
+    });
+  }
+);
+
+export const listThreadMessages = spacetimedb.procedure(
+  {
+    agentDbId: t.u64(),
+    threadId: t.u64(),
+    beforeThreadSeq: t.u64().optional(),
+    limit: t.u64(),
+  },
+  VisibleThreadMessagePage,
+  (ctx, { agentDbId, threadId, beforeThreadSeq, limit }) => {
+    return ctx.withTx(tx => {
+      const actor = getOwnedActorForRead(tx, agentDbId);
+      const thread = tx.db.thread.id.find(threadId);
+      if (!thread) {
+        throw new SenderError('Thread not found');
+      }
+      requireVisibleThreadParticipant(tx, thread.id, actor.id);
+
+      const pageSize = normalizeThreadMessagePageSize(limit);
+      const page = readVisibleMessageRowsForThread({
+        ctx: tx,
+        thread,
+        beforeThreadSeq,
+        limit: pageSize,
+        canReadMessage: message => canActorReadMessageSecretVersion(tx, actor.id, message),
+      });
+
+      return {
+        messages: page.rows.map(toVisibleMessageRow),
+        secretEnvelopes: collectThreadPageSecretEnvelopes({
+          ctx: tx,
+          viewerAgentDbId: actor.id,
+          messages: page.rows,
+        }),
+        nextBeforeThreadSeq: page.nextBeforeThreadSeq,
       };
     });
   }
@@ -590,13 +717,15 @@ function insertEncryptedMessageIntoThread(
     createdAt: ctx.timestamp,
   });
 
-  ctx.db.thread.id.update({
+  const updatedThread = {
     ...thread,
     nextThreadSeq: threadSeq + 1n,
     lastMessageSeq: threadSeq,
     updatedAt: ctx.timestamp,
     lastMessageAt: ctx.timestamp,
-  });
+  };
+  ctx.db.thread.id.update(updatedThread);
+  refreshInboxThreadProjectionsForThread(ctx, updatedThread);
 
   ctx.db.threadParticipant.id.update({
     ...senderParticipant,

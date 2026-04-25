@@ -25,7 +25,6 @@ export * from './operations/channels/channel';
 export * from './operations/channels/channel-join-request';
 export * from './operations/channels/channel-member';
 export * from './operations/channels/channel-message';
-export * from './operations/channels/public-recent-channel-message';
 export * from './operations/threads/message';
 export * from './operations/threads/thread';
 export * from './operations/threads/thread-invite';

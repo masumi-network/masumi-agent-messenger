@@ -8,11 +8,11 @@ import {
   deleteThread,
   listThreads,
   markThreadRead,
-  paginateThreadHistory,
   readThreadHistory,
   removeThreadParticipant,
   setThreadArchived,
 } from '../../services/thread';
+import type { PaginatedThreadHistoryResult } from '../../services/thread';
 import {
   listContactRequests,
   listThreadInvites,
@@ -68,6 +68,7 @@ type ThreadOptions = GlobalOptions & {
   incoming?: boolean;
   outgoing?: boolean;
   requestId?: string;
+  after?: string;
 };
 
 function parseOptionalInteger(value: string | undefined): number | undefined {
@@ -112,7 +113,7 @@ function formatThreadRow(params: {
 }
 
 function renderThreadMessageBody(
-  message: Awaited<ReturnType<typeof paginateThreadHistory>>['messages'][number]
+  message: PaginatedThreadHistoryResult['messages'][number]
 ): string {
   const lines = [
     message.trustNotice ? `[notice] ${message.trustNotice}` : null,
@@ -207,6 +208,10 @@ export function registerThreadCommands(program: Command): void {
     .description('List visible threads for one owned agent')
     .option('--agent <slug>', 'Owned agent slug to use for thread visibility')
     .option('--include-archived', 'Include archived threads')
+    .option('--filter <mode>', 'Thread filter: active, latest, archived, or all')
+    .option('--page <number>', 'Page number', '1')
+    .option('--page-size <number>', 'Threads per page', '25')
+    .option('--after <cursor>', 'Cursor returned by the previous page')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as ThreadOptions;
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
@@ -218,6 +223,10 @@ export function registerThreadCommands(program: Command): void {
             profileName: options.profile,
             actorSlug,
             includeArchived: options.includeArchived,
+            filter: options.filter,
+            page: parseOptionalInteger(options.page),
+            pageSize: parseOptionalInteger(options.pageSize),
+            afterSortKey: options.after,
             reporter,
           }),
         toHuman: result => {
@@ -262,7 +271,7 @@ export function registerThreadCommands(program: Command): void {
           return {
             summary:
               result.totalThreads > 0
-                ? `Showing ${bold(String(result.totalThreads))} thread${
+                ? `Page ${bold(String(result.page))} showing ${bold(String(result.totalThreads))} thread${
                     result.totalThreads === 1 ? '' : 's'
                   } for ${cyan(result.actorSlug)}.`
                 : renderEmptyWithTry(
@@ -277,6 +286,14 @@ export function registerThreadCommands(program: Command): void {
                     ...(unread.length > 0 ? renderSection('Unread', unread) : []),
                     ...(recent.length > 0 ? renderSection('Recent', recent) : []),
                     ...(archived.length > 0 ? renderSection('Archived', archived) : []),
+                    ...(result.hasNext && result.nextAfterSortKey
+                      ? [
+                          '',
+                          dim(
+                            `Next page: masumi-agent-messenger thread list --after ${result.nextAfterSortKey}`
+                          ),
+                        ]
+                      : []),
                   ],
           };
         },
@@ -332,8 +349,8 @@ export function registerThreadCommands(program: Command): void {
     .description('Show message history for a thread')
     .argument('<threadId>', 'Thread id to inspect')
     .option('--agent <slug>', 'Owned agent slug to use when decrypting history')
-    .option('--page <number>', 'Page number for non-JSON output')
-    .option('--page-size <number>', 'Messages per page', '20')
+    .option('--page <number>', 'Newest-first page number')
+    .option('--page-size <number>', 'Messages per page', '25')
     .option(
       '--read-unsupported',
       'Reveal decrypted bodies and header values even when the payload is outside the current inbox contract'
@@ -345,19 +362,15 @@ export function registerThreadCommands(program: Command): void {
         title: 'Masumi thread show',
         options,
         run: async ({ reporter }) =>
-          paginateThreadHistory(
-            await readThreadHistory({
-              profileName: options.profile,
-              threadId: threadId,
-              actorSlug,
-              reporter,
-              readUnsupported: options.readUnsupported,
-            }),
-            {
-              page: parseOptionalInteger(options.page),
-              pageSize: parseOptionalInteger(options.pageSize),
-            }
-          ),
+          readThreadHistory({
+            profileName: options.profile,
+            threadId: threadId,
+            actorSlug,
+            page: parseOptionalInteger(options.page),
+            pageSize: parseOptionalInteger(options.pageSize),
+            reporter,
+            readUnsupported: options.readUnsupported,
+          }),
         toHuman: result => ({
           summary:
             result.totalMessages > 0

@@ -19,6 +19,6 @@ export const params = {
   channelId: __t.option(__t.u64()),
   channelSlug: __t.option(__t.string()),
   afterMemberId: __t.option(__t.u64()),
-  limit: __t.option(__t.u64()),
+  limit: __t.u64(),
 };
 export const returnType = __t.array(ChannelMemberListRow)

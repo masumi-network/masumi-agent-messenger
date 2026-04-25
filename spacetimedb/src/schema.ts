@@ -9,6 +9,8 @@ import { deviceShareRequestTable } from './tables/device-share-request';
 import { deviceKeyBundleTable } from './tables/device-key-bundle';
 import { deviceKeyBundleExpiryTable } from './tables/device-key-bundle-expiry';
 import { threadTable } from './tables/thread';
+import { inboxThreadTable } from './tables/inbox-thread';
+import { inboxThreadBackfillTable } from './tables/inbox-thread-backfill';
 import { directThreadIndexTable } from './tables/direct-thread-index';
 import { threadParticipantTable } from './tables/thread-participant';
 import { threadSecretEnvelopeTable } from './tables/thread-secret-envelope';
@@ -28,6 +30,48 @@ import { rateLimitReportTable } from './tables/rate-limit-report';
 import { rateLimitReportCleanupTable } from './tables/rate-limit-report-cleanup';
 import { contactAllowlistEntryTable } from './tables/contact-allowlist-entry';
 
+type RuntimeIndexDef = {
+  sourceName: string;
+  accessorName?: string;
+  algorithm: unknown;
+};
+
+type RuntimeTableDef = {
+  sourceName: string;
+  indexes: RuntimeIndexDef[];
+  [key: string]: unknown;
+};
+
+type RuntimeTableSchema = {
+  tableDef: RuntimeTableDef;
+};
+
+type RuntimeSchema = {
+  schemaType: {
+    tables: Record<string, RuntimeTableSchema>;
+  };
+};
+
+function toSnakeCaseIdentifier(value: string) {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[-\s]+/g, '_')
+    .toLowerCase();
+}
+
+function useCanonicalRuntimeSourceNames(runtimeSchema: RuntimeSchema) {
+  for (const tableSchema of Object.values(runtimeSchema.schemaType.tables)) {
+    tableSchema.tableDef = {
+      ...tableSchema.tableDef,
+      sourceName: toSnakeCaseIdentifier(tableSchema.tableDef.sourceName),
+      indexes: tableSchema.tableDef.indexes.map(index => ({
+        ...index,
+        sourceName: toSnakeCaseIdentifier(index.sourceName),
+      })),
+    };
+  }
+}
+
 const spacetimedb = schema({
   inbox: inboxTable,
   inboxAuthLease: inboxAuthLeaseTable,
@@ -39,6 +83,8 @@ const spacetimedb = schema({
   deviceKeyBundle: deviceKeyBundleTable,
   deviceKeyBundleExpiry: deviceKeyBundleExpiryTable,
   thread: threadTable,
+  inboxThread: inboxThreadTable,
+  inboxThreadBackfill: inboxThreadBackfillTable,
   directThreadIndex: directThreadIndexTable,
   threadParticipant: threadParticipantTable,
   threadSecretEnvelope: threadSecretEnvelopeTable,
@@ -58,5 +104,10 @@ const spacetimedb = schema({
   rateLimitReportCleanup: rateLimitReportCleanupTable,
   contactAllowlistEntry: contactAllowlistEntryTable,
 });
+
+// The JS module runtime asks for indexes by raw `sourceName` when building
+// ctx.db. With the default SnakeCase module policy those physical names are
+// canonical snake_case names, so normalize only the runtime lookup metadata.
+useCanonicalRuntimeSourceNames(spacetimedb as unknown as RuntimeSchema);
 
 export default spacetimedb;

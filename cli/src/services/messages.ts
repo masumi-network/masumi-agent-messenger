@@ -138,8 +138,8 @@ function normalizePage(value: number | undefined): number {
 
 function normalizePageSize(value: number | undefined): number {
   if (value === undefined) return 5;
-  if (!Number.isInteger(value) || value < 1 || value > 50) {
-    throw userError('Page size must be an integer between 1 and 50.', {
+  if (!Number.isInteger(value) || value < 1 || value > 25) {
+    throw userError('Page size must be an integer between 1 and 25.', {
       code: 'INVALID_PAGE_SIZE',
     });
   }

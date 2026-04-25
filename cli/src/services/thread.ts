@@ -10,14 +10,17 @@ import {
   type ResolvedPublishedActor,
 } from '../../../shared/published-actors';
 import { timestampToISOString } from '../../../shared/spacetime-time';
+import type { DbConnection } from '../../../webapp/src/module_bindings';
 import type {
   VisibleAgentRow,
   VisibleAgentKeyBundleRow,
+  VisibleThreadMessagePage,
   VisibleThreadParticipantRow,
   VisibleThreadReadStateRow,
   VisibleThreadRow,
   VisibleThreadInviteRow,
   VisibleMessageSnapshot,
+  VisibleThreadPage,
 } from '../../../webapp/src/module_bindings/types';
 import { ensureAuthenticatedSession } from './auth';
 import { getStoredActorKeyPair } from './actor-keys';
@@ -34,6 +37,7 @@ import {
 import type { EncryptedMessageHeader } from '../../../shared/message-format';
 
 type MessageSnapshot = VisibleMessageSnapshot;
+type ThreadListFilter = 'active' | 'latest' | 'archived' | 'all';
 
 export type ActorLookupMetadata = {
   input: string;
@@ -61,6 +65,12 @@ export type ThreadListResult = {
   profile: string;
   actorSlug: string;
   includeArchived: boolean;
+  filter: ThreadListFilter;
+  page: number;
+  pageSize: number;
+  hasPrevious: boolean;
+  hasNext: boolean;
+  nextAfterSortKey: string | null;
   totalThreads: number;
   threads: ThreadListItem[];
 };
@@ -176,8 +186,14 @@ function compareBigInt(left: bigint, right: bigint): number {
   return 0;
 }
 
-function compareBigIntDesc(left: bigint, right: bigint): number {
-  return compareBigInt(right, left);
+function mergeRowsById<Row extends { id: bigint }>(...rowGroups: Row[][]): Row[] {
+  const byId = new Map<bigint, Row>();
+  for (const rows of rowGroups) {
+    for (const row of rows) {
+      byId.set(row.id, row);
+    }
+  }
+  return Array.from(byId.values());
 }
 
 function normalizePage(value: number | undefined): number {
@@ -191,9 +207,9 @@ function normalizePage(value: number | undefined): number {
 }
 
 function normalizePageSize(value: number | undefined): number {
-  if (value === undefined) return 20;
-  if (!Number.isInteger(value) || value < 1 || value > 100) {
-    throw userError('Page size must be an integer between 1 and 100.', {
+  if (value === undefined) return 25;
+  if (!Number.isInteger(value) || value < 1 || value > 25) {
+    throw userError('Page size must be an integer between 1 and 25.', {
       code: 'INVALID_PAGE_SIZE',
     });
   }
@@ -212,6 +228,37 @@ function parseThreadId(value: string): bigint {
       code: 'INVALID_THREAD_ID',
     });
   }
+}
+
+function emptyVisibleThreadPage(): VisibleThreadPage {
+  return {
+    actors: [],
+    bundles: [],
+    participants: [],
+    readStates: [],
+    threads: [],
+    nextAfterSortKey: undefined,
+  };
+}
+
+async function readThreadMessagePageRows(params: {
+  conn: DbConnection;
+  actorId: bigint;
+  threadId: bigint;
+  beforeThreadSeq?: bigint;
+  limit: number;
+}): Promise<Pick<VisibleThreadMessagePage, 'messages' | 'secretEnvelopes'>> {
+  const page = await params.conn.procedures.listThreadMessages({
+    agentDbId: params.actorId,
+    threadId: params.threadId,
+    beforeThreadSeq: params.beforeThreadSeq,
+    limit: BigInt(params.limit),
+  });
+
+  return {
+    messages: mergeRowsById(page.messages),
+    secretEnvelopes: mergeRowsById(page.secretEnvelopes),
+  };
 }
 
 function sortActors(left: VisibleAgentRow, right: VisibleAgentRow): number {
@@ -302,6 +349,95 @@ function requireThread(snapshot: MessageSnapshot, threadId: bigint): VisibleThre
   }
 
   return thread;
+}
+
+function normalizeThreadListFilter(
+  filter: string | undefined,
+  includeArchived: boolean | undefined
+): ThreadListFilter {
+  if (filter === undefined) {
+    return includeArchived ? 'all' : 'active';
+  }
+  if (filter === 'active' || filter === 'latest' || filter === 'archived' || filter === 'all') {
+    return filter;
+  }
+  throw userError('Thread filter must be active, latest, archived, or all.', {
+    code: 'INVALID_THREAD_FILTER',
+  });
+}
+
+async function readVisibleThreadListPage(params: {
+  conn: DbConnection;
+  actorId: bigint;
+  filter: ThreadListFilter;
+  page: number;
+  pageSize: number;
+  afterSortKey?: string;
+}): Promise<VisibleThreadPage> {
+  if (params.afterSortKey && params.page > 1) {
+    throw userError('Use either --after or --page, not both.', {
+      code: 'THREAD_PAGE_CONFLICT',
+    });
+  }
+
+  let afterSortKey = params.afterSortKey;
+  for (let currentPage = 1; currentPage <= params.page; currentPage += 1) {
+    const page = await params.conn.procedures.listVisibleThreads({
+      agentDbId: params.actorId,
+      afterSortKey,
+      filter: params.filter,
+      query: undefined,
+      limit: BigInt(params.pageSize),
+    });
+    if (currentPage === params.page) {
+      return page;
+    }
+    if (page.nextAfterSortKey === undefined) {
+      return emptyVisibleThreadPage();
+    }
+    afterSortKey = page.nextAfterSortKey;
+  }
+
+  return emptyVisibleThreadPage();
+}
+
+async function readVisibleThreadPageForActor(params: {
+  conn: DbConnection;
+  snapshot: MessageSnapshot;
+  normalizedEmail: string;
+  actorSlug?: string;
+  threadId: bigint;
+}): Promise<{ actor: VisibleAgentRow; page: VisibleThreadPage }> {
+  const defaultActor = requireDefaultActor(params.snapshot, params.normalizedEmail);
+  const candidates = params.actorSlug
+    ? [
+        resolveOwnedActor({
+          snapshot: params.snapshot,
+          normalizedEmail: params.normalizedEmail,
+          actorSlug: params.actorSlug,
+        }),
+      ]
+    : params.snapshot.actors
+        .filter(actor => actor.inboxId === defaultActor.inboxId)
+        .sort(sortActors);
+
+  for (const actor of candidates) {
+    try {
+      const page = await params.conn.procedures.readVisibleThread({
+        agentDbId: actor.id,
+        threadId: params.threadId,
+      });
+      if (page.threads.some(thread => thread.id === params.threadId)) {
+        return { actor, page };
+      }
+    } catch {
+      // Try the next owned actor before surfacing the not-found error.
+    }
+  }
+
+  throw userError(`Thread ${params.threadId.toString()} is not visible.`, {
+    code: 'THREAD_NOT_FOUND',
+  });
 }
 
 function requireActiveThreadParticipant(
@@ -464,6 +600,10 @@ export async function listThreads(params: {
   profileName: string;
   actorSlug?: string;
   includeArchived?: boolean;
+  filter?: string;
+  page?: number;
+  pageSize?: number;
+  afterSortKey?: string;
   reporter: TaskReporter;
 }): Promise<ThreadListResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
@@ -485,66 +625,58 @@ export async function listThreads(params: {
   try {
     params.reporter.verbose?.('Reading latest thread state');
     const snapshot = await readLatestMessageRows(conn);
-      const actor = resolveOwnedActor({
-        snapshot,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
-      });
-      const ownActorIds = buildOwnActorIds(snapshot.actors, actor.inboxId);
-      const participantsByThreadId = buildParticipantsByThreadId(
-        snapshot.participants.filter(participant => participant.active)
-      );
-      const actorsById = new Map(snapshot.actors.map(row => [row.id, row] as const));
-      const readStateByThreadId = buildReadStateByThreadId(snapshot.readStates, actor.id);
+    const actor = resolveOwnedActor({
+      snapshot,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
+    const page = normalizePage(params.page);
+    const pageSize = normalizePageSize(params.pageSize);
+    const filter = normalizeThreadListFilter(params.filter, params.includeArchived);
+    const threadPage = await readVisibleThreadListPage({
+      conn,
+      actorId: actor.id,
+      filter,
+      page,
+      pageSize,
+      afterSortKey: params.afterSortKey,
+    });
+    const mergedActors = mergeRowsById(snapshot.actors, threadPage.actors);
+    const ownActorIds = buildOwnActorIds(mergedActors, actor.inboxId);
+    const participantsByThreadId = buildParticipantsByThreadId(
+      threadPage.participants.filter(participant => participant.active)
+    );
+    const actorsById = new Map(mergedActors.map(row => [row.id, row] as const));
+    const readStateByThreadId = buildReadStateByThreadId(threadPage.readStates, actor.id);
 
-      const threads = snapshot.threads
-        .filter(thread =>
-          (participantsByThreadId.get(thread.id) ?? []).some(
-            participant => participant.agentDbId === actor.id
-          )
-        )
-        .filter(thread => {
-          if (params.includeArchived) {
-            return true;
-          }
-          return !(readStateByThreadId.get(thread.id)?.archived ?? false);
-        })
-        .sort((left, right) => {
-          const byTime = compareBigIntDesc(
-            left.lastMessageAt.microsSinceUnixEpoch,
-            right.lastMessageAt.microsSinceUnixEpoch
-          );
-          if (byTime !== 0) return byTime;
-          return compareBigIntDesc(left.id, right.id);
-        })
-        .map(thread => {
-          const readState = readStateByThreadId.get(thread.id);
-          const lastRead = readState?.lastReadThreadSeq ?? 0n;
-          const unreadMessages =
-            thread.lastMessageSeq > lastRead ? Number(thread.lastMessageSeq - lastRead) : 0;
+    const threads = threadPage.threads.map(thread => {
+      const readState = readStateByThreadId.get(thread.id);
+      const lastRead = readState?.lastReadThreadSeq ?? 0n;
+      const unreadMessages =
+        thread.lastMessageSeq > lastRead ? Number(thread.lastMessageSeq - lastRead) : 0;
 
-          return {
-            id: thread.id.toString(),
-            kind: thread.kind,
-            label: buildThreadLabel({
-              thread,
-              participantsByThreadId,
-              actorsById,
-              ownActorIds,
-            }),
-            locked: thread.membershipLocked,
-            archived: readState?.archived ?? false,
-            unreadMessages,
-            participantCount: (participantsByThreadId.get(thread.id) ?? []).length,
-            participants: listThreadParticipants({
-              participantsByThreadId,
-              threadId: thread.id,
-              actorsById,
-            }),
-            lastMessageAt: timestampToISOString(thread.lastMessageAt),
-            lastMessageSeq: thread.lastMessageSeq.toString(),
-          } satisfies ThreadListItem;
-        });
+      return {
+        id: thread.id.toString(),
+        kind: thread.kind,
+        label: buildThreadLabel({
+          thread,
+          participantsByThreadId,
+          actorsById,
+          ownActorIds,
+        }),
+        locked: thread.membershipLocked,
+        archived: readState?.archived ?? false,
+        unreadMessages,
+        participantCount: (participantsByThreadId.get(thread.id) ?? []).length,
+        participants: listThreadParticipants({
+          participantsByThreadId,
+          threadId: thread.id,
+          actorsById,
+        }),
+        lastMessageAt: timestampToISOString(thread.lastMessageAt),
+        lastMessageSeq: thread.lastMessageSeq.toString(),
+      } satisfies ThreadListItem;
+    });
 
       params.reporter.success(
         `Loaded ${threads.length} visible thread${threads.length === 1 ? '' : 's'}`
@@ -556,6 +688,12 @@ export async function listThreads(params: {
         profile: profile.name,
         actorSlug: actor.slug,
         includeArchived: Boolean(params.includeArchived),
+        filter,
+        page,
+        pageSize,
+        hasPrevious: Boolean(params.afterSortKey) || page > 1,
+        hasNext: threadPage.nextAfterSortKey !== undefined,
+        nextAfterSortKey: threadPage.nextAfterSortKey ?? null,
         totalThreads: threads.length,
         threads,
       };
@@ -599,29 +737,37 @@ export async function countThreadMessages(params: {
   try {
     params.reporter.verbose?.('Reading latest thread message state');
     const snapshot = await readLatestMessageRows(conn);
-      const actor = resolveOwnedActor({
+      const { actor, page } = await readVisibleThreadPageForActor({
+        conn,
         snapshot,
         normalizedEmail,
         actorSlug: params.actorSlug,
         threadId: requestedThreadId,
       });
-      const thread = requireThread(snapshot, requestedThreadId);
-      requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
+      const thread = requireThread(
+        { ...snapshot, threads: page.threads },
+        requestedThreadId
+      );
+      requireActiveThreadParticipant(
+        { ...snapshot, participants: page.participants },
+        requestedThreadId,
+        actor.id
+      );
 
       const ownActorIds = buildOwnActorIds(snapshot.actors, actor.inboxId);
       const participantsByThreadId = buildParticipantsByThreadId(
-        snapshot.participants.filter(participant => participant.active)
+        page.participants.filter(participant => participant.active)
       );
-      const actorsById = new Map(snapshot.actors.map(row => [row.id, row] as const));
-      const readState = buildReadStateByThreadId(snapshot.readStates, actor.id).get(thread.id);
+      const actorsById = new Map(
+        mergeRowsById(snapshot.actors, page.actors).map(row => [row.id, row] as const)
+      );
+      const readState = buildReadStateByThreadId(page.readStates, actor.id).get(thread.id);
       const participants = listThreadParticipants({
         participantsByThreadId,
         threadId: thread.id,
         actorsById,
       });
-      const messageCount = snapshot.messages.filter(
-        message => message.threadId === requestedThreadId
-      ).length;
+      const messageCount = Number(thread.lastMessageSeq);
       const label = buildThreadLabel({
         thread,
         participantsByThreadId,
@@ -670,9 +816,11 @@ export async function readThreadHistory(params: {
   profileName: string;
   threadId: string;
   actorSlug?: string;
+  page?: number;
+  pageSize?: number;
   reporter: TaskReporter;
   readUnsupported?: boolean;
-}): Promise<ThreadHistoryResult> {
+}): Promise<PaginatedThreadHistoryResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
   const normalizedEmail = normalizeEmail(claims.email ?? '');
   if (!normalizedEmail) {
@@ -695,26 +843,46 @@ export async function readThreadHistory(params: {
   try {
     params.reporter.verbose?.('Reading latest thread history');
     const snapshot = await readLatestMessageRows(conn);
-      const actor = resolveOwnedActor({
+      const { actor, page } = await readVisibleThreadPageForActor({
+        conn,
         snapshot,
         normalizedEmail,
         actorSlug: params.actorSlug,
         threadId: requestedThreadId,
       });
-      const thread = requireThread(snapshot, requestedThreadId);
-      requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
-
-      const ownActorIds = buildOwnActorIds(snapshot.actors, actor.inboxId);
-      const participantsByThreadId = buildParticipantsByThreadId(
-        snapshot.participants.filter(participant => participant.active)
+      const thread = requireThread(
+        { ...snapshot, threads: page.threads },
+        requestedThreadId
       );
-      const actorsById = new Map(snapshot.actors.map(row => [row.id, row] as const));
+      requireActiveThreadParticipant(
+        { ...snapshot, participants: page.participants },
+        requestedThreadId,
+        actor.id
+      );
+
+      const mergedActors = mergeRowsById(snapshot.actors, page.actors);
+      const ownActorIds = buildOwnActorIds(mergedActors, actor.inboxId);
+      const participantsByThreadId = buildParticipantsByThreadId(
+        page.participants.filter(participant => participant.active)
+      );
+      const actorsById = new Map(mergedActors.map(row => [row.id, row] as const));
       const bundlesByActorId = new Map<bigint, VisibleAgentKeyBundleRow[]>();
-      for (const bundle of snapshot.bundles) {
+      for (const bundle of mergeRowsById(snapshot.bundles, page.bundles)) {
         const list = bundlesByActorId.get(bundle.agentDbId) ?? [];
         list.push(bundle);
         bundlesByActorId.set(bundle.agentDbId, list);
       }
+
+      const requestedPage = normalizePage(params.page);
+      const pageSize = normalizePageSize(params.pageSize);
+      const totalMessages = Number(thread.lastMessageSeq);
+      const totalPages = Math.max(1, Math.ceil(totalMessages / pageSize));
+      const boundedPage = Math.min(requestedPage, totalPages);
+      const messageOffset = BigInt(boundedPage - 1) * BigInt(pageSize);
+      const beforeThreadSeq =
+        boundedPage <= 1 || thread.lastMessageSeq === 0n
+          ? undefined
+          : thread.lastMessageSeq + 1n - messageOffset;
 
       const recipientKeyPair = await getStoredActorKeyPair({
         profile,
@@ -726,8 +894,20 @@ export async function readThreadHistory(params: {
         },
       });
 
+      const historyRows = await readThreadMessagePageRows({
+        conn,
+        actorId: actor.id,
+        threadId: requestedThreadId,
+        beforeThreadSeq,
+        limit: pageSize,
+      });
+      const secretEnvelopes = mergeRowsById(
+        snapshot.secretEnvelopes,
+        historyRows.secretEnvelopes
+      );
+
       const messages = await Promise.all(
-        snapshot.messages
+        historyRows.messages
           .filter(message => message.threadId === requestedThreadId)
           .sort((left, right) => compareBigInt(left.threadSeq, right.threadSeq))
           .map(async message => {
@@ -738,7 +918,7 @@ export async function readThreadHistory(params: {
               actorsById,
               bundlesByActorId,
               ownActorIds,
-              secretEnvelopes: snapshot.secretEnvelopes,
+              secretEnvelopes,
               recipientKeyPair,
               readUnsupported: params.readUnsupported,
             });
@@ -770,7 +950,7 @@ export async function readThreadHistory(params: {
           })
       );
 
-      const readState = buildReadStateByThreadId(snapshot.readStates, actor.id).get(thread.id);
+      const readState = buildReadStateByThreadId(page.readStates, actor.id).get(thread.id);
       const lastReadThreadSeq = readState?.lastReadThreadSeq?.toString() ?? '0';
       const label = buildThreadLabel({
         thread,
@@ -796,7 +976,14 @@ export async function readThreadHistory(params: {
           archived: readState?.archived ?? false,
         },
         lastReadThreadSeq,
-        totalMessages: messages.length,
+        totalMessages,
+        page: boundedPage,
+        pageSize,
+        totalPages,
+        hasPrevious: boundedPage > 1,
+        hasNext: boundedPage < totalPages,
+        previousPage: boundedPage > 1 ? boundedPage - 1 : null,
+        nextPage: boundedPage < totalPages ? boundedPage + 1 : null,
         messages,
       };
   } catch (error) {

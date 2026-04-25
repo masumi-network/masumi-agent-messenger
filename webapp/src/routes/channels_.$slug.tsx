@@ -1112,7 +1112,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         channelId: channel.channelId,
         channelSlug: undefined,
         afterMemberId,
-        limit: 100n,
+        limit: 25n,
       });
       setMemberRows(current => (reset ? rows : [...current, ...rows]));
     } catch (error) {
@@ -1224,7 +1224,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         channelId: channel.channelId,
         channelSlug: undefined,
         beforeChannelSeq: earliestLoadedSeq,
-        limit: 100n,
+        limit: 25n,
       });
       setHistoryMessages(current => {
         const byKey = new Map<string, ChannelMessageRow>();

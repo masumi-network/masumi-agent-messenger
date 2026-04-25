@@ -8,6 +8,8 @@ import * as model from '../../model';
 const {
   MAX_THREAD_FANOUT,
   MAX_CHANNEL_MESSAGE_PAGE_SIZE,
+  MAX_VISIBLE_AGENT_KEY_BUNDLES_PER_AGENT,
+  MAX_AGENT_KEY_BUNDLE_PAGE_SIZE,
   DEFAULT_AGENT_ENCRYPTION_ALGORITHM,
   DEFAULT_AGENT_SIGNING_ALGORITHM,
   AGENT_KEY_ROTATE_RATE_WINDOW_MS,
@@ -28,12 +30,26 @@ const {
   buildAgentKeyBundleKey,
   getReadableInbox,
   getOwnedActorWithInbox,
+  getOwnedActorForRead,
+  buildLatestVisibleAgentIdsForInbox,
   buildVisibleAgentIdsForInbox,
   getOwnedDevice,
   invalidatePendingDeviceShareRequests,
   invalidatePendingDeviceKeyBundles,
   insertDeviceKeyBundle,
 } = model;
+
+function compareAgentKeyBundleDesc(
+  left: model.AgentKeyBundleRow,
+  right: model.AgentKeyBundleRow
+) {
+  if (left.createdAt.microsSinceUnixEpoch > right.createdAt.microsSinceUnixEpoch) return -1;
+  if (left.createdAt.microsSinceUnixEpoch < right.createdAt.microsSinceUnixEpoch) return 1;
+  if (left.id > right.id) return -1;
+  if (left.id < right.id) return 1;
+  return 0;
+}
+
 export const visibleAgentKeyBundles = spacetimedb.view(
   { public: true },
   t.array(VisibleAgentKeyBundleRow),
@@ -43,9 +59,47 @@ export const visibleAgentKeyBundles = spacetimedb.view(
       return [];
     }
 
-    return Array.from(buildVisibleAgentIdsForInbox(ctx, inbox.id)).flatMap(agentDbId =>
+    return Array.from(buildLatestVisibleAgentIdsForInbox(ctx, inbox.id)).flatMap(agentDbId =>
       Array.from(ctx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(agentDbId))
+        .sort(compareAgentKeyBundleDesc)
+        .slice(0, MAX_VISIBLE_AGENT_KEY_BUNDLES_PER_AGENT)
     );
+  }
+);
+
+export const lookupAgentKeyBundles = spacetimedb.procedure(
+  {
+    agentDbId: t.u64(),
+    peerAgentDbId: t.u64(),
+    beforeBundleId: t.u64().optional(),
+    limit: t.u64(),
+  },
+  t.array(VisibleAgentKeyBundleRow),
+  (ctx, { agentDbId, peerAgentDbId, beforeBundleId, limit }) => {
+    return ctx.withTx(tx => {
+      if (limit === 0n) {
+        throw new SenderError('limit is required and must be greater than zero');
+      }
+      const pageSize =
+        limit > BigInt(MAX_AGENT_KEY_BUNDLE_PAGE_SIZE)
+          ? MAX_AGENT_KEY_BUNDLE_PAGE_SIZE
+          : Number(limit);
+
+      const actor = getOwnedActorForRead(tx, agentDbId);
+      const visibleAgentIds = buildVisibleAgentIdsForInbox(tx, actor.inboxId);
+      if (!visibleAgentIds.has(peerAgentDbId)) {
+        throw new SenderError('Peer agent is not visible to this actor');
+      }
+
+      const bundles = Array.from(
+        tx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(peerAgentDbId)
+      ).sort(compareAgentKeyBundleDesc);
+      const filtered =
+        beforeBundleId === undefined
+          ? bundles
+          : bundles.filter(bundle => bundle.id < beforeBundleId);
+      return filtered.slice(0, pageSize);
+    });
   }
 );
 

@@ -230,21 +230,6 @@ export const VisibleChannelMessageRow = t.object('VisibleChannelMessageRow', {
   createdAt: t.timestamp(),
 });
 
-export const SelectedPublicRecentChannelMessageRow = t.object('SelectedPublicRecentChannelMessageRow', {
-  id: t.u64(),
-  channelId: t.u64(),
-  channelSeq: t.u64(),
-  senderAgentDbId: t.u64(),
-  senderPublicIdentity: t.string(),
-  senderSeq: t.u64(),
-  senderSigningPublicKey: t.string(),
-  senderSigningKeyVersion: t.string(),
-  plaintext: t.string(),
-  signature: t.string(),
-  replyToMessageId: t.u64().optional(),
-  createdAt: t.timestamp(),
-});
-
 export const VisibleChannelRow = t.object('VisibleChannelRow', {
   id: t.u64(),
   slug: t.string(),
@@ -373,6 +358,21 @@ export const VisibleMessageSnapshot = t.object('VisibleMessageSnapshot', {
   contactRequests: t.array(VisibleContactRequestRow),
   threadInvites: t.array(VisibleThreadInviteRow),
   messages: t.array(VisibleMessageRow),
+});
+
+export const VisibleThreadMessagePage = t.object('VisibleThreadMessagePage', {
+  messages: t.array(VisibleMessageRow),
+  secretEnvelopes: t.array(VisibleThreadSecretEnvelopeRow),
+  nextBeforeThreadSeq: t.u64().optional(),
+});
+
+export const VisibleThreadPage = t.object('VisibleThreadPage', {
+  actors: t.array(VisibleAgentRow),
+  bundles: t.array(VisibleAgentKeyBundleRow),
+  participants: t.array(VisibleThreadParticipantRow),
+  readStates: t.array(VisibleThreadReadStateRow),
+  threads: t.array(VisibleThreadRow),
+  nextAfterSortKey: t.string().optional(),
 });
 
 export const PublishedAgentLookupRow = t.object('PublishedAgentLookupRow', {

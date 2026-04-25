@@ -11,6 +11,7 @@ import * as model from '../../model';
 const {
   MAX_CHANNEL_RECENT_PUBLIC_MESSAGES,
   MAX_CHANNEL_MESSAGE_PAGE_SIZE,
+  MAX_VISIBLE_CHANNEL_MESSAGE_CHANNELS,
   ChannelMessageRow,
   VisibleChannelMessageRow,
   requireNonEmpty,
@@ -30,6 +31,8 @@ const {
   upsertPublicChannelRow,
   toChannelMessageRow,
   insertPublicRecentChannelMessage,
+  getChannelMessagesInSeqRange,
+  buildChannelDiscoverableSortKey,
 } = model;
 export const visibleChannelMessages = spacetimedb.view(
   { public: true },
@@ -40,19 +43,25 @@ export const visibleChannelMessages = spacetimedb.view(
       return [];
     }
 
-    const readableChannelIds = new Set(
-      Array.from(ctx.db.channelMember.channel_member_inbox_id.filter(inbox.id))
-        .filter(isChannelMemberReadable)
-        .map(member => member.channelId)
-    );
+    const readableChannels = Array.from(
+      ctx.db.channelMember.channel_member_inbox_id.filter(inbox.id)
+    )
+      .filter(isChannelMemberReadable)
+      .map(member => ctx.db.channel.id.find(member.channelId))
+      .filter((channel): channel is NonNullable<typeof channel> => Boolean(channel))
+      .sort((left, right) => {
+        if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch)
+          return -1;
+        if (left.lastMessageAt.microsSinceUnixEpoch < right.lastMessageAt.microsSinceUnixEpoch)
+          return 1;
+        if (left.id > right.id) return -1;
+        if (left.id < right.id) return 1;
+        return 0;
+      })
+      .slice(0, MAX_VISIBLE_CHANNEL_MESSAGE_CHANNELS);
 
-    return Array.from(readableChannelIds)
-      .flatMap(channelId => {
-        const channel = ctx.db.channel.id.find(channelId);
-        if (!channel) {
-          return [];
-        }
-
+    return readableChannels
+      .flatMap(channel => {
         const upperBound = channel.nextChannelSeq;
         if (upperBound <= 1n) {
           return [];
@@ -62,8 +71,7 @@ export const visibleChannelMessages = spacetimedb.view(
             ? upperBound - BigInt(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)
             : 1n;
 
-        return Array.from(ctx.db.channelMessage.channel_message_channel_id.filter(channel.id))
-          .filter(message => message.channelSeq >= lowerBound && message.channelSeq < upperBound)
+        return getChannelMessagesInSeqRange(ctx, channel.id, lowerBound, upperBound)
           .sort((left, right) => {
             if (left.channelSeq > right.channelSeq) return -1;
             if (left.channelSeq < right.channelSeq) return 1;
@@ -87,7 +95,7 @@ export const listChannelMessages = spacetimedb.procedure(
     channelId: t.u64().optional(),
     channelSlug: t.string().optional(),
     beforeChannelSeq: t.u64().optional(),
-    limit: t.u64().optional(),
+    limit: t.u64(),
   },
   t.array(ChannelMessageRow),
   (ctx, { agentDbId, channelId, channelSlug, beforeChannelSeq, limit }) => {
@@ -96,8 +104,11 @@ export const listChannelMessages = spacetimedb.procedure(
       const channel = resolveRequiredChannel(tx, { channelId, channelSlug });
       requireChannelReadableByActor(tx, channel, actor);
 
+      if (limit === 0n) {
+        throw new SenderError('limit is required and must be greater than zero');
+      }
       const pageSize =
-        limit === undefined || limit === 0n || limit > BigInt(MAX_CHANNEL_MESSAGE_PAGE_SIZE)
+        limit > BigInt(MAX_CHANNEL_MESSAGE_PAGE_SIZE)
           ? MAX_CHANNEL_MESSAGE_PAGE_SIZE
           : Number(limit);
       const requestedUpperBound = beforeChannelSeq ?? channel.nextChannelSeq;
@@ -109,8 +120,7 @@ export const listChannelMessages = spacetimedb.procedure(
       const lowerBound =
         upperBound > BigInt(pageSize) ? upperBound - BigInt(pageSize) : 1n;
 
-      return Array.from(tx.db.channelMessage.channel_message_channel_id.filter(channel.id))
-        .filter(message => message.channelSeq >= lowerBound && message.channelSeq < upperBound)
+      return getChannelMessagesInSeqRange(tx, channel.id, lowerBound, upperBound)
         .sort((left, right) => {
           if (left.channelSeq > right.channelSeq) return -1;
           if (left.channelSeq < right.channelSeq) return 1;
@@ -186,7 +196,8 @@ export const sendChannelMessage = spacetimedb.reducer(
       }
     }
 
-    const channelSeq = channel.nextChannelSeq;
+    const channelSeq = channel.lastMessageSeq + 1n;
+
     const message = ctx.db.channelMessage.insert({
       id: 0n,
       channelId: channel.id,
@@ -209,6 +220,10 @@ export const sendChannelMessage = spacetimedb.reducer(
       lastMessageSeq: channelSeq,
       updatedAt: ctx.timestamp,
       lastMessageAt: ctx.timestamp,
+      discoverableSortKey: buildChannelDiscoverableSortKey({
+        id: channel.id,
+        lastMessageAt: ctx.timestamp,
+      }),
     });
     ctx.db.channelMember.id.update({
       ...senderMember,

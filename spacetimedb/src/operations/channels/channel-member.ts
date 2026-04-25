@@ -17,6 +17,7 @@ const {
   getReadableInbox,
   getOwnedActor,
   getOwnedActorForRead,
+  getChannelMemberPageById,
   requireActiveChannelMember,
   requireAdminChannelMember,
   ensureChannelMember,
@@ -54,7 +55,7 @@ export const listChannelMembers = spacetimedb.procedure(
     channelId: t.u64().optional(),
     channelSlug: t.string().optional(),
     afterMemberId: t.u64().optional(),
-    limit: t.u64().optional(),
+    limit: t.u64(),
   },
   t.array(ChannelMemberListRowSchema),
   (ctx, { agentDbId, channelId, channelSlug, afterMemberId, limit }) => {
@@ -63,20 +64,17 @@ export const listChannelMembers = spacetimedb.procedure(
       const channel = resolveRequiredChannel(tx, { channelId, channelSlug });
       requireActiveChannelMember(tx, channel.id, actor.id);
 
+      if (limit === 0n) {
+        throw new SenderError('limit is required and must be greater than zero');
+      }
       const pageSize =
-        limit === undefined || limit === 0n || limit > BigInt(MAX_CHANNEL_MEMBER_PAGE_SIZE)
+        limit > BigInt(MAX_CHANNEL_MEMBER_PAGE_SIZE)
           ? MAX_CHANNEL_MEMBER_PAGE_SIZE
           : Number(limit);
       const lowerBound = afterMemberId ?? 0n;
 
       const rows: ChannelMemberListResultRow[] = [];
-      const members = Array.from(tx.db.channelMember.iter())
-        .filter(member => member.channelId === channel.id && member.id > lowerBound)
-        .sort((left, right) => {
-          if (left.id < right.id) return -1;
-          if (left.id > right.id) return 1;
-          return 0;
-        });
+      const members = getChannelMemberPageById(tx, channel.id, lowerBound, pageSize);
 
       for (const member of members) {
         const memberActor = getRequiredActorByDbId(tx, member.agentDbId);
@@ -95,9 +93,6 @@ export const listChannelMembers = spacetimedb.procedure(
           joinedAt: member.joinedAt,
           updatedAt: member.updatedAt,
         });
-        if (rows.length >= pageSize) {
-          break;
-        }
       }
       return rows;
     });

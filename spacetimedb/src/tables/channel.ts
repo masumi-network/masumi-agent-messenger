@@ -35,5 +35,6 @@ export const channelTable = table(
       updatedAt: t.timestamp(),
       lastMessageAt: t.timestamp(),
       publicJoinPermission: t.string().default('read'),
+      discoverableSortKey: t.string().default('pending'),
     }
 );

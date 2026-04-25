@@ -9,11 +9,17 @@ import { type Infer as __Infer } from "spacetimedb";
 import * as ClaimDeviceKeyBundleProcedure from "../claim_device_key_bundle_procedure";
 import * as ListChannelMembersProcedure from "../list_channel_members_procedure";
 import * as ListChannelMessagesProcedure from "../list_channel_messages_procedure";
+import * as ListDiscoverableChannelsProcedure from "../list_discoverable_channels_procedure";
+import * as ListThreadMessagesProcedure from "../list_thread_messages_procedure";
+import * as ListThreadSecretEnvelopesProcedure from "../list_thread_secret_envelopes_procedure";
+import * as ListVisibleThreadsProcedure from "../list_visible_threads_procedure";
+import * as LookupAgentKeyBundlesProcedure from "../lookup_agent_key_bundles_procedure";
 import * as LookupPublishedAgentBySlugProcedure from "../lookup_published_agent_by_slug_procedure";
 import * as LookupPublishedAgentSigningKeysProcedure from "../lookup_published_agent_signing_keys_procedure";
 import * as LookupPublishedAgentsByEmailProcedure from "../lookup_published_agents_by_email_procedure";
 import * as LookupPublishedPublicRouteBySlugProcedure from "../lookup_published_public_route_by_slug_procedure";
 import * as ReadVisibleMessageSnapshotProcedure from "../read_visible_message_snapshot_procedure";
+import * as ReadVisibleThreadProcedure from "../read_visible_thread_procedure";
 import * as ResolveDeviceShareRequestByCodeProcedure from "../resolve_device_share_request_by_code_procedure";
 
 export type ClaimDeviceKeyBundleArgs = __Infer<typeof ClaimDeviceKeyBundleProcedure.params>;
@@ -22,6 +28,16 @@ export type ListChannelMembersArgs = __Infer<typeof ListChannelMembersProcedure.
 export type ListChannelMembersResult = __Infer<typeof ListChannelMembersProcedure.returnType>;
 export type ListChannelMessagesArgs = __Infer<typeof ListChannelMessagesProcedure.params>;
 export type ListChannelMessagesResult = __Infer<typeof ListChannelMessagesProcedure.returnType>;
+export type ListDiscoverableChannelsArgs = __Infer<typeof ListDiscoverableChannelsProcedure.params>;
+export type ListDiscoverableChannelsResult = __Infer<typeof ListDiscoverableChannelsProcedure.returnType>;
+export type ListThreadMessagesArgs = __Infer<typeof ListThreadMessagesProcedure.params>;
+export type ListThreadMessagesResult = __Infer<typeof ListThreadMessagesProcedure.returnType>;
+export type ListThreadSecretEnvelopesArgs = __Infer<typeof ListThreadSecretEnvelopesProcedure.params>;
+export type ListThreadSecretEnvelopesResult = __Infer<typeof ListThreadSecretEnvelopesProcedure.returnType>;
+export type ListVisibleThreadsArgs = __Infer<typeof ListVisibleThreadsProcedure.params>;
+export type ListVisibleThreadsResult = __Infer<typeof ListVisibleThreadsProcedure.returnType>;
+export type LookupAgentKeyBundlesArgs = __Infer<typeof LookupAgentKeyBundlesProcedure.params>;
+export type LookupAgentKeyBundlesResult = __Infer<typeof LookupAgentKeyBundlesProcedure.returnType>;
 export type LookupPublishedAgentBySlugArgs = __Infer<typeof LookupPublishedAgentBySlugProcedure.params>;
 export type LookupPublishedAgentBySlugResult = __Infer<typeof LookupPublishedAgentBySlugProcedure.returnType>;
 export type LookupPublishedAgentSigningKeysArgs = __Infer<typeof LookupPublishedAgentSigningKeysProcedure.params>;
@@ -32,6 +48,8 @@ export type LookupPublishedPublicRouteBySlugArgs = __Infer<typeof LookupPublishe
 export type LookupPublishedPublicRouteBySlugResult = __Infer<typeof LookupPublishedPublicRouteBySlugProcedure.returnType>;
 export type ReadVisibleMessageSnapshotArgs = __Infer<typeof ReadVisibleMessageSnapshotProcedure.params>;
 export type ReadVisibleMessageSnapshotResult = __Infer<typeof ReadVisibleMessageSnapshotProcedure.returnType>;
+export type ReadVisibleThreadArgs = __Infer<typeof ReadVisibleThreadProcedure.params>;
+export type ReadVisibleThreadResult = __Infer<typeof ReadVisibleThreadProcedure.returnType>;
 export type ResolveDeviceShareRequestByCodeArgs = __Infer<typeof ResolveDeviceShareRequestByCodeProcedure.params>;
 export type ResolveDeviceShareRequestByCodeResult = __Infer<typeof ResolveDeviceShareRequestByCodeProcedure.returnType>;
 

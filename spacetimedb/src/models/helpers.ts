@@ -64,6 +64,9 @@ import {
   CHANNEL_ACCESS_MODES,
   CHANNEL_PERMISSIONS,
   CHANNEL_JOIN_REQUEST_STATUSES,
+  MAX_VISIBLE_THREAD_PAGE_SIZE,
+  MAX_INBOX_THREAD_BACKFILL_BATCH_SIZE,
+  MAX_VISIBLE_MESSAGES_PER_THREAD,
   MAX_CHANNEL_RECENT_PUBLIC_MESSAGES,
 } from './constants';
 import type { DeviceKeyBundleExpiryModeValue } from './constants';
@@ -77,11 +80,12 @@ import type {
   RateLimitRow,
   RateLimitReportRow,
   ThreadRow,
+  InboxThreadRow,
   ThreadParticipantRow,
   MessageRow,
   ChannelRow,
+  ChannelMemberRow,
   ChannelMessageRecordRow,
-  PublicRecentChannelMessageRecordRow,
   ThreadInviteRow,
   ReadDbCtx,
   ReadAuthCtx,
@@ -89,6 +93,9 @@ import type {
   DeviceReadDbCtx,
   DeviceReadAuthCtx,
 } from './types';
+
+const U64_MAX = (1n << 64n) - 1n;
+const U64_SORT_DIGITS = 20;
 
 export function normalizeEmail(value: string): string {
   return requireNonEmpty(normalizeSharedEmail(value), 'email');
@@ -1431,6 +1438,225 @@ export function buildVisibleThreadIdsForInbox(ctx: ReadDbCtx, inboxId: bigint) {
   );
 }
 
+function clampU64(value: bigint) {
+  if (value < 0n) return 0n;
+  if (value > U64_MAX) return U64_MAX;
+  return value;
+}
+
+function formatInvertedU64SortPart(value: bigint) {
+  return (U64_MAX - clampU64(value)).toString().padStart(U64_SORT_DIGITS, '0');
+}
+
+export function buildInboxThreadKey(inboxId: bigint, threadId: bigint) {
+  return `${inboxId.toString()}:${threadId.toString()}`;
+}
+
+export function buildInboxThreadSortKey(thread: Pick<ThreadRow, 'id' | 'lastMessageAt'>) {
+  return [
+    formatInvertedU64SortPart(thread.lastMessageAt.microsSinceUnixEpoch),
+    formatInvertedU64SortPart(thread.id),
+  ].join(':');
+}
+
+function findInboxThreadProjection(ctx: ReadDbCtx, uniqueKey: string) {
+  return Array.from(ctx.db.inboxThread.iter()).find(row => row.uniqueKey === uniqueKey);
+}
+
+export function findInboxThreadBackfillState(ctx: ReadDbCtx, inboxId: bigint) {
+  return Array.from(ctx.db.inboxThreadBackfill.iter()).find(row => row.inboxId === inboxId);
+}
+
+export function buildChannelDiscoverableSortKey(
+  channel: Pick<ChannelRow, 'id' | 'lastMessageAt'>
+) {
+  return [
+    formatInvertedU64SortPart(channel.lastMessageAt.microsSinceUnixEpoch),
+    formatInvertedU64SortPart(channel.id),
+  ].join(':');
+}
+
+export function buildChannelDiscoverableSortKeyFromCursor(
+  beforeLastMessageAtMicros: bigint,
+  beforeChannelId: bigint | undefined
+) {
+  return [
+    formatInvertedU64SortPart(beforeLastMessageAtMicros),
+    beforeChannelId === undefined
+      ? '9'.repeat(U64_SORT_DIGITS)
+      : formatInvertedU64SortPart(beforeChannelId),
+  ].join(':');
+}
+
+export function upsertInboxThreadProjection(
+  ctx: ModuleCtx,
+  inboxId: bigint,
+  thread: ThreadRow
+) {
+  const uniqueKey = buildInboxThreadKey(inboxId, thread.id);
+  const existing = findInboxThreadProjection(ctx, uniqueKey);
+  const row = {
+    inboxId,
+    threadId: thread.id,
+    uniqueKey,
+    sortKey: buildInboxThreadSortKey(thread),
+    lastMessageAt: thread.lastMessageAt,
+    lastMessageSeq: thread.lastMessageSeq,
+    updatedAt: ctx.timestamp,
+  };
+
+  if (!existing) {
+    ctx.db.inboxThread.insert({
+      id: 0n,
+      ...row,
+    });
+    return;
+  }
+
+  ctx.db.inboxThread.id.update({
+    ...existing,
+    ...row,
+  });
+}
+
+export function upsertInboxThreadProjectionForParticipant(
+  ctx: ModuleCtx,
+  threadId: bigint,
+  participant: Pick<ThreadParticipantRow, 'inboxId'>
+) {
+  const thread = ctx.db.thread.id.find(threadId);
+  if (!thread) {
+    return;
+  }
+  upsertInboxThreadProjection(ctx, participant.inboxId, thread);
+}
+
+export function refreshInboxThreadProjectionsForThread(ctx: ModuleCtx, thread: ThreadRow) {
+  const inboxIds = new Set(
+    getThreadParticipants(ctx, thread.id).map(participant => participant.inboxId)
+  );
+  for (const inboxId of inboxIds) {
+    upsertInboxThreadProjection(ctx, inboxId, thread);
+  }
+}
+
+export function deleteInboxThreadProjectionsForThread(ctx: ModuleCtx, threadId: bigint) {
+  for (const row of Array.from(ctx.db.inboxThread.iter()).filter(row => row.threadId === threadId)) {
+    ctx.db.inboxThread.id.delete(row.id);
+  }
+}
+
+export function ensureInboxThreadProjectionsForInbox(ctx: ModuleCtx, inboxId: bigint) {
+  const existingState = findInboxThreadBackfillState(ctx, inboxId);
+  if (existingState?.complete) {
+    return;
+  }
+
+  const lowerBound = existingState?.nextParticipantId ?? 0n;
+  let scanned = 0;
+  let lastParticipantId = existingState?.nextParticipantId ?? 0n;
+
+  const participants = Array.from(
+    ctx.db.threadParticipant.thread_participant_inbox_id.filter(inboxId)
+  )
+    .filter(participant => participant.id > lowerBound)
+    .sort((left, right) => {
+      if (left.id < right.id) return -1;
+      if (left.id > right.id) return 1;
+      return 0;
+    });
+
+  for (const participant of participants) {
+    scanned += 1;
+    lastParticipantId = participant.id;
+    const thread = ctx.db.thread.id.find(participant.threadId);
+    if (thread) {
+      upsertInboxThreadProjection(ctx, inboxId, thread);
+    }
+    if (scanned >= MAX_INBOX_THREAD_BACKFILL_BATCH_SIZE) {
+      break;
+    }
+  }
+
+  const complete = scanned < MAX_INBOX_THREAD_BACKFILL_BATCH_SIZE;
+  const nextParticipantId = complete ? 0n : lastParticipantId;
+  if (existingState) {
+    ctx.db.inboxThreadBackfill.id.update({
+      ...existingState,
+      nextParticipantId,
+      complete,
+      updatedAt: ctx.timestamp,
+    });
+    return;
+  }
+
+  ctx.db.inboxThreadBackfill.insert({
+    id: 0n,
+    inboxId,
+    nextParticipantId,
+    complete,
+    updatedAt: ctx.timestamp,
+  });
+}
+
+export function getVisibleInboxThreadPageRows(
+  ctx: ReadDbCtx,
+  inboxId: bigint,
+  afterSortKey: string | undefined,
+  limit = MAX_VISIBLE_THREAD_PAGE_SIZE,
+  includeThread?: (row: InboxThreadRow, thread: ThreadRow) => boolean
+): InboxThreadRow[] {
+  const rows: InboxThreadRow[] = [];
+
+  const pageRows = Array.from(ctx.db.inboxThread.iter())
+    .filter(row => row.inboxId === inboxId)
+    .filter(row => afterSortKey === undefined || row.sortKey > afterSortKey)
+    .sort((left, right) => {
+      if (left.sortKey < right.sortKey) return -1;
+      if (left.sortKey > right.sortKey) return 1;
+      if (left.id < right.id) return -1;
+      if (left.id > right.id) return 1;
+      return 0;
+    });
+
+  for (const row of pageRows) {
+    if (!isThreadVisibleInNormalViews(ctx, row.threadId)) {
+      continue;
+    }
+    const thread = ctx.db.thread.id.find(row.threadId);
+    if (!thread) {
+      continue;
+    }
+    if (includeThread && !includeThread(row, thread)) {
+      continue;
+    }
+    rows.push(row);
+    if (rows.length >= limit) {
+      break;
+    }
+  }
+
+  return rows;
+}
+
+export function getLatestVisibleThreadsForInbox(
+  ctx: ReadDbCtx,
+  inboxId: bigint,
+  limit = MAX_VISIBLE_THREAD_PAGE_SIZE
+): ThreadRow[] {
+  return getVisibleInboxThreadPageRows(ctx, inboxId, undefined, limit)
+    .map(row => ctx.db.thread.id.find(row.threadId))
+    .filter((thread): thread is ThreadRow => Boolean(thread));
+}
+
+export function buildLatestVisibleThreadIdsForInbox(
+  ctx: ReadDbCtx,
+  inboxId: bigint,
+  limit = MAX_VISIBLE_THREAD_PAGE_SIZE
+) {
+  return new Set(getLatestVisibleThreadsForInbox(ctx, inboxId, limit).map(thread => thread.id));
+}
+
 export function buildVisibleThreadParticipantIdsForInbox(ctx: ReadDbCtx, inboxId: bigint) {
   const visibleParticipantIds = new Set<bigint>();
   const activeThreadIds = buildActiveThreadIdsForInbox(ctx, inboxId);
@@ -1490,6 +1716,18 @@ export function buildVisibleAgentIdsForInbox(ctx: ReadDbCtx, inboxId: bigint) {
     }
   }
 
+  return visibleActorIds;
+}
+
+export function buildLatestVisibleAgentIdsForInbox(ctx: ReadDbCtx, inboxId: bigint) {
+  const visibleActorIds = new Set<bigint>(getOwnActorIdsForInbox(ctx, inboxId));
+  for (const threadId of buildLatestVisibleThreadIdsForInbox(ctx, inboxId)) {
+    for (const participant of ctx.db.threadParticipant.thread_participant_thread_id.filter(
+      threadId
+    )) {
+      visibleActorIds.add(participant.agentDbId);
+    }
+  }
   return visibleActorIds;
 }
 
@@ -2001,6 +2239,7 @@ export function deleteThreadAndDependents(
   threadId: bigint,
   options?: { preserveContactRequests?: boolean }
 ) {
+  deleteInboxThreadProjectionsForThread(ctx, threadId);
   const directIndex = ctx.db.directThreadIndex.threadId.find(threadId);
   if (directIndex) {
     ctx.db.directThreadIndex.id.delete(directIndex.id);
@@ -2176,7 +2415,7 @@ export function ensureThreadParticipant(
   });
 
   if (!existingParticipant) {
-    ctx.db.threadParticipant.insert({
+    const participant = ctx.db.threadParticipant.insert({
       id: 0n,
       threadId,
       agentDbId: actor.id,
@@ -2189,6 +2428,7 @@ export function ensureThreadParticipant(
       isAdmin: options?.isAdmin ?? false,
       active: true,
       });
+      upsertInboxThreadProjectionForParticipant(ctx, threadId, participant);
       return true;
     }
 
@@ -2199,12 +2439,14 @@ export function ensureThreadParticipant(
       needsInboxIdBackfill ||
       ((options?.isAdmin ?? false) && !existingParticipant.isAdmin)
     ) {
-      ctx.db.threadParticipant.id.update({
+      const updatedParticipant = {
         ...existingParticipant,
         inboxId: actor.inboxId,
         active: true,
         isAdmin: existingParticipant.isAdmin || (options?.isAdmin ?? false),
-      });
+      };
+      ctx.db.threadParticipant.id.update(updatedParticipant);
+      upsertInboxThreadProjectionForParticipant(ctx, threadId, updatedParticipant);
     }
     return wasInactive;
 }
@@ -2350,28 +2592,121 @@ export function senderHasMessageForMembershipSecretVersion(
   );
 }
 
-export function canAgentReadMessage(ctx: ReadDbCtx, agentDbId: bigint, message: MessageRow) {
-  if (message.senderAgentDbId === agentDbId) {
+export function getThreadMessagesInSeqRange(
+  ctx: ReadDbCtx,
+  threadId: bigint,
+  lowerBoundInclusive: bigint,
+  upperBoundExclusive: bigint
+) {
+  if (upperBoundExclusive <= lowerBoundInclusive) {
+    return [];
+  }
+
+  return Array.from(
+    ctx.db.message.message_thread_id.filter(threadId)
+  )
+    .filter(
+      message =>
+        message.threadSeq >= lowerBoundInclusive &&
+        message.threadSeq < upperBoundExclusive
+    )
+    .sort((left, right) => {
+      if (left.threadSeq < right.threadSeq) return -1;
+      if (left.threadSeq > right.threadSeq) return 1;
+      if (left.id < right.id) return -1;
+      if (left.id > right.id) return 1;
+      return 0;
+    });
+}
+
+export function getLatestThreadMessages(
+  ctx: ReadDbCtx,
+  thread: ThreadRow,
+  limit = MAX_VISIBLE_MESSAGES_PER_THREAD
+) {
+  const upperBound = thread.nextThreadSeq;
+  if (upperBound <= 1n) {
+    return [];
+  }
+
+  const lowerBound =
+    upperBound > BigInt(limit) ? upperBound - BigInt(limit) : 1n;
+  return getThreadMessagesInSeqRange(ctx, thread.id, lowerBound, upperBound);
+}
+
+export function getChannelMessagesInSeqRange(
+  ctx: ReadDbCtx,
+  channelId: bigint,
+  lowerBoundInclusive: bigint,
+  upperBoundExclusive: bigint
+) {
+  if (upperBoundExclusive <= lowerBoundInclusive) {
+    return [];
+  }
+
+  return Array.from(
+    ctx.db.channelMessage.channel_message_channel_id.filter(channelId)
+  )
+    .filter(
+      message =>
+        message.channelSeq >= lowerBoundInclusive &&
+        message.channelSeq < upperBoundExclusive
+    )
+    .sort((left, right) => {
+      if (left.channelSeq < right.channelSeq) return -1;
+      if (left.channelSeq > right.channelSeq) return 1;
+      if (left.id < right.id) return -1;
+      if (left.id > right.id) return 1;
+      return 0;
+    });
+}
+
+export function getChannelMemberPageById(
+  ctx: ReadDbCtx,
+  channelId: bigint,
+  afterMemberId: bigint,
+  limit: number
+) {
+  const rows: ChannelMemberRow[] = [];
+  const members = Array.from(ctx.db.channelMember.iter())
+    .filter(member => member.channelId === channelId)
+    .filter(member => member.id > afterMemberId)
+    .sort((left, right) => {
+      if (left.id < right.id) return -1;
+      if (left.id > right.id) return 1;
+      return 0;
+    });
+
+  for (const member of members) {
+    rows.push(member);
+    if (rows.length >= limit) {
+      break;
+    }
+  }
+  return rows;
+}
+
+export function canAnyAgentReadMessage(
+  ctx: ReadDbCtx,
+  agentDbIds: ReadonlySet<bigint>,
+  message: MessageRow
+) {
+  if (agentDbIds.has(message.senderAgentDbId)) {
     return true;
   }
 
-  const messageSenderSecretKey = buildSenderSecretVisibilityKey(
-    message.membershipVersion,
-    message.senderAgentDbId,
-    message.secretVersion
-  );
   return Array.from(
-    ctx.db.threadSecretEnvelope.thread_secret_envelope_recipient_agent_db_id.filter(agentDbId)
-  ).some(envelope => {
-    return (
-      envelope.threadId === message.threadId &&
-      buildSenderSecretVisibilityKey(
-        envelope.membershipVersion,
-        envelope.senderAgentDbId,
-        envelope.secretVersion
-      ) === messageSenderSecretKey
-    );
-  });
+    ctx.db.threadSecretEnvelope.thread_secret_envelope_thread_id_membership_version_sender_agent_db_id_secret_version.filter([
+      message.threadId,
+      message.membershipVersion,
+      message.senderAgentDbId,
+      message.secretVersion,
+    ])
+  ).some(envelope => agentDbIds.has(envelope.recipientAgentDbId));
+}
+
+export function canAgentReadMessage(ctx: ReadDbCtx, agentDbId: bigint, message: MessageRow) {
+  return canAnyAgentReadMessage(ctx, new Set([agentDbId]), message);
 }
 
 export function getThreadReadStateForActor(ctx: ReadDbCtx, threadId: bigint, agentDbId: bigint) {
@@ -2833,6 +3168,18 @@ export function deletePublicRecentChannelMessageRows(ctx: ModuleCtx, channelId: 
   }
 }
 
+// autoInc on this table is unreliable (issues already-used ids), so callers
+// derive the next id from max(id) + 1.
+export function nextPublicRecentChannelMessageId(ctx: ReadDbCtx): bigint {
+  let nextId = 1n;
+  for (const row of ctx.db.publicRecentChannelMessage.iter()) {
+    if (row.id >= nextId) {
+      nextId = row.id + 1n;
+    }
+  }
+  return nextId;
+}
+
 export function deletePublicChannelMirrorRows(ctx: ModuleCtx, channelId: bigint) {
   deletePublicChannelRow(ctx, channelId);
   deletePublicRecentChannelMessageRows(ctx, channelId);
@@ -2906,9 +3253,16 @@ export function rebuildPublicRecentChannelMessages(ctx: ModuleCtx, channel: Chan
     return;
   }
 
-  const recentMessages = Array.from(
-    ctx.db.channelMessage.channel_message_channel_id.filter(channel.id)
-  )
+  const upperBound = channel.nextChannelSeq;
+  if (upperBound <= 1n) {
+    return;
+  }
+  const lowerBound =
+    upperBound > BigInt(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)
+      ? upperBound - BigInt(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)
+      : 1n;
+
+  const recentMessages = getChannelMessagesInSeqRange(ctx, channel.id, lowerBound, upperBound)
     .sort((left, right) => {
       if (left.channelSeq > right.channelSeq) return -1;
       if (left.channelSeq < right.channelSeq) return 1;
@@ -2916,12 +3270,12 @@ export function rebuildPublicRecentChannelMessages(ctx: ModuleCtx, channel: Chan
       if (right.id < left.id) return -1;
       return 0;
     })
-    .slice(0, MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)
     .reverse();
 
+  let nextId = nextPublicRecentChannelMessageId(ctx);
   for (const message of recentMessages) {
     ctx.db.publicRecentChannelMessage.insert({
-      id: 0n,
+      id: nextId,
       channelId: message.channelId,
       channelSeq: message.channelSeq,
       channelSeqKey: message.channelSeqKey,
@@ -2935,6 +3289,7 @@ export function rebuildPublicRecentChannelMessages(ctx: ModuleCtx, channel: Chan
       replyToMessageId: message.replyToMessageId,
       createdAt: message.createdAt,
     });
+    nextId += 1n;
   }
 }
 
@@ -3010,40 +3365,25 @@ export function toChannelMessageRow(
   };
 }
 
-export function toSelectedPublicRecentChannelMessageRow(
-  ctx: ReadDbCtx,
-  row: PublicRecentChannelMessageRecordRow
-) {
-  const senderSigningPublicKey =
-    row.senderSigningPublicKey === LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY
-      ? ''
-      : row.senderSigningPublicKey;
-  return {
-    id: row.id,
-    channelId: row.channelId,
-    channelSeq: row.channelSeq,
-    senderAgentDbId: row.senderAgentDbId,
-    senderPublicIdentity: row.senderPublicIdentity,
-    senderSeq: row.senderSeq,
-    senderSigningPublicKey:
-      senderSigningPublicKey ||
-      getActorSigningPublicKeyForVersion(ctx, row.senderAgentDbId, row.senderSigningKeyVersion),
-    senderSigningKeyVersion: row.senderSigningKeyVersion,
-    plaintext: row.plaintext,
-    signature: row.signature,
-    replyToMessageId: row.replyToMessageId,
-    createdAt: row.createdAt,
-  };
-}
-
 export function insertPublicRecentChannelMessage(ctx: ModuleCtx, message: ChannelMessageRecordRow) {
   const channel = getRequiredChannelById(ctx, message.channelId);
   if (channel.accessMode !== 'public' || !channel.discoverable) {
     return;
   }
 
+  let nextId = 1n;
+  for (const row of ctx.db.publicRecentChannelMessage.iter()) {
+    if (row.channelSeqKey === message.channelSeqKey) {
+      ctx.db.publicRecentChannelMessage.id.delete(row.id);
+      continue;
+    }
+    if (row.id >= nextId) {
+      nextId = row.id + 1n;
+    }
+  }
+
   ctx.db.publicRecentChannelMessage.insert({
-    id: 0n,
+    id: nextId,
     channelId: message.channelId,
     channelSeq: message.channelSeq,
     channelSeqKey: message.channelSeqKey,
@@ -3058,16 +3398,15 @@ export function insertPublicRecentChannelMessage(ctx: ModuleCtx, message: Channe
     createdAt: message.createdAt,
   });
 
-  const recentRows = Array.from(
-    ctx.db.publicRecentChannelMessage.public_recent_channel_message_channel_id.filter(
-      message.channelId
-    )
-  ).sort((left, right) => {
+  const latestRecentRows = Array.from(
+    ctx.db.publicRecentChannelMessage.iter()
+  ).filter(recentMessage => recentMessage.channelId === message.channelId)
+    .sort((left, right) => {
     if (left.channelSeq > right.channelSeq) return -1;
     if (left.channelSeq < right.channelSeq) return 1;
     return Number(right.id - left.id);
   });
-  for (const oldRow of recentRows.slice(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)) {
+  for (const oldRow of latestRecentRows.slice(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)) {
     ctx.db.publicRecentChannelMessage.id.delete(oldRow.id);
   }
 }

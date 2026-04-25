@@ -1,5 +1,14 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
-import { type UIEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type Dispatch,
+  type SetStateAction,
+  type UIEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Archive,
   ArrowDown,
@@ -126,21 +135,22 @@ import {
 import { DbConnection, reducers, tables } from '@/module_bindings';
 import type {
   Agent,
-  AgentKeyBundle,
   Thread,
-  ThreadParticipant,
-  ThreadReadState,
-  ThreadSecretEnvelope,
   Device,
   DeviceKeyBundleAttachment,
   Inbox,
-  Message,
   VisibleChannelJoinRequestRow,
   VisibleChannelMembershipRow,
   VisibleChannelRow,
+  VisibleAgentKeyBundleRow,
   VisibleContactRequestRow,
   VisibleContactAllowlistEntryRow,
+  VisibleMessageRow,
+  VisibleThreadPage,
   VisibleThreadInviteRow,
+  VisibleThreadParticipantRow,
+  VisibleThreadReadStateRow,
+  VisibleThreadSecretEnvelopeRow,
   VisibleDeviceKeyBundleRow,
   VisibleDeviceShareRequestRow,
 } from '@/module_bindings/types';
@@ -178,9 +188,14 @@ import {
 } from '@/features/workspace/actor-settings';
 import { useWorkspaceWriteAccess } from '@/features/workspace/use-write-access';
 
-const THREAD_LIST_PAGE_SIZE = 30;
-const THREAD_TIMELINE_PAGE_SIZE = 50;
+const THREAD_LIST_PAGE_SIZE = 25;
+const THREAD_TIMELINE_PAGE_SIZE = 25;
 const THREAD_LIST_SCROLL_LOAD_THRESHOLD_PX = 64;
+
+type Message = VisibleMessageRow;
+type AgentKeyBundle = VisibleAgentKeyBundleRow;
+type ThreadParticipant = VisibleThreadParticipantRow;
+type ThreadReadState = VisibleThreadReadStateRow;
 
 export const Route = createFileRoute('/$slug')({
   validateSearch: search => ({
@@ -212,6 +227,37 @@ type DecryptedMessageState = {
   trustWarning: string | null;
 };
 type DecryptedMap = Record<string, DecryptedMessageState>;
+type SenderSecretVersionState = Pick<
+  Message,
+  'threadId' | 'membershipVersion' | 'secretVersion'
+>;
+function mergeRowsById<Row extends { id: bigint }>(
+  liveRows: Row[],
+  pagedRows: Row[]
+): Row[] {
+  const byId = new Map<string, Row>();
+  for (const row of liveRows) {
+    byId.set(row.id.toString(), row);
+  }
+  for (const row of pagedRows) {
+    byId.set(row.id.toString(), row);
+  }
+  return Array.from(byId.values());
+}
+
+function patchOptimisticReadState(
+  current: VisibleThreadReadStateRow[],
+  agentDbId: bigint,
+  threadId: bigint,
+  patch: Partial<Pick<VisibleThreadReadStateRow, 'lastReadThreadSeq' | 'archived' | 'updatedAt'>>
+): VisibleThreadReadStateRow[] {
+  const index = current.findIndex(
+    row => row.agentDbId === agentDbId && row.threadId === threadId
+  );
+  if (index < 0) return current;
+  return current.map((row, i) => (i === index ? { ...row, ...patch } : row));
+}
+
 type DisplayInbox = Pick<
   Inbox,
   | 'normalizedEmail'
@@ -922,26 +968,26 @@ function threadSummary(thread: Thread, participants: ThreadParticipant[], actorB
 
 function secretRotationRequired(params: {
   senderActor: Agent | undefined;
-  latestSenderMessage: Message | undefined;
+  latestSenderState: SenderSecretVersionState | undefined;
   currentMembershipVersion: bigint | undefined;
   participants: ThreadParticipant[];
   actorById: Map<bigint, Agent>;
-  envelopes: ThreadSecretEnvelope[];
+  envelopes: VisibleThreadSecretEnvelopeRow[];
 }): boolean {
   const {
     senderActor,
-    latestSenderMessage,
+    latestSenderState,
     currentMembershipVersion,
     participants,
     actorById,
     envelopes,
   } = params;
-  if (!senderActor || !latestSenderMessage) {
+  if (!senderActor || !latestSenderState) {
     return false;
   }
   if (
     currentMembershipVersion !== undefined &&
-    latestSenderMessage.membershipVersion !== currentMembershipVersion
+    latestSenderState.membershipVersion !== currentMembershipVersion
   ) {
     return true;
   }
@@ -957,10 +1003,10 @@ function secretRotationRequired(params: {
 
   const currentVersionEnvelopes = envelopes.filter(envelope => {
     return (
-      envelope.threadId === latestSenderMessage.threadId &&
-      envelope.membershipVersion === latestSenderMessage.membershipVersion &&
+      envelope.threadId === latestSenderState.threadId &&
+      envelope.membershipVersion === latestSenderState.membershipVersion &&
       envelope.senderAgentDbId === senderActor.id &&
-      envelope.secretVersion === latestSenderMessage.secretVersion
+      envelope.secretVersion === latestSenderState.secretVersion
     );
   });
 
@@ -1094,7 +1140,20 @@ function AuthenticatedInboxPage() {
   const [actorActionError, setActorActionError] = useState<string | null>(null);
   const [actorFeedback, setActorFeedback] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<bigint | null>(null);
-  const [pendingVisibleThreadCount, setPendingVisibleThreadCount] = useState<number | null>(null);
+  const [pagedThreadMessages, setPagedThreadMessages] = useState<Message[]>([]);
+  const [pagedThreadSecretEnvelopes, setPagedThreadSecretEnvelopes] = useState<
+    VisibleThreadSecretEnvelopeRow[]
+  >([]);
+  const [pagedThreadActors, setPagedThreadActors] = useState<Agent[]>([]);
+  const [pagedThreadBundles, setPagedThreadBundles] = useState<AgentKeyBundle[]>([]);
+  const [pagedThreadParticipants, setPagedThreadParticipants] = useState<ThreadParticipant[]>([]);
+  const [pagedThreadReadStates, setPagedThreadReadStates] = useState<ThreadReadState[]>([]);
+  const [pagedThreads, setPagedThreads] = useState<Thread[]>([]);
+  const [threadPageAfterSortKey, setThreadPageAfterSortKey] = useState<string | undefined>();
+  const [threadPagesExhausted, setThreadPagesExhausted] = useState(false);
+  const [threadPageLoading, setThreadPageLoading] = useState(false);
+  const [threadHistoryExhausted, setThreadHistoryExhausted] = useState(false);
+  const [threadHistoryLoading, setThreadHistoryLoading] = useState(false);
   const [composeLookupSlug, setComposeLookupSlug] = useState('');
   const [composeResolvedTargets, setComposeResolvedTargets] = useState<ResolvedPublishedActor[]>([]);
   const [composeThreadTitle, setComposeThreadTitle] = useState('');
@@ -1237,17 +1296,28 @@ function AuthenticatedInboxPage() {
   const setThreadArchivedReducer = useReducer(reducers.setThreadArchived);
   const deleteThreadReducer = useReducer(reducers.deleteThread);
 
+  const selectedThreadMessagesQuery = useMemo(
+    () =>
+      tables.visibleMessages.where(row =>
+        row.threadId.eq(selectedThreadId ?? 0n)
+      ),
+    [selectedThreadId]
+  );
+  const selectedThreadSecretEnvelopesQuery = useMemo(
+    () =>
+      tables.visibleThreadSecretEnvelopes.where(row =>
+        row.threadId.eq(selectedThreadId ?? 0n)
+      ),
+    [selectedThreadId]
+  );
+
   const [inboxes, inboxesReady, inboxesError] = useLiveTable<Inbox>(
     tables.visibleInboxes,
     'visibleInboxes'
   );
-  const [actors, actorsReady, actorsError] = useLiveTable<Agent>(
+  const [liveActors, actorsReady, actorsError] = useLiveTable<Agent>(
     tables.visibleAgents,
     'visibleAgents'
-  );
-  const [agentKeyBundles, agentKeyBundlesReady, agentKeyBundlesError] = useLiveTable<AgentKeyBundle>(
-    tables.visibleAgentKeyBundles,
-    'visibleAgentKeyBundles'
   );
   const [devices, devicesReady, devicesError] = useLiveTable<Device>(
     tables.visibleDevices,
@@ -1261,18 +1331,11 @@ function AuthenticatedInboxPage() {
     tables.visibleDeviceKeyBundles,
     'visibleDeviceKeyBundles'
   );
-  const [threads, threadsReady, threadsError] = useLiveTable<Thread>(tables.visibleThreads, 'visibleThreads');
-  const [threadParticipants, threadParticipantsReady, threadParticipantsError] = useLiveTable<ThreadParticipant>(
-    tables.visibleThreadParticipants,
-    'visibleThreadParticipants'
-  );
-  const [threadReadStates, threadReadStatesReady, threadReadStatesError] = useLiveTable<ThreadReadState>(
-    tables.visibleThreadReadStates,
-    'visibleThreadReadStates'
-  );
-  const [threadSecretEnvelopes, threadSecretEnvelopesReady, threadSecretEnvelopesError] = useLiveTable<ThreadSecretEnvelope>(
-    tables.visibleThreadSecretEnvelopes,
-    'visibleThreadSecretEnvelopes'
+  const [liveThreads, threadsReady, threadsError] = useLiveTable<Thread>(tables.visibleThreads, 'visibleThreads');
+  const [threadSecretEnvelopes, threadSecretEnvelopesReady, threadSecretEnvelopesError] = useLiveTable<VisibleThreadSecretEnvelopeRow>(
+    selectedThreadSecretEnvelopesQuery,
+    'visibleThreadSecretEnvelopes',
+    { enabled: selectedThreadId !== null }
   );
   const [contactRequests, contactRequestsReady, contactRequestsError] = useLiveTable<VisibleContactRequestRow>(
     tables.visibleContactRequests,
@@ -1299,9 +1362,39 @@ function AuthenticatedInboxPage() {
     'visibleContactAllowlistEntries'
   );
   const [messages, messagesReady, messagesError] = useLiveTable<Message>(
-    tables.visibleMessages,
-    'visibleMessages'
+    selectedThreadMessagesQuery,
+    'visibleMessages',
+    { enabled: selectedThreadId !== null }
   );
+
+  const actors = useMemo(
+    () => mergeRowsById(liveActors, pagedThreadActors),
+    [liveActors, pagedThreadActors]
+  );
+  const agentKeyBundles = pagedThreadBundles;
+  const threads = useMemo(
+    () => mergeRowsById(liveThreads, pagedThreads),
+    [liveThreads, pagedThreads]
+  );
+  const threadParticipants = pagedThreadParticipants;
+  const threadReadStates = pagedThreadReadStates;
+  const visibleStateRef = useRef<{
+    actors: Agent[];
+    threads: Thread[];
+    participants: ThreadParticipant[];
+  }>({
+    actors: [],
+    threads: [],
+    participants: [],
+  });
+
+  useEffect(() => {
+    visibleStateRef.current = {
+      actors,
+      threads,
+      participants: threadParticipants,
+    };
+  }, [actors, threads, threadParticipants]);
 
   const normalizedRouteSlug = useMemo(() => normalizeInboxSlug(params.slug), [params.slug]);
   const normalizedLookupSlug = useMemo(() => normalizeInboxSlug(search.lookup ?? ''), [search.lookup]);
@@ -1313,6 +1406,7 @@ function AuthenticatedInboxPage() {
     () => actors.find(row => row.slug === normalizedRouteSlug),
     [actors, normalizedRouteSlug]
   );
+  const activeActorId = activeActor?.id;
   const activeActorDeregistered = isDeregisteringOrDeregisteredInboxAgentState(
     activeActor?.masumiRegistrationState
   );
@@ -1374,36 +1468,32 @@ function AuthenticatedInboxPage() {
     [activeActor, allowlistEntries]
   );
 
+  const selectedThreadRealtimeReady =
+    selectedThreadId === null ? threadsReady : threadSecretEnvelopesReady && messagesReady;
+  const selectedThreadRealtimeError =
+    selectedThreadId === null ? null : threadSecretEnvelopesError || messagesError;
   const coreLoading = !actorsReady || (!activeActor && slugPresence === 'checking');
   const secondaryLoading =
     !inboxesReady ||
-    !agentKeyBundlesReady ||
     !devicesReady ||
     !deviceShareRequestsReady ||
     !deviceShareBundlesReady ||
     !threadsReady ||
-    !threadParticipantsReady ||
-    !threadReadStatesReady ||
-    !threadSecretEnvelopesReady ||
     !contactRequestsReady ||
     !threadInvitesReady ||
     !allowlistEntriesReady ||
-    !messagesReady;
+    !selectedThreadRealtimeReady;
   const liveTableError =
     actorsError ||
     inboxesError ||
-    agentKeyBundlesError ||
     devicesError ||
     deviceShareRequestsError ||
     deviceShareBundlesError ||
     threadsError ||
-    threadParticipantsError ||
-    threadReadStatesError ||
-    threadSecretEnvelopesError ||
     contactRequestsError ||
     threadInvitesError ||
     allowlistEntriesError ||
-    messagesError;
+    selectedThreadRealtimeError;
 
   const inbox = useMemo(
     () => inboxes.find(row => row.id === activeActor?.inboxId),
@@ -1627,19 +1717,226 @@ function AuthenticatedInboxPage() {
     if (!liveConnection) {
       throw new Error('Live SpacetimeDB connection is unavailable.');
     }
+    const current = visibleStateRef.current;
 
     return {
-      actors: Array.from(liveConnection.db.visibleAgents.iter()) as Agent[],
-      threads: Array.from(liveConnection.db.visibleThreads.iter()) as Thread[],
-      participants: Array.from(liveConnection.db.visibleThreadParticipants.iter()) as ThreadParticipant[],
+      actors: mergeRowsById(
+        current.actors,
+        Array.from(liveConnection.db.visibleAgents.iter()) as Agent[]
+      ),
+      threads: mergeRowsById(
+        current.threads,
+        Array.from(liveConnection.db.visibleThreads.iter()) as Thread[]
+      ),
+      participants: mergeRowsById(
+        current.participants,
+        Array.from(liveConnection.db.visibleThreadParticipants.iter()) as ThreadParticipant[]
+      ),
       messages: Array.from(liveConnection.db.visibleMessages.iter()) as Message[],
-      threadSecretEnvelopes: Array.from(
-        liveConnection.db.visibleThreadSecretEnvelopes.iter()
-      ) as ThreadSecretEnvelope[],
       contactRequests: Array.from(liveConnection.db.visibleContactRequests.iter()) as VisibleContactRequestRow[],
       threadInvites: Array.from(liveConnection.db.visibleThreadInvites.iter()) as VisibleThreadInviteRow[],
     };
   }
+
+  const mergeVisibleThreadPage = useCallback((
+    page: VisibleThreadPage,
+    reset = false,
+    updateCursor = true
+  ) => {
+    const mergePageRows = <Row extends { id: bigint },>(
+      setter: Dispatch<SetStateAction<Row[]>>,
+      rows: Row[]
+    ) => {
+      setter(current => (reset ? rows : mergeRowsById(current, rows)));
+    };
+
+    mergePageRows(setPagedThreadActors, page.actors);
+    mergePageRows(setPagedThreadBundles, page.bundles);
+    mergePageRows(setPagedThreadParticipants, page.participants);
+    mergePageRows(setPagedThreadReadStates, page.readStates);
+    mergePageRows(setPagedThreads, page.threads);
+    if (updateCursor) {
+      setThreadPageAfterSortKey(page.nextAfterSortKey);
+      setThreadPagesExhausted(page.nextAfterSortKey === undefined);
+    }
+  }, []);
+
+  const refreshFirstVisibleThreadPage = useCallback(() => {
+    if (!liveConnection || !activeActorId) return;
+    void liveConnection.procedures
+      .listVisibleThreads({
+        agentDbId: activeActorId,
+        afterSortKey: undefined,
+        filter: threadRailFilter,
+        query: threadSearchQuery,
+        limit: BigInt(THREAD_LIST_PAGE_SIZE),
+      })
+      .then(page => mergeVisibleThreadPage(page, false, false))
+      .catch(() => {
+        // Best-effort reconciliation; surface errors only for user-triggered loads.
+      });
+  }, [
+    activeActorId,
+    liveConnection,
+    mergeVisibleThreadPage,
+    threadRailFilter,
+    threadSearchQuery,
+  ]);
+
+  const loadOlderThreadPage = useCallback(async () => {
+    if (
+      !liveConnection ||
+      !activeActor ||
+      !threadPageAfterSortKey ||
+      threadPageLoading ||
+      threadPagesExhausted
+    ) {
+      return;
+    }
+
+    setThreadPageLoading(true);
+    setActorActionError(null);
+    try {
+      const page = await liveConnection.procedures.listVisibleThreads({
+        agentDbId: activeActor.id,
+        afterSortKey: threadPageAfterSortKey,
+        filter: threadRailFilter,
+        query: threadSearchQuery,
+        limit: BigInt(THREAD_LIST_PAGE_SIZE),
+      });
+      mergeVisibleThreadPage(page);
+    } catch (error) {
+      setActorActionError(
+        error instanceof Error ? error.message : 'Unable to load older threads'
+      );
+    } finally {
+      setThreadPageLoading(false);
+    }
+  }, [
+    activeActor,
+    liveConnection,
+    mergeVisibleThreadPage,
+    threadPageAfterSortKey,
+    threadPageLoading,
+    threadPagesExhausted,
+    threadRailFilter,
+    threadSearchQuery,
+  ]);
+
+  useEffect(() => {
+    if (!liveConnection || !activeActorId) {
+      return deferEffectStateUpdate(() => {
+        setPagedThreadActors([]);
+        setPagedThreadBundles([]);
+        setPagedThreadParticipants([]);
+        setPagedThreadReadStates([]);
+        setPagedThreads([]);
+        setThreadPageAfterSortKey(undefined);
+        setThreadPagesExhausted(false);
+        setThreadPageLoading(false);
+      });
+    }
+
+    let cancelled = false;
+    const cancelLoadingStart = deferEffectStateUpdate(() => {
+      if (!cancelled) {
+        setThreadPageLoading(true);
+      }
+    });
+    void liveConnection.procedures
+      .listVisibleThreads({
+        agentDbId: activeActorId,
+        afterSortKey: undefined,
+        filter: threadRailFilter,
+        query: threadSearchQuery,
+        limit: BigInt(THREAD_LIST_PAGE_SIZE),
+      })
+      .then(page => {
+        if (cancelled) return;
+        mergeVisibleThreadPage(page, true);
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setActorActionError(
+          error instanceof Error ? error.message : 'Unable to load thread page'
+        );
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setThreadPageLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      cancelLoadingStart();
+    };
+  }, [
+    activeActorId,
+    liveConnection,
+    mergeVisibleThreadPage,
+    threadRailFilter,
+    threadSearchQuery,
+  ]);
+
+  const liveThreadSignature = useMemo(
+    () =>
+      liveThreads
+        .map(
+          thread =>
+            `${thread.id}:${thread.updatedAt.microsSinceUnixEpoch}:${thread.membershipVersion}:${thread.lastMessageSeq}`
+        )
+        .sort()
+        .join('|'),
+    [liveThreads]
+  );
+  const liveActorSignature = useMemo(
+    () =>
+      liveActors
+        .map(
+          actor =>
+            `${actor.id}:${actor.currentEncryptionKeyVersion}:${actor.currentSigningKeyVersion}`
+        )
+        .sort()
+        .join('|'),
+    [liveActors]
+  );
+
+  useEffect(() => {
+    if (!liveConnection || !activeActorId) return;
+    if (liveThreadSignature === '' && liveActorSignature === '') return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      void liveConnection.procedures
+        .listVisibleThreads({
+          agentDbId: activeActorId,
+          afterSortKey: undefined,
+          filter: threadRailFilter,
+          query: threadSearchQuery,
+          limit: BigInt(THREAD_LIST_PAGE_SIZE),
+        })
+        .then(page => {
+          if (cancelled) return;
+          mergeVisibleThreadPage(page, false, false);
+        })
+        .catch(() => {
+          // Signature-driven refresh is best-effort; do not clobber actor errors.
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    activeActorId,
+    liveActorSignature,
+    liveConnection,
+    liveThreadSignature,
+    mergeVisibleThreadPage,
+    threadRailFilter,
+    threadSearchQuery,
+  ]);
 
   async function waitForNewDirectThread(params: {
     ownActor: Agent;
@@ -1664,6 +1961,28 @@ function AuthenticatedInboxPage() {
     }
 
     throw new Error('Timed out waiting for the direct thread to sync.');
+  }
+
+  async function waitForNewVisibleThread(params: {
+    existingThreadIds: Set<string>;
+    timeoutMs?: number;
+  }): Promise<Thread> {
+    const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
+
+    while (Date.now() < timeoutAt) {
+      const snapshot = readCurrentVisibleState();
+      const nextThread = snapshot.threads.find(thread => {
+        return !params.existingThreadIds.has(thread.id.toString());
+      });
+      if (nextThread) {
+        return nextThread;
+      }
+      await new Promise(resolve => {
+        setTimeout(resolve, 100);
+      });
+    }
+
+    throw new Error('Timed out waiting for the thread to sync.');
   }
 
   async function waitForParticipantAddResult(params: {
@@ -2696,6 +3015,9 @@ function AuthenticatedInboxPage() {
     [filteredThreads, visibleThreadRailPageStart, visibleThreadRailPageEnd]
   );
   const canLoadOlderThreads = threadRailPage < threadRailPageCount;
+  const canRequestOlderThreadPage = Boolean(
+    threadPageAfterSortKey && !threadPagesExhausted && !threadPageLoading
+  );
   const canLoadNewerThreads = threadRailPage > 1;
   const composeDialogOpen = Boolean(search.compose);
 
@@ -2710,6 +3032,11 @@ function AuthenticatedInboxPage() {
 
     if (nearBottom && canLoadOlderThreads) {
       setThreadRailPage(page => Math.min(page + 1, threadRailPageCount));
+      return;
+    }
+
+    if (nearBottom && canRequestOlderThreadPage) {
+      void loadOlderThreadPage();
       return;
     }
 
@@ -2783,33 +3110,59 @@ function AuthenticatedInboxPage() {
 
     try {
       const requestedThreadId = BigInt(requestedThread);
-      if (
-        requestedThreadId !== selectedThreadId &&
-        visibleThreads.some(thread => thread.id === requestedThreadId)
-      ) {
+      if (requestedThreadId === selectedThreadId) {
+        return;
+      }
+      if (visibleThreads.some(thread => thread.id === requestedThreadId)) {
         return deferEffectStateUpdate(() => {
           setSelectedThreadId(requestedThreadId);
         });
       }
+      if (liveConnection && activeActor) {
+        let cancelled = false;
+        void liveConnection.procedures
+          .readVisibleThread({
+            agentDbId: activeActor.id,
+            threadId: requestedThreadId,
+          })
+          .then(page => {
+            if (cancelled || page.threads.length === 0) return;
+            mergeVisibleThreadPage(page, false, false);
+            setSelectedThreadId(requestedThreadId);
+          })
+          .catch(() => {
+            // Ignore invisible thread ids in the URL and fall back to the default selection logic.
+          });
+        return () => {
+          cancelled = true;
+        };
+      }
     } catch {
       // Ignore malformed thread ids in the URL and fall back to the default selection logic.
     }
-  }, [search.thread, selectedThreadId, visibleThreads]);
+  }, [
+    activeActor,
+    liveConnection,
+    mergeVisibleThreadPage,
+    search.thread,
+    selectedThreadId,
+    visibleThreads,
+  ]);
 
   useEffect(() => {
-    if (pendingVisibleThreadCount !== null) {
-      if (visibleThreads.length >= pendingVisibleThreadCount && visibleThreads[0]) {
-        return deferEffectStateUpdate(() => {
-          setSelectedThreadId(visibleThreads[0].id);
-          setPendingVisibleThreadCount(null);
-        });
+    if (search.thread?.trim()) {
+      try {
+        BigInt(search.thread);
+        return;
+      } catch {
+        // Malformed thread ids fall back to default selection.
       }
     }
     if (selectedThreadId !== null && visibleThreads.some(thread => thread.id === selectedThreadId)) return;
     return deferEffectStateUpdate(() => {
       setSelectedThreadId(visibleThreads[0]?.id ?? null);
     });
-  }, [pendingVisibleThreadCount, selectedThreadId, visibleThreads]);
+  }, [search.thread, selectedThreadId, visibleThreads]);
 
   useEffect(() => {
     const requestedLookup = search.lookup?.trim() ?? '';
@@ -2868,6 +3221,59 @@ function AuthenticatedInboxPage() {
     shouldAutoScrollTimelineRef.current = true;
   }, [selectedThread?.id]);
   useEffect(() => {
+    return deferEffectStateUpdate(() => {
+      setPagedThreadMessages([]);
+      setPagedThreadSecretEnvelopes([]);
+      setThreadHistoryExhausted(false);
+      setThreadHistoryLoading(false);
+    });
+  }, [selectedThread?.id]);
+  useEffect(() => {
+    if (!liveConnection || !activeActor || !selectedThread) {
+      return;
+    }
+
+    let cancelled = false;
+    const cancelLoadingStart = deferEffectStateUpdate(() => {
+      if (!cancelled) {
+        setThreadHistoryLoading(true);
+      }
+    });
+    void liveConnection.procedures
+      .listThreadMessages({
+        agentDbId: activeActor.id,
+        threadId: selectedThread.id,
+        beforeThreadSeq: undefined,
+        limit: BigInt(THREAD_TIMELINE_PAGE_SIZE),
+      })
+      .then(page => {
+        if (cancelled) return;
+        setPagedThreadMessages(current => mergeRowsById(current, page.messages));
+        setPagedThreadSecretEnvelopes(current =>
+          mergeRowsById(current, page.secretEnvelopes)
+        );
+        setThreadHistoryExhausted(
+          page.nextBeforeThreadSeq === undefined || page.messages.length === 0
+        );
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setActorActionError(
+          error instanceof Error ? error.message : 'Unable to load thread messages'
+        );
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setThreadHistoryLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      cancelLoadingStart();
+    };
+  }, [activeActor, liveConnection, selectedThread]);
+  useEffect(() => {
     if (!selectedThread) {
       return deferEffectStateUpdate(() => {
         setShowParticipantsDialog(false);
@@ -2889,14 +3295,27 @@ function AuthenticatedInboxPage() {
     [selectedThread, threadInvites]
   );
 
+  const loadedThreadSecretEnvelopes = useMemo(() => {
+    if (!selectedThread) {
+      return [];
+    }
+    return mergeRowsById(
+      threadSecretEnvelopes.filter(envelope => envelope.threadId === selectedThread.id),
+      pagedThreadSecretEnvelopes.filter(envelope => envelope.threadId === selectedThread.id)
+    );
+  }, [pagedThreadSecretEnvelopes, selectedThread, threadSecretEnvelopes]);
+
   const selectedThreadMessages = useMemo(
-    () =>
-      selectedThread
-        ? messages
-            .filter(message => message.threadId === selectedThread.id)
-            .sort((left, right) => Number(left.threadSeq - right.threadSeq))
-        : [],
-    [messages, selectedThread]
+    () => {
+      if (!selectedThread) {
+        return [];
+      }
+      return mergeRowsById(
+        messages.filter(message => message.threadId === selectedThread.id),
+        pagedThreadMessages.filter(message => message.threadId === selectedThread.id)
+      ).sort((left, right) => Number(left.threadSeq - right.threadSeq));
+    },
+    [messages, pagedThreadMessages, selectedThread]
   );
 
   const selectedThreadKeyRotations = useMemo(() => {
@@ -2961,8 +3380,64 @@ function AuthenticatedInboxPage() {
       ),
     [selectedThreadTimeline, selectedThreadTimelineWindowEnd, selectedThreadTimelineWindowStart]
   );
-  const canLoadOlderTimeline = threadTimelinePage < threadTimelinePageCount;
+  const earliestSelectedThreadMessageSeq = selectedThreadMessages[0]?.threadSeq;
+  const canPageOlderTimeline = threadTimelinePage < threadTimelinePageCount;
+  const canRequestOlderThreadMessages = Boolean(
+    liveConnection &&
+      activeActor &&
+      selectedThread &&
+      earliestSelectedThreadMessageSeq &&
+      earliestSelectedThreadMessageSeq > 1n &&
+      !threadHistoryExhausted
+  );
   const canLoadNewerTimeline = threadTimelinePage > 1;
+  const loadOlderThreadMessages = useCallback(async () => {
+    if (
+      !liveConnection ||
+      !activeActor ||
+      !selectedThread ||
+      !earliestSelectedThreadMessageSeq ||
+      earliestSelectedThreadMessageSeq <= 1n ||
+      threadHistoryLoading ||
+      threadHistoryExhausted
+    ) {
+      return;
+    }
+
+    setThreadHistoryLoading(true);
+    setActorActionError(null);
+    try {
+      const page = await liveConnection.procedures.listThreadMessages({
+        agentDbId: activeActor.id,
+        threadId: selectedThread.id,
+        beforeThreadSeq: earliestSelectedThreadMessageSeq,
+        limit: BigInt(THREAD_TIMELINE_PAGE_SIZE),
+      });
+      setPagedThreadMessages(current => mergeRowsById(current, page.messages));
+      setPagedThreadSecretEnvelopes(current =>
+        mergeRowsById(current, page.secretEnvelopes)
+      );
+      if (page.nextBeforeThreadSeq === undefined || page.messages.length === 0) {
+        setThreadHistoryExhausted(true);
+      }
+      if (page.messages.length > 0) {
+        setThreadTimelinePage(current => current + 1);
+      }
+    } catch (error) {
+      setActorActionError(
+        error instanceof Error ? error.message : 'Unable to load older messages'
+      );
+    } finally {
+      setThreadHistoryLoading(false);
+    }
+  }, [
+    activeActor,
+    earliestSelectedThreadMessageSeq,
+    liveConnection,
+    selectedThread,
+    threadHistoryExhausted,
+    threadHistoryLoading,
+  ]);
   const handleThreadTimelineScroll = (event: UIEvent<HTMLElement>) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
@@ -2977,8 +3452,13 @@ function AuthenticatedInboxPage() {
       setTimelineUnseenCount(0);
     }
 
-    if (nearTop && canLoadOlderTimeline) {
+    if (nearTop && canPageOlderTimeline) {
       setThreadTimelinePage(page => Math.min(page + 1, threadTimelinePageCount));
+      return;
+    }
+
+    if (nearTop && canRequestOlderThreadMessages && !threadHistoryLoading) {
+      void loadOlderThreadMessages();
       return;
     }
 
@@ -3059,32 +3539,55 @@ function AuthenticatedInboxPage() {
     [activeActor, selectedThreadMessages]
   );
 
-  const requiresSecretRotation = useMemo(
-    () =>
-      secretRotationRequired({
-        senderActor: activeActor,
-        latestSenderMessage: latestSelectedThreadSenderMessage,
-        currentMembershipVersion: selectedThread?.membershipVersion,
-        participants: selectedThreadParticipants,
-        actorById,
-        envelopes: threadSecretEnvelopes,
-      }),
-    [
-      activeActor,
-      actorById,
-      selectedThread?.membershipVersion,
-      threadSecretEnvelopes,
-      latestSelectedThreadSenderMessage,
-      selectedThreadParticipants,
-    ]
-  );
-
   const activeParticipant = useMemo(
     () =>
       activeActor && selectedThread
         ? selectedThreadParticipants.find(participant => participant.agentDbId === activeActor.id)
         : undefined,
     [activeActor, selectedThread, selectedThreadParticipants]
+  );
+
+  const latestSelectedThreadSenderState = useMemo<SenderSecretVersionState | undefined>(() => {
+    if (latestSelectedThreadSenderMessage) {
+      return latestSelectedThreadSenderMessage;
+    }
+    if (
+      !selectedThread ||
+      activeParticipant?.lastSentMembershipVersion === undefined ||
+      activeParticipant.lastSentSecretVersion === undefined
+    ) {
+      return undefined;
+    }
+    return {
+      threadId: selectedThread.id,
+      membershipVersion: activeParticipant.lastSentMembershipVersion,
+      secretVersion: activeParticipant.lastSentSecretVersion,
+    };
+  }, [
+    activeParticipant?.lastSentMembershipVersion,
+    activeParticipant?.lastSentSecretVersion,
+    latestSelectedThreadSenderMessage,
+    selectedThread,
+  ]);
+
+  const requiresSecretRotation = useMemo(
+    () =>
+      secretRotationRequired({
+        senderActor: activeActor,
+        latestSenderState: latestSelectedThreadSenderState,
+        currentMembershipVersion: selectedThread?.membershipVersion,
+        participants: selectedThreadParticipants,
+        actorById,
+        envelopes: loadedThreadSecretEnvelopes,
+      }),
+    [
+      activeActor,
+      actorById,
+      selectedThread?.membershipVersion,
+      loadedThreadSecretEnvelopes,
+      latestSelectedThreadSenderState,
+      selectedThreadParticipants,
+    ]
   );
 
   const composeOptions = useMemo(() => {
@@ -3224,7 +3727,7 @@ function AuthenticatedInboxPage() {
           }
         }
 
-        const envelope = threadSecretEnvelopes.find(row => {
+        const envelope = loadedThreadSecretEnvelopes.find(row => {
           return (
             row.threadId === message.threadId &&
             row.senderAgentDbId === message.senderAgentDbId &&
@@ -3415,7 +3918,7 @@ function AuthenticatedInboxPage() {
     actorById,
     actorKeyPair,
     bundlesByActorId,
-    threadSecretEnvelopes,
+    loadedThreadSecretEnvelopes,
     selectedThread,
     selectedThreadMessages,
   ]);
@@ -4191,24 +4694,44 @@ function AuthenticatedInboxPage() {
             return message.threadId === directThread.id && message.senderAgentDbId === activeActor.id;
           })
           .sort((left, right) => Number(right.senderSeq - left.senderSeq))[0];
-        const existingSecret = latestThreadSenderMessage
+        const latestThreadSenderState =
+          latestThreadSenderMessage ??
+          (senderParticipant.lastSentMembershipVersion !== undefined &&
+          senderParticipant.lastSentSecretVersion !== undefined
+            ? {
+                threadId: directThread.id,
+                membershipVersion: senderParticipant.lastSentMembershipVersion,
+                secretVersion: senderParticipant.lastSentSecretVersion,
+              }
+            : undefined);
+        const existingSecret = latestThreadSenderState
           ? getCachedSenderSecret(
               directThread.id,
               activeActor.publicIdentity,
-              latestThreadSenderMessage.secretVersion
+              latestThreadSenderState.secretVersion
             )
           : null;
         const currentActorById = new Map<bigint, Agent>(
           currentState.actors.map(actor => [actor.id, actor])
         );
         currentActorById.set(activeActor.id, activeActor);
+        const directThreadSecretEnvelopes =
+          selectedThread?.id === directThread.id
+            ? loadedThreadSecretEnvelopes
+            : await liveConnection.procedures.listThreadSecretEnvelopes({
+                agentDbId: activeActor.id,
+                threadId: directThread.id,
+                membershipVersion: latestThreadSenderState?.membershipVersion,
+                senderAgentDbId: latestThreadSenderState ? activeActor.id : undefined,
+                secretVersion: latestThreadSenderState?.secretVersion,
+              });
         const composeRequiresSecretRotation = secretRotationRequired({
           senderActor: activeActor,
-          latestSenderMessage: latestThreadSenderMessage,
+          latestSenderState: latestThreadSenderState,
           currentMembershipVersion: directThread.membershipVersion,
           participants: currentThreadParticipants,
           actorById: currentActorById,
-          envelopes: currentState.threadSecretEnvelopes,
+          envelopes: directThreadSecretEnvelopes,
         });
 
         const prepared = await prepareEncryptedMessage({
@@ -4220,7 +4743,7 @@ function AuthenticatedInboxPage() {
           keyPair: actorKeyPair,
           recipients: [toActorPublicKeys(activeActor), recipientKeys],
           existingSecret,
-          latestKnownSecretVersion: latestThreadSenderMessage?.secretVersion ?? null,
+          latestKnownSecretVersion: latestThreadSenderState?.secretVersion ?? null,
           rotateSecret: composeRequiresSecretRotation,
         });
 
@@ -4264,6 +4787,7 @@ function AuthenticatedInboxPage() {
     }
 
     try {
+      const existingThreadIds = new Set(visibleThreads.map(thread => thread.id.toString()));
       await Promise.resolve(
         createGroupThreadReducer({
           agentDbId: activeActor.id,
@@ -4272,14 +4796,15 @@ function AuthenticatedInboxPage() {
           title: composeThreadTitle.trim() || undefined,
         })
       );
+      const createdThread = await waitForNewVisibleThread({ existingThreadIds });
       setComposeThreadTitle('');
       setComposeThreadLocked(false);
       setComposeSelectedActorIds([]);
       setComposeResolvedTargets([]);
       setComposeFirstMessage('');
-      setPendingVisibleThreadCount(visibleThreads.length + 1);
+      setSelectedThreadId(createdThread.id);
       setActorFeedback('Group thread created.');
-      closeComposeDialog();
+      closeComposeDialog({ threadId: createdThread.id });
     } catch (error) {
       setActorActionError(error instanceof Error ? error.message : 'Unable to create group thread');
     }
@@ -4487,11 +5012,11 @@ function AuthenticatedInboxPage() {
         });
       }
 
-      const existingSecret = latestSelectedThreadSenderMessage
+      const existingSecret = latestSelectedThreadSenderState
         ? getCachedSenderSecret(
             selectedThread.id,
             activeActor.publicIdentity,
-            latestSelectedThreadSenderMessage.secretVersion
+            latestSelectedThreadSenderState.secretVersion
           )
         : null;
 
@@ -4504,7 +5029,7 @@ function AuthenticatedInboxPage() {
         keyPair: actorKeyPair,
         recipients,
         existingSecret,
-        latestKnownSecretVersion: latestSelectedThreadSenderMessage?.secretVersion ?? null,
+        latestKnownSecretVersion: latestSelectedThreadSenderState?.secretVersion ?? null,
         rotateSecret: rotateSecret || requiresSecretRotation,
       });
 
@@ -4543,15 +5068,25 @@ function AuthenticatedInboxPage() {
     if (!ensureAuthorizedWriteAccess()) return;
     setActorActionError(null);
     setActorFeedback(null);
+    const actorId = activeActor.id;
+    const threadId = selectedThread.id;
+    const upToThreadSeq = selectedThread.lastMessageSeq;
+    const optimisticUpdatedAt = Timestamp.fromDate(new Date());
+    let rolledBack: ThreadReadState[] | null = null;
+    setPagedThreadReadStates(current => {
+      rolledBack = current;
+      return patchOptimisticReadState(current, actorId, threadId, {
+        lastReadThreadSeq: upToThreadSeq,
+        updatedAt: optimisticUpdatedAt,
+      });
+    });
     try {
       await Promise.resolve(
-        markThreadReadReducer({
-          agentDbId: activeActor.id,
-          threadId: selectedThread.id,
-          upToThreadSeq: selectedThread.lastMessageSeq,
-        })
+        markThreadReadReducer({ agentDbId: actorId, threadId, upToThreadSeq })
       );
+      refreshFirstVisibleThreadPage();
     } catch (error) {
+      if (rolledBack) setPagedThreadReadStates(rolledBack);
       setActorActionError(error instanceof Error ? error.message : 'Unable to update read state');
     }
   }
@@ -4561,16 +5096,25 @@ function AuthenticatedInboxPage() {
     if (!ensureAuthorizedWriteAccess()) return;
     setActorActionError(null);
     setActorFeedback(null);
-    const archived = !(readStateByThreadId.get(selectedThread.id)?.archived ?? false);
+    const actorId = activeActor.id;
+    const threadId = selectedThread.id;
+    const archived = !(readStateByThreadId.get(threadId)?.archived ?? false);
+    const optimisticUpdatedAt = Timestamp.fromDate(new Date());
+    let rolledBack: ThreadReadState[] | null = null;
+    setPagedThreadReadStates(current => {
+      rolledBack = current;
+      return patchOptimisticReadState(current, actorId, threadId, {
+        archived,
+        updatedAt: optimisticUpdatedAt,
+      });
+    });
     try {
       await Promise.resolve(
-        setThreadArchivedReducer({
-          agentDbId: activeActor.id,
-          threadId: selectedThread.id,
-          archived,
-        })
+        setThreadArchivedReducer({ agentDbId: actorId, threadId, archived })
       );
+      refreshFirstVisibleThreadPage();
     } catch (error) {
+      if (rolledBack) setPagedThreadReadStates(rolledBack);
       setActorActionError(error instanceof Error ? error.message : 'Unable to update archive state');
     }
   }
