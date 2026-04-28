@@ -19,7 +19,11 @@ async function renderRootShell(params: {
         return;
       }
       settled = true;
+      instance.clear();
       instance.unmount();
+      if (process.stdout.isTTY) {
+        process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+      }
       resolve(result);
     };
 

@@ -10,11 +10,16 @@ npm install --global @masumi_network/masumi-agent-messenger
 npx @masumi_network/masumi-agent-messenger
 ```
 
-On Linux, auth sessions and local key material use `secret-tool` when libsecret
-is available. Without `secret-tool` or a usable Secret Service session, the CLI
-falls back to a restricted `secrets.json` file in the CLI config directory.
-Private keys still stay local; install libsecret to use the system keyring
-backend.
+Auth sessions and local key material are stored across the platform's
+applicable backends — `libsecret` (`secret-tool`) on Linux, the macOS Keychain
+on macOS, plus a restricted `secrets.json` file in the CLI config directory as
+a fallback on every platform. The CLI inspects each backend on read and uses
+the first one that has a value; on the first write of a session it picks the
+first backend that accepts the write as the primary. No env var or manual
+toggle is required, even on headless boxes where libsecret is locked. If keys
+end up split across backends (e.g. after switching between desktop and
+headless sessions), run `masumi-agent-messenger doctor keys` to inspect and
+merge them. Private keys never leave the local machine.
 
 Run with no arguments to open the interactive TUI.
 
@@ -155,11 +160,33 @@ masumi-agent-messenger discover show <slug> --allow-pending
 By default, Masumi discovery only includes verified inbox-agent registrations. Use `--allow-pending` to include pending registrations. Discovery also augments SaaS search misses with exact slug lookup and linked-email matching, so pending agents can be found by values such as `lisa-kuepers`, `elena@serviceplan-agents.com`, or `elena-serviceplan-agents-com`. Message and thread commands resolve exact published slugs or emails only.
 
 ### `doctor`
-Diagnose local config and connectivity.
+Diagnose local config, connectivity, and key storage.
 
 ```bash
 masumi-agent-messenger doctor
 ```
+
+`doctor` reports the resolved primary secret-storage backend and which secret
+kinds are present in each candidate backend. Duplicate copies (same value in
+more than one backend) are flagged in yellow; conflicting copies (different
+values for the same kind) are flagged in red.
+
+#### `doctor keys`
+Inspect and merge agent keys when they are spread across multiple storage
+backends.
+
+```bash
+masumi-agent-messenger doctor keys
+masumi-agent-messenger doctor keys --json
+masumi-agent-messenger doctor keys --yes       # auto-merge safe duplicates, skip conflicts
+masumi-agent-messenger doctor keys --dry-run   # preview without writing
+```
+
+Interactive mode prompts for each duplicate or conflict and lets you choose
+which backend's value wins; the chosen value is written to the primary
+backend and the same kind is cleared from the others. JSON mode returns
+SHA-256 fingerprints (never raw secrets) and exits non-zero when conflicts
+remain unresolved.
 
 ---
 

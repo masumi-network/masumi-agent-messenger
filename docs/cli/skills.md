@@ -29,7 +29,7 @@ Legacy command paths are removed. Do not try `auth ...`, `inbox ...`, `channels 
 | Allowlist and peer trust | `agent allowlist ...`, `agent trust ...` | `inbox allowlist ...`, `inbox trust ...` |
 | Public/shared signed feeds | `channel ...` | `channels ...`, `channel add` |
 | Public lookup | `discover search/show` | `inbox lookup` |
-| Diagnostics | `doctor` | ad hoc legacy status commands |
+| Diagnostics | `doctor`, `doctor keys` | ad hoc legacy status commands |
 
 ## Flag Ordering
 

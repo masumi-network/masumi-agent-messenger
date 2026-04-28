@@ -85,7 +85,13 @@ import {
   defaultBackupFilePath,
   restoreInboxKeys,
 } from '../services/key-backup';
-import { createSecretStore } from '../services/secret-store';
+import {
+  ALL_SECRET_KINDS,
+  createSecretStore,
+  inspectSecretSources,
+  listCandidateBackends,
+  type SecretKind,
+} from '../services/secret-store';
 import { getStoredActorKeyPair } from '../services/actor-keys';
 import { decryptVisibleMessage } from '../services/messages';
 import { findDefaultActorByEmail } from '../../../shared/inbox-state';
@@ -320,6 +326,7 @@ type SecurityAction = {
     | 'import-backup'
     | 'export-backup'
     | 'rotate-keys'
+    | 'inspect-key-sources'
     | 'remove-local-keys'
     | 'logout';
   label: string;
@@ -1286,6 +1293,7 @@ function useLiveThreadMessages(params: {
   selectedInboxItem: LiveInboxSectionItem | null;
   optimisticMessages: LiveThreadMessage[];
   refreshToken: string;
+  inboxFocus: InboxFocus;
 }) {
   const [threadMessages, setThreadMessages] = useState<LiveThreadMessage[]>([]);
   const [threadMessagesError, setThreadMessagesError] = useState<string | null>(null);
@@ -1299,7 +1307,8 @@ function useLiveThreadMessages(params: {
     if (
       params.connectionState.mode !== 'ready' ||
       params.routeType !== 'inboxes' ||
-      !params.selectedInboxItem?.threadId
+      !params.selectedInboxItem?.threadId ||
+      params.inboxFocus === 'navigator'
     ) {
       setThreadMessages([]);
       setThreadMessagesError(null);
@@ -1338,6 +1347,7 @@ function useLiveThreadMessages(params: {
     params.refreshToken,
     params.routeType,
     params.selectedInboxItem?.threadId,
+    params.inboxFocus,
   ]);
 
   useEffect(() => {
@@ -1705,14 +1715,16 @@ function ThreadMessageBlock({
   width?: number;
 }) {
   const safeWidth = width ? Math.max(1, width) : undefined;
-  const header = `From ${message.senderLabel} · ${formatTimestamp(message.createdAt)}${
+  const header = `${message.senderLabel} · ${formatTimestamp(message.createdAt)}${
     message.optimistic ? ' · syncing...' : ''
   }`;
   return (
     <Box key={message.id} flexDirection="column" marginBottom={1} width="100%">
-      <Text color="gray" wrap="truncate">
-        {safeWidth ? truncateAndPadText(header, safeWidth) : header}
-      </Text>
+      <Box marginBottom={1}>
+        <Text color="cyan" wrap="truncate" bold>
+          {safeWidth ? truncateAndPadText(header, safeWidth) : header}
+        </Text>
+      </Box>
       {message.trustNotice ? (
         <Text color="yellow" wrap="truncate">
           {safeWidth
@@ -2475,18 +2487,21 @@ export function RootShell({
         ? optimisticThreadMessagesByThreadId[selectedInboxItem.threadId] ?? []
         : [],
     refreshToken: `${liveInboxRefreshToken}:${securityRefreshToken}`,
+    inboxFocus,
   });
 
   const selectedInboxItemKind = selectedInboxItem?.kind ?? null;
   const inboxTabs = useMemo<Array<{ key: InboxDetailTab; label: string; count?: number }>>(() => {
     if (selectedInboxItemKind === 'request') {
-      return [{ key: 'approval', label: 'Approval' }];
+      const label =
+        selectedRequest?.direction === 'outgoing' ? 'Awaiting peer approval' : 'Approval';
+      return [{ key: 'approval', label }];
     }
     return [
       { key: 'messages', label: 'Messages', count: totalThreadMessages },
       { key: 'members', label: 'Members', count: selectedThread?.participantCount ?? 0 },
     ];
-  }, [selectedInboxItemKind, selectedThread?.participantCount, totalThreadMessages]);
+  }, [selectedInboxItemKind, selectedRequest?.direction, selectedThread?.participantCount, totalThreadMessages]);
 
   useEffect(() => {
     setInboxDetailTab(selectedInboxItemKind === 'request' ? 'approval' : 'messages');
@@ -2528,6 +2543,11 @@ export function RootShell({
         id: 'rotate-keys',
         label: 'Rotate agent keys',
         description: 'Rotate keys and optionally share or revoke devices.',
+      },
+      {
+        id: 'inspect-key-sources',
+        label: 'Inspect key storage sources',
+        description: 'Find keys split across keyring/file and merge them.',
       },
       {
         id: 'remove-local-keys',
@@ -4742,6 +4762,95 @@ export function RootShell({
       openRotateKeysTask();
       return;
     }
+    if (selectedSecurityAction.id === 'inspect-key-sources') {
+      await performTask(
+        'Inspecting key storage sources',
+        async reporter => {
+          const candidates = listCandidateBackends();
+          const report = await inspectSecretSources(options.profile, candidates);
+          for (const source of report.sources) {
+            const tag = source.backendId === report.primary ? '▸' : ' ';
+            const kindsPresent = ALL_SECRET_KINDS.filter(
+              kind => source.secrets[kind] !== undefined
+            );
+            const presence = source.available
+              ? kindsPresent.length > 0
+                ? kindsPresent.join(', ')
+                : 'empty'
+              : `unavailable${source.unavailableReason ? `: ${source.unavailableReason}` : ''}`;
+            reporter.info(`${tag} ${source.backendId} (${source.label}): ${presence}`);
+          }
+
+          const duplicates: SecretKind[] = [];
+          const conflicts: SecretKind[] = [];
+          for (const kind of ALL_SECRET_KINDS) {
+            const values = report.sources
+              .map(source => source.secrets[kind])
+              .filter((value): value is string => value !== undefined);
+            if (values.length < 2) continue;
+            if (values.every(value => value === values[0])) {
+              duplicates.push(kind);
+            } else {
+              conflicts.push(kind);
+            }
+          }
+
+          const merged: SecretKind[] = [];
+          if (duplicates.length > 0) {
+            const primaryCandidate = candidates.find(c => c.id === report.primary);
+            if (primaryCandidate) {
+              for (const kind of duplicates) {
+                const winner = report.sources.find(
+                  s => s.backendId === report.primary && s.secrets[kind] !== undefined
+                );
+                const fallback = winner ?? report.sources.find(s => s.secrets[kind] !== undefined);
+                if (!fallback) continue;
+                const value = fallback.secrets[kind]!;
+                await primaryCandidate.backend.set(`${options.profile}:${kind}`, value);
+                for (const candidate of candidates) {
+                  if (candidate.id === primaryCandidate.id) continue;
+                  try {
+                    await candidate.backend.delete(`${options.profile}:${kind}`);
+                  } catch {
+                    // ignored
+                  }
+                }
+                merged.push(kind);
+              }
+            }
+          }
+          return {
+            primary: report.primary,
+            duplicates,
+            conflicts,
+            merged,
+          };
+        },
+        result => {
+          const parts: string[] = [`Primary backend: ${result.primary}.`];
+          if (result.merged.length > 0) {
+            parts.push(`Merged duplicates: ${result.merged.join(', ')}.`);
+          }
+          if (result.conflicts.length > 0) {
+            parts.push(
+              `Conflicts remain (${result.conflicts.join(
+                ', '
+              )}). Run \`masumi-agent-messenger doctor keys\` to resolve interactively.`
+            );
+          }
+          if (result.duplicates.length === 0 && result.conflicts.length === 0) {
+            parts.push('No drift across backends.');
+          }
+          setSecurityRefreshToken(token => token + 1);
+          setTask(current => ({
+            ...current,
+            banner: null,
+            notice: parts.join(' '),
+          }));
+        }
+      );
+      return;
+    }
     if (selectedSecurityAction.id === 'remove-local-keys') {
       await performTask(
         'Removing local keys',
@@ -5447,7 +5556,6 @@ export function RootShell({
     if (route.type === 'inboxes') {
       if (inboxFocus === 'detail' && selectedRequest) {
         if (key.leftArrow || key.rightArrow) {
-          setInboxDetailTab('approval');
           return;
         }
         if ((input === 'a' || key.return) && selectedRequest.direction === 'incoming') {
@@ -5496,11 +5604,6 @@ export function RootShell({
 
       if (inboxFocus === 'detail' && selectedThread) {
         if (key.leftArrow || key.rightArrow) {
-          const currentIndex = inboxTabs.findIndex(tab => tab.key === inboxDetailTab);
-          const direction = key.leftArrow ? -1 : 1;
-          const nextIndex =
-            (Math.max(currentIndex, 0) + direction + inboxTabs.length) % inboxTabs.length;
-          setInboxDetailTab(inboxTabs[nextIndex]?.key ?? 'messages');
           return;
         }
         if (inboxDetailTab === 'members') {
@@ -6632,20 +6735,22 @@ export function RootShell({
                 width={contentListWidth}
               />
             </Box>
-            <Box marginTop={1} flexDirection="column">
-              <Text color={inboxFocus === 'navigator' ? 'cyan' : 'white'} bold={inboxFocus === 'navigator'}>
-                ◆ Threads overview
-              </Text>
-              {renderList({
-                items: inboxSectionItems.map(item => `${item.label} · ${item.subtitle}`),
-                selectedIndex: selectedInboxIndex,
-                empty:
-                  inboxSection === 'pending'
-                    ? 'No pending requests for this agent.'
-                    : 'No threads match this section and filter.',
-                maxWidth: contentListWidth,
-              })}
-            </Box>
+            {inboxFocus === 'navigator' ? (
+              <Box marginTop={1} flexDirection="column">
+                <Text color="cyan" bold>
+                  ◆ Threads overview
+                </Text>
+                {renderList({
+                  items: inboxSectionItems.map(item => `${item.label} · ${item.subtitle}`),
+                  selectedIndex: selectedInboxIndex,
+                  empty:
+                    inboxSection === 'pending'
+                      ? 'No pending requests for this agent.'
+                      : 'No threads match this section and filter.',
+                  maxWidth: contentListWidth,
+                })}
+              </Box>
+            ) : null}
             <Box marginTop={1} flexDirection="column">
               <Text
                 color={inboxFocus === 'detail' || inboxFocus === 'composer' ? 'cyan' : 'white'}
@@ -6669,7 +6774,7 @@ export function RootShell({
                     width={contentListWidth}
                     color="gray"
                   />
-                  {inboxFocus === 'detail' ? (
+                  {inboxFocus === 'detail' && selectedRequest.direction !== 'outgoing' ? (
                     <Box marginTop={1}>
                       <TabStrip tabs={inboxTabs} active={inboxDetailTab} width={contentListWidth} />
                     </Box>
@@ -6678,6 +6783,15 @@ export function RootShell({
                     <Text>
                       First message: <Text color="white">{capTextLines(firstThreadMessage.body, MAX_MESSAGE_BODY_LINES)}</Text>
                     </Text>
+                  ) : selectedRequest.direction === 'outgoing' ? (
+                    <Box marginTop={1} flexDirection="column">
+                      <Text color="yellow">
+                        ⏳ Awaiting approval from {selectedRequest.targetDisplayName ?? selectedRequest.targetSlug}.
+                      </Text>
+                      <Text color="gray">
+                        They must accept the contact request on their side before messages can be exchanged.
+                      </Text>
+                    </Box>
                   ) : (
                     <Text color="gray">No visible message preview yet.</Text>
                   )}
@@ -6716,6 +6830,10 @@ export function RootShell({
                         ) : (
                           <Text color="gray">No visible participants yet.</Text>
                         )}
+                      </Box>
+                    ) : inboxFocus === 'navigator' ? (
+                      <Box marginTop={1}>
+                        <Text color="gray">Press Enter to open this thread.</Text>
                       </Box>
                     ) : (
                       <>

@@ -143,6 +143,16 @@ Read-only public lookup. Does not mutate local state.
 
 ```bash
 masumi-agent-messenger doctor
+masumi-agent-messenger doctor keys [--yes] [--dry-run] [--json]
 ```
 
-Diagnose local config, key state, and SpacetimeDB connectivity. No subcommands.
+`doctor` diagnoses local config, key state, key storage backends, and
+SpacetimeDB connectivity. It flags duplicate or conflicting key copies across
+the available secret-storage backends (libsecret/keychain + file).
+
+`doctor keys` inspects every backend, prompts to choose which value wins for
+each duplicate or conflict, and merges the result into the resolved primary
+backend (clearing the same kind from the others). `--yes` auto-resolves safe
+duplicates and skips conflicts; `--dry-run` previews without writing; `--json`
+returns SHA-256 fingerprints (never raw secrets) and exits non-zero when
+conflicts remain unresolved.

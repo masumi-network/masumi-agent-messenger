@@ -764,9 +764,13 @@ async function loadProgramWithMocks(params: {
     disconnectConnection,
   }));
 
-  vi.doMock('./services/secret-store', () => ({
-    createSecretStore,
-  }));
+  vi.doMock('./services/secret-store', async importOriginal => {
+    const actual = await importOriginal<typeof import('./services/secret-store')>();
+    return {
+      ...actual,
+      createSecretStore,
+    };
+  });
 
   vi.doMock('./services/peer-key-trust', () => ({
     autoPinPeerIfUnknown,

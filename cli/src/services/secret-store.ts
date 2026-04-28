@@ -309,49 +309,103 @@ function createMacOsBackend(): KeychainBackend {
   };
 }
 
+export type BackendId = 'macos-keychain' | 'libsecret' | 'file';
+
+export type IdentifiedBackend = {
+  id: BackendId;
+  label: string;
+  backend: KeychainBackend;
+};
+
+export function createReadThroughBackend(candidates: IdentifiedBackend[]): KeychainBackend {
+  if (candidates.length === 0) {
+    throw userError('No secret-store backends are available on this platform.', {
+      code: 'KEYCHAIN_UNSUPPORTED_PLATFORM',
+    });
+  }
+  let primary: IdentifiedBackend | null = null;
+
+  return {
+    async get(account) {
+      let firstError: unknown;
+      for (const candidate of candidates) {
+        try {
+          const value = await candidate.backend.get(account);
+          if (value !== null) {
+            return value;
+          }
+        } catch (error) {
+          if (isLibsecretUnavailableError(error)) {
+            continue;
+          }
+          if (firstError === undefined) {
+            firstError = error;
+          }
+        }
+      }
+      if (firstError !== undefined) {
+        throw firstError;
+      }
+      return null;
+    },
+    async set(account, value) {
+      if (primary) {
+        await primary.backend.set(account, value);
+        return;
+      }
+      let lastError: unknown;
+      for (const candidate of candidates) {
+        try {
+          await candidate.backend.set(account, value);
+          primary = candidate;
+          return;
+        } catch (error) {
+          if (isLibsecretUnavailableError(error)) {
+            lastError = error;
+            continue;
+          }
+          throw error;
+        }
+      }
+      throw lastError ?? userError('No reachable secret-store backend for write.', {
+        code: 'KEYCHAIN_SET_FAILED',
+      });
+    },
+    async delete(account) {
+      let deleted = false;
+      let firstError: unknown;
+      for (const candidate of candidates) {
+        try {
+          if (await candidate.backend.delete(account)) {
+            deleted = true;
+          }
+        } catch (error) {
+          if (isLibsecretUnavailableError(error)) {
+            continue;
+          }
+          if (firstError === undefined) {
+            firstError = error;
+          }
+        }
+      }
+      if (!deleted && firstError !== undefined) {
+        throw firstError;
+      }
+      return deleted;
+    },
+  };
+}
+
 export function createLinuxBackend(params?: {
   libsecretBackend?: KeychainBackend;
   fileBackend?: KeychainBackend;
 }): KeychainBackend {
   const libsecretBackend = params?.libsecretBackend ?? createLibsecretBackend();
   const fileBackend = params?.fileBackend ?? createFileBackend();
-
-  return {
-    async get(account) {
-      try {
-        return (await libsecretBackend.get(account)) ?? (await fileBackend.get(account));
-      } catch (error) {
-        if (isLibsecretUnavailableError(error)) {
-          return fileBackend.get(account);
-        }
-        throw error;
-      }
-    },
-    async set(account, value) {
-      try {
-        await libsecretBackend.set(account, value);
-        await fileBackend.delete(account);
-      } catch (error) {
-        if (isLibsecretUnavailableError(error)) {
-          await fileBackend.set(account, value);
-          return;
-        }
-        throw error;
-      }
-    },
-    async delete(account) {
-      let deleted = false;
-      try {
-        deleted = await libsecretBackend.delete(account);
-      } catch (error) {
-        if (!isLibsecretUnavailableError(error)) {
-          throw error;
-        }
-      }
-
-      return (await fileBackend.delete(account)) || deleted;
-    },
-  };
+  return createReadThroughBackend([
+    { id: 'libsecret', label: 'libsecret', backend: libsecretBackend },
+    { id: 'file', label: 'file (~/.config)', backend: fileBackend },
+  ]);
 }
 
 function createLibsecretBackend(): KeychainBackend {
@@ -430,26 +484,34 @@ function createLibsecretBackend(): KeychainBackend {
   };
 }
 
-function createDefaultBackend(): KeychainBackend {
-  if (process.env.MASUMI_FORCE_FILE_BACKEND === '1' || process.env.MASUMI_FORCE_FILE_BACKEND === 'true') {
-    return createFileBackend();
-  }
-
+export function listCandidateBackends(): IdentifiedBackend[] {
   if (process.platform === 'darwin') {
-    return createMacOsBackend();
+    return [
+      { id: 'macos-keychain', label: 'macOS Keychain', backend: createMacOsBackend() },
+      { id: 'file', label: 'file (~/.config)', backend: createFileBackend() },
+    ];
   }
-
   if (process.platform === 'linux') {
-    return createLinuxBackend();
+    return [
+      { id: 'libsecret', label: 'libsecret', backend: createLibsecretBackend() },
+      { id: 'file', label: 'file (~/.config)', backend: createFileBackend() },
+    ];
   }
-
-  throw userError(
-    `OS keychain adapter is not available on ${process.platform}.`,
-    { code: 'KEYCHAIN_UNSUPPORTED_PLATFORM' }
-  );
+  return [{ id: 'file', label: 'file (~/.config)', backend: createFileBackend() }];
 }
 
-type SecretKind = 'oidc' | 'agent-keypair' | 'device-keypair' | 'namespace-key-vault';
+function createDefaultBackend(): KeychainBackend {
+  return createReadThroughBackend(listCandidateBackends());
+}
+
+export type SecretKind = 'oidc' | 'agent-keypair' | 'device-keypair' | 'namespace-key-vault';
+
+export const ALL_SECRET_KINDS: SecretKind[] = [
+  'oidc',
+  'agent-keypair',
+  'device-keypair',
+  'namespace-key-vault',
+];
 
 export type DeviceKeyMaterial = {
   deviceId: string;
@@ -464,6 +526,82 @@ export type NamespaceKeyVault = {
 
 function accountKey(profileName: string, kind: SecretKind): string {
   return `${profileName}:${kind}`;
+}
+
+export type SecretSourceReport = {
+  backendId: BackendId;
+  label: string;
+  available: boolean;
+  unavailableReason?: string;
+  secrets: Partial<Record<SecretKind, string>>;
+};
+
+export type InspectSecretSourcesResult = {
+  primary: BackendId;
+  sources: SecretSourceReport[];
+};
+
+export async function inspectSecretSources(
+  profileName: string,
+  candidates: IdentifiedBackend[] = listCandidateBackends()
+): Promise<InspectSecretSourcesResult> {
+  const sources: SecretSourceReport[] = [];
+  let primary: BackendId | null = null;
+
+  for (const candidate of candidates) {
+    const secrets: Partial<Record<SecretKind, string>> = {};
+    let available = true;
+    let unavailableReason: string | undefined;
+
+    for (const kind of ALL_SECRET_KINDS) {
+      try {
+        const value = await candidate.backend.get(accountKey(profileName, kind));
+        if (value !== null) {
+          secrets[kind] = value;
+        }
+      } catch (error) {
+        if (isLibsecretUnavailableError(error)) {
+          available = false;
+          unavailableReason = error instanceof Error ? error.message : String(error);
+          break;
+        }
+        if (unavailableReason === undefined) {
+          unavailableReason = error instanceof Error ? error.message : String(error);
+        }
+      }
+    }
+
+    if (available && primary === null) {
+      primary = candidate.id;
+    }
+
+    sources.push({
+      backendId: candidate.id,
+      label: candidate.label,
+      available,
+      unavailableReason,
+      secrets,
+    });
+  }
+
+  return { primary: primary ?? 'file', sources };
+}
+
+export async function writeSecretToBackend(
+  candidate: IdentifiedBackend,
+  profileName: string,
+  kind: SecretKind,
+  value: string
+): Promise<void> {
+  await candidate.backend.set(accountKey(profileName, kind), value);
+}
+
+export async function deleteSecretFromBackend(
+  candidate: IdentifiedBackend,
+  profileName: string,
+  kind: SecretKind
+): Promise<boolean> {
+  return candidate.backend.delete(accountKey(profileName, kind));
 }
 
 export type SecretStore = ReturnType<typeof createSecretStore>;

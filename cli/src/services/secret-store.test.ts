@@ -3,7 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { KeychainBackend } from './secret-store';
-import { createFileBackend, createLinuxBackend, createSecretStore } from './secret-store';
+import {
+  createFileBackend,
+  createLinuxBackend,
+  createReadThroughBackend,
+  createSecretStore,
+  inspectSecretSources,
+} from './secret-store';
 
 function createMemoryBackend(initialEntries?: Record<string, string>): KeychainBackend {
   const values = new Map<string, string>(Object.entries(initialEntries ?? {}));
@@ -133,17 +139,20 @@ describe('secret-store', () => {
     }
   });
 
-  it('clears stale fallback secrets after a successful libsecret write', async () => {
+  it('does not mutate non-primary backends on write', async () => {
+    // Read-through composite: libsecret unreachable for reads → primary becomes file.
+    // Writes must NOT touch other backends (the previous bug wiped the file copy
+    // after a successful libsecret write).
     const fileBackend = createMemoryBackend({
-      'default:oidc': 'stale-session-json',
+      'default:oidc': 'pre-existing-file-value',
     });
     const libsecretValues = new Map<string, string>();
     const libsecretBackend: KeychainBackend = {
       async get() {
         throw createMissingSecretToolError();
       },
-      async set(account, value) {
-        libsecretValues.set(account, value);
+      async set() {
+        throw createMissingSecretToolError();
       },
       async delete() {
         return false;
@@ -153,9 +162,115 @@ describe('secret-store', () => {
 
     await backend.set('default:oidc', 'fresh-session-json');
 
+    // libsecret is the first candidate, but its set throws (no secret-tool)
+    // → primary falls through to file. The libsecret value is never written,
+    // and the file copy is updated, not the libsecret store.
+    expect(libsecretValues.get('default:oidc')).toBeUndefined();
+    expect(await fileBackend.get('default:oidc')).toBe('fresh-session-json');
+  });
+
+  it('writes to libsecret without erasing the file copy when libsecret is reachable', async () => {
+    const fileBackend = createMemoryBackend({
+      'default:oidc': 'pre-existing-file-value',
+    });
+    const libsecretValues = new Map<string, string>();
+    const libsecretBackend: KeychainBackend = {
+      async get(account) {
+        return libsecretValues.get(account) ?? null;
+      },
+      async set(account, value) {
+        libsecretValues.set(account, value);
+      },
+      async delete(account) {
+        return libsecretValues.delete(account);
+      },
+    };
+    const backend = createLinuxBackend({ libsecretBackend, fileBackend });
+
+    await backend.set('default:oidc', 'fresh-session-json');
+
+    // Primary is libsecret (first reachable candidate). File copy is intentionally left alone.
     expect(libsecretValues.get('default:oidc')).toBe('fresh-session-json');
-    expect(await fileBackend.get('default:oidc')).toBeNull();
-    expect(await backend.get('default:oidc')).toBeNull();
+    expect(await fileBackend.get('default:oidc')).toBe('pre-existing-file-value');
+    // Read-through returns libsecret first.
+    expect(await backend.get('default:oidc')).toBe('fresh-session-json');
+  });
+
+  it('read-through returns the first non-null candidate without querying the rest', async () => {
+    const calls: string[] = [];
+    const first: KeychainBackend = {
+      async get(account) {
+        calls.push(`first:${account}`);
+        return 'first-value';
+      },
+      async set() {},
+      async delete() {
+        return false;
+      },
+    };
+    const second: KeychainBackend = {
+      async get(account) {
+        calls.push(`second:${account}`);
+        return 'second-value';
+      },
+      async set() {},
+      async delete() {
+        return false;
+      },
+    };
+    const backend = createReadThroughBackend([
+      { id: 'libsecret', label: 'first', backend: first },
+      { id: 'file', label: 'second', backend: second },
+    ]);
+
+    expect(await backend.get('account-a')).toBe('first-value');
+    expect(calls).toEqual(['first:account-a']);
+  });
+
+  it('inspectSecretSources reports per-backend presence and unavailability', async () => {
+    const file = createMemoryBackend({
+      'default:agent-keypair': '{"file":true}',
+    });
+    const libsecret: KeychainBackend = {
+      async get() {
+        throw createLockedCollectionError();
+      },
+      async set() {
+        throw createLockedCollectionError();
+      },
+      async delete() {
+        throw createLockedCollectionError();
+      },
+    };
+    const report = await inspectSecretSources('default', [
+      { id: 'libsecret', label: 'libsecret', backend: libsecret },
+      { id: 'file', label: 'file (~/.config)', backend: file },
+    ]);
+
+    expect(report.primary).toBe('file');
+    const libsecretSource = report.sources.find(s => s.backendId === 'libsecret')!;
+    expect(libsecretSource.available).toBe(false);
+    expect(libsecretSource.unavailableReason).toContain('locked collection');
+    const fileSource = report.sources.find(s => s.backendId === 'file')!;
+    expect(fileSource.available).toBe(true);
+    expect(fileSource.secrets['agent-keypair']).toBe('{"file":true}');
+  });
+
+  it('inspectSecretSources surfaces duplicates when the same kind exists in multiple backends', async () => {
+    const file = createMemoryBackend({
+      'default:agent-keypair': 'shared-value',
+    });
+    const libsecret = createMemoryBackend({
+      'default:agent-keypair': 'shared-value',
+    });
+    const report = await inspectSecretSources('default', [
+      { id: 'libsecret', label: 'libsecret', backend: libsecret },
+      { id: 'file', label: 'file (~/.config)', backend: file },
+    ]);
+
+    expect(report.sources[0]!.secrets['agent-keypair']).toBe('shared-value');
+    expect(report.sources[1]!.secrets['agent-keypair']).toBe('shared-value');
+    expect(report.primary).toBe('libsecret');
   });
 
   it('falls back to file backend when libsecret collection is locked', async () => {
@@ -177,35 +292,6 @@ describe('secret-store', () => {
 
     expect(await fileBackend.get('default:oidc')).toBe('session-json');
     expect(await backend.get('default:oidc')).toBe('session-json');
-  });
-
-  it('forces file backend via MASUMI_FORCE_FILE_BACKEND env var', async () => {
-    const originalEnv = process.env.MASUMI_FORCE_FILE_BACKEND;
-    const originalXdg = process.env.XDG_CONFIG_HOME;
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'masumi-cli-secrets-'));
-    process.env.MASUMI_FORCE_FILE_BACKEND = '1';
-    process.env.XDG_CONFIG_HOME = tempDir;
-    try {
-      // Dynamically import to pick up the env var
-      const { createSecretStore: createStore } = await import('./secret-store');
-      const store = createStore();
-      await store.setOidcSession('default', { idToken: 't', refreshToken: 'r', expiresAt: 1, createdAt: 1 });
-      const stored = await store.getOidcSession('default');
-      expect(stored).not.toBeNull();
-      expect(stored?.idToken).toBe('t');
-    } finally {
-      if (originalEnv === undefined) {
-        delete process.env.MASUMI_FORCE_FILE_BACKEND;
-      } else {
-        process.env.MASUMI_FORCE_FILE_BACKEND = originalEnv;
-      }
-      if (originalXdg === undefined) {
-        delete process.env.XDG_CONFIG_HOME;
-      } else {
-        process.env.XDG_CONFIG_HOME = originalXdg;
-      }
-      await rm(tempDir, { recursive: true, force: true });
-    }
   });
 
   it('serializes concurrent fallback writes without losing entries', async () => {

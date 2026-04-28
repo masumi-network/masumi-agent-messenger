@@ -120,7 +120,7 @@ Successful commands return a JSON object. Failures return:
 
 | Code | Meaning | Agent Action |
 |---|---|---|
-| `KEYCHAIN_SET_FAILED` | Could not write secret to OS keyring | Set `MASUMI_FORCE_FILE_BACKEND=1` and retry |
+| `KEYCHAIN_SET_FAILED` | Could not write secret to OS keyring | Run `doctor keys` to inspect/merge backends; the CLI now auto-falls back to the file backend if libsecret is unreachable |
 | `KEYCHAIN_GET_FAILED` | Could not read secret from OS keyring | Check `doctor --verbose`; use file backend if needed |
 | `AUTH_LOGIN_INTERACTIVE_REQUIRED` | Tried `account login` in non-interactive shell | Use `account login start` + `account login complete` instead |
 | `OIDC_DEVICE_POLL_FAILED` | Device code expired or was denied | Start a new `account login start` flow |
@@ -277,30 +277,21 @@ masumi-agent-messenger agent list --json
 
 ## Troubleshooting — Headless Linux / KEYCHAIN_SET_FAILED
 
-On headless Linux (servers, containers, remote VMs), `account login complete` may fail with:
+On headless Linux (servers, containers, remote VMs), libsecret may be installed but its Secret Service collection is locked. The CLI now read-throughs every applicable backend on each call (libsecret + the local `secrets.json` file, `0600` perms) and writes to whichever one accepts writes first — no env-var toggle required.
 
-```
-[fail] Unable to write secret to libsecret.
-  code: KEYCHAIN_SET_FAILED
-```
-
-**Root cause:** The CLI prefers `libsecret` / `secret-tool` when it is installed, but the Secret Service collection is locked without a desktop session. The CLI has a fallback to a local `secrets.json` file (in the CLI config directory, `0600` perms), but it only triggers when `secret-tool` is completely unavailable or returns specific known errors — not when the collection is merely locked.
-
-**Fix — force file-based fallback:**
+If a host has been used in both modes and key material ends up split or stale across backends, run:
 
 ```bash
-export MASUMI_FORCE_FILE_BACKEND=1
+masumi-agent-messenger doctor              # flags duplicates / conflicts
+masumi-agent-messenger doctor keys         # interactive merge
+masumi-agent-messenger doctor keys --json  # machine-readable report; non-zero exit on unresolved conflicts
+masumi-agent-messenger doctor keys --yes   # auto-merge safe duplicates, skip conflicts
+masumi-agent-messenger doctor keys --dry-run  # preview, no writes
 ```
 
-Then run auth normally. This forces the CLI to use a local `secrets.json` file (in the CLI config directory, `0600` perms) instead of the system keyring. Private keys still stay local.
+`doctor keys` writes the chosen value to the resolved primary backend and clears the same kind from the others. Private keys never leave the local machine.
 
-You can also set it per-command:
-
-```bash
-MASUMI_FORCE_FILE_BACKEND=1 masumi-agent-messenger account login complete --polling-code "$POLLING_CODE" --json
-```
-
-**Verification that file fallback is active:** After successful auth, `doctor --verbose` should show `Namespace vault: yes` and `Device key material: yes` even though libsecret was bypassed.
+**Verification:** After successful auth, `doctor --verbose` shows `Namespace vault: yes` and `Device key material: yes`, plus a `Key storage primary` row and per-backend presence lines.
 
 ---
 
@@ -308,7 +299,6 @@ MASUMI_FORCE_FILE_BACKEND=1 masumi-agent-messenger account login complete --poll
 
 | Variable | Purpose |
 |---|---|
-| `MASUMI_FORCE_FILE_BACKEND` | Set to `1` or `true` to force file-based secret storage instead of the OS keyring. Required for headless Linux where libsecret is installed but the collection is locked. |
 | `MASUMI_CLI_OIDC_CLIENT_ID` | Override the OIDC client ID used for the device-code flow. Defaults to `masumi-spacetime-cli`. |
 | `MASUMI_OIDC_ISSUER` | Override the OIDC issuer URL. |
 | `MASUMI_OIDC_REDIRECT_URI` | Override the OIDC redirect URI. |

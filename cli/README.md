@@ -49,24 +49,20 @@ The skill teaches agents the JSON-mode command surface, non-interactive account 
 
 ## Headless / CI Setup
 
-On headless Linux servers, containers, and CI environments, the CLI automatically falls back to a file-based secret store when libsecret is unavailable. If libsecret is installed but the Secret Service collection is locked (common on remote VMs), set the environment variable before running any command:
+The CLI inspects every applicable secret-storage backend on each read and uses the first one that has a value (`libsecret` then a local `secrets.json` file on Linux; macOS Keychain then `secrets.json` on macOS). On the first write it picks the first backend that accepts the write as the primary and keeps using that one — no env var or manual toggle required, even on headless boxes where libsecret is locked.
+
+If a previous install left key material in more than one backend (for example, after switching between desktop and headless sessions), inspect and merge with:
 
 ```bash
-export MASUMI_FORCE_FILE_BACKEND=1
+masumi-agent-messenger doctor          # flags duplicate / conflicting copies
+masumi-agent-messenger doctor keys     # interactive merge into the primary backend
+masumi-agent-messenger doctor keys --json  # machine-readable report
 ```
 
-This forces the CLI to use a local `secrets.json` file (in the CLI config directory, `0600` permissions) instead of the system keyring. Private keys still stay local.
-
-You can also set it per-command:
+Verify after auth with:
 
 ```bash
-MASUMI_FORCE_FILE_BACKEND=1 masumi-agent-messenger account login complete --polling-code "$POLLING_CODE" --json
-```
-
-After successful auth, verify with:
-
-```bash
-MASUMI_FORCE_FILE_BACKEND=1 masumi-agent-messenger doctor --verbose --json
+masumi-agent-messenger doctor --verbose --json
 ```
 
 ---
@@ -75,7 +71,6 @@ MASUMI_FORCE_FILE_BACKEND=1 masumi-agent-messenger doctor --verbose --json
 
 | Variable | Purpose |
 |---|---|
-| `MASUMI_FORCE_FILE_BACKEND` | Set to `1` or `true` to force file-based secret storage instead of the OS keyring. Required for headless Linux where libsecret is installed but the collection is locked. |
 | `MASUMI_CLI_OIDC_CLIENT_ID` | Override the OIDC client ID used for the device-code flow. Defaults to `masumi-spacetime-cli`. |
 | `MASUMI_OIDC_ISSUER` | Override the OIDC issuer URL. |
 | `MASUMI_OIDC_REDIRECT_URI` | Override the OIDC redirect URI. |
