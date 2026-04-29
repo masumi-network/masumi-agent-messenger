@@ -54,7 +54,6 @@ type ProvisionedClient = ConnectedClient & {
 const VISIBLE_QUERIES = [
   tables.visibleInboxes,
   tables.visibleAgents,
-  tables.visibleAgentKeyBundles,
   tables.visibleThreads,
   tables.visibleThreadParticipants,
   tables.visibleThreadReadStates,
@@ -214,25 +213,31 @@ function toActorPublicKeys(actor: Agent): ActorPublicKeys {
   };
 }
 
-function findVersionedKey(
+async function findVersionedKey(
   conn: DbConnection,
+  viewerAgentDbId: bigint,
   sender: Agent,
   kind: 'encryption' | 'signing',
   version: string
-): string | null {
+): Promise<string | null> {
   if (kind === 'encryption' && sender.currentEncryptionKeyVersion === version) {
     return sender.currentEncryptionPublicKey;
   }
   if (kind === 'signing' && sender.currentSigningKeyVersion === version) {
     return sender.currentSigningPublicKey;
   }
-  const bundles = Array.from(conn.db.visibleAgentKeyBundles.iter()).filter(
-    bundle => bundle.agentDbId === sender.id
-  );
-  if (kind === 'encryption') {
-    return bundles.find(bundle => bundle.encryptionKeyVersion === version)?.encryptionPublicKey ?? null;
-  }
-  return bundles.find(bundle => bundle.signingKeyVersion === version)?.signingPublicKey ?? null;
+
+  const rows = await conn.procedures.lookupAgentPublicKeys({
+    agentDbId: viewerAgentDbId,
+    requests: [
+      {
+        agentDbId: sender.id,
+        keyKind: kind,
+        keyVersion: version,
+      },
+    ],
+  });
+  return rows[0]?.publicKey ?? null;
 }
 
 async function decryptInbound(params: {
@@ -253,20 +258,23 @@ async function decryptInbound(params: {
   );
   if (!envelope) throw new Error('Recipient secret envelope missing');
 
-  const senderEncryptionPublicKey = findVersionedKey(
+  const senderEncryptionPublicKey = await findVersionedKey(
     params.recipient.conn,
+    params.recipient.actor.id,
     sender,
     'encryption',
     envelope.senderEncryptionKeyVersion
   );
-  const messageSigningPublicKey = findVersionedKey(
+  const messageSigningPublicKey = await findVersionedKey(
     params.recipient.conn,
+    params.recipient.actor.id,
     sender,
     'signing',
     params.message.signingKeyVersion
   );
-  const envelopeSigningPublicKey = findVersionedKey(
+  const envelopeSigningPublicKey = await findVersionedKey(
     params.recipient.conn,
+    params.recipient.actor.id,
     sender,
     'signing',
     envelope.signingKeyVersion

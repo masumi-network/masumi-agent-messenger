@@ -10,9 +10,13 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default {
-  agentDbId: __t.u64(),
-  otherAgentPublicIdentity: __t.string(),
-  membershipLocked: __t.option(__t.bool()),
-  title: __t.option(__t.string()),
+import {
+  PublicChannelPageRow,
+} from "./types";
+
+export const params = {
+  beforeLastMessageAtMicros: __t.option(__t.u64()),
+  beforeChannelId: __t.option(__t.u64()),
+  limit: __t.u64(),
 };
+export const returnType = __t.array(PublicChannelPageRow)

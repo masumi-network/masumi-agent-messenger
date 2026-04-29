@@ -9,11 +9,9 @@ import {
 import * as model from '../../model';
 
 const {
-  MAX_CHANNEL_RECENT_PUBLIC_MESSAGES,
   MAX_CHANNEL_MESSAGE_PAGE_SIZE,
-  MAX_VISIBLE_CHANNEL_MESSAGE_CHANNELS,
   ChannelMessageRow,
-  VisibleChannelMessageRow,
+  PublicRecentChannelMessageRow,
   requireNonEmpty,
   requireMaxLength,
   requireHexMaxLength,
@@ -22,71 +20,26 @@ const {
   buildChannelMessageSeqKey,
   getRequiredChannelById,
   resolveRequiredChannel,
-  getReadableInbox,
   getOwnedActor,
   getOwnedActorForRead,
   requireChannelSendPermission,
   requireChannelReadableByActor,
-  isChannelMemberReadable,
   upsertPublicChannelRow,
   toChannelMessageRow,
   insertPublicRecentChannelMessage,
   getChannelMessagesInSeqRange,
   buildChannelDiscoverableSortKey,
 } = model;
-export const visibleChannelMessages = spacetimedb.view(
+
+export const publicRecentChannelMessages = spacetimedb.anonymousView(
   { public: true },
-  t.array(VisibleChannelMessageRow),
-  ctx => {
-    const inbox = getReadableInbox(ctx);
-    if (!inbox) {
-      return [];
-    }
-
-    const readableChannels = Array.from(
-      ctx.db.channelMember.channel_member_inbox_id.filter(inbox.id)
-    )
-      .filter(isChannelMemberReadable)
-      .map(member => ctx.db.channel.id.find(member.channelId))
-      .filter((channel): channel is NonNullable<typeof channel> => Boolean(channel))
-      .sort((left, right) => {
-        if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch)
-          return -1;
-        if (left.lastMessageAt.microsSinceUnixEpoch < right.lastMessageAt.microsSinceUnixEpoch)
-          return 1;
-        if (left.id > right.id) return -1;
-        if (left.id < right.id) return 1;
-        return 0;
-      })
-      .slice(0, MAX_VISIBLE_CHANNEL_MESSAGE_CHANNELS);
-
-    return readableChannels
-      .flatMap(channel => {
-        const upperBound = channel.nextChannelSeq;
-        if (upperBound <= 1n) {
-          return [];
-        }
-        const lowerBound =
-          upperBound > BigInt(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)
-            ? upperBound - BigInt(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)
-            : 1n;
-
-        return getChannelMessagesInSeqRange(ctx, channel.id, lowerBound, upperBound)
-          .sort((left, right) => {
-            if (left.channelSeq > right.channelSeq) return -1;
-            if (left.channelSeq < right.channelSeq) return 1;
-            return Number(right.id - left.id);
-          })
-          .map(message => toChannelMessageRow(ctx, message));
-      })
-      .sort((left, right) => {
-        if (left.channelId < right.channelId) return -1;
-        if (left.channelId > right.channelId) return 1;
-        if (left.channelSeq < right.channelSeq) return -1;
-        if (left.channelSeq > right.channelSeq) return 1;
-        return Number(left.id - right.id);
-      });
-  }
+  t.array(PublicRecentChannelMessageRow),
+  ctx =>
+    ctx.from.publicRecentChannelMessage
+      .leftSemijoin(ctx.from.publicChannel, (message, channel) =>
+        message.channelId.eq(channel.channelId)
+      )
+      .build()
 );
 
 export const listChannelMessages = spacetimedb.procedure(
@@ -120,13 +73,15 @@ export const listChannelMessages = spacetimedb.procedure(
       const lowerBound =
         upperBound > BigInt(pageSize) ? upperBound - BigInt(pageSize) : 1n;
 
-      return getChannelMessagesInSeqRange(tx, channel.id, lowerBound, upperBound)
-        .sort((left, right) => {
-          if (left.channelSeq > right.channelSeq) return -1;
-          if (left.channelSeq < right.channelSeq) return 1;
-          return Number(right.id - left.id);
-        })
-        .map(message => toChannelMessageRow(tx, message));
+      const messages = getChannelMessagesInSeqRange(tx, channel.id, lowerBound, upperBound);
+      const rows: model.ChannelMessageRecordRow[] = [];
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message) {
+          rows.push(message);
+        }
+      }
+      return rows.map(message => toChannelMessageRow(tx, message));
     });
   }
 );

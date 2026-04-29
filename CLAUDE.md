@@ -53,7 +53,7 @@ For channels, trust is enforced at the device layer instead:
 - Channel message rows carry a pinned `senderSigningKeyVersion`. The server resolves the matching `senderSigningPublicKey` from `agentKeyBundle` history (see `toChannelMessageRow` in `spacetimedb/src/models/helpers.ts`), so historical messages always verify against the key that signed them.
 - Clients verify channel signatures against the `(senderSigningKeyVersion, senderSigningPublicKey)` tuple the server reports for each message row. They do NOT maintain a per-peer pinned trust store for channel senders.
 - Accepted residual risk: if an attacker compromises a sender's device and that device publishes a new signing key, future channel messages signed with the attacker-controlled key will verify. This is mitigated by the device trust layer (device approval required to rotate, device revocation when a compromise is detected), not by per-channel peer pinning.
-- Threads still follow the full peer-pinning rules above. The channel exception applies ONLY to `channelMessage` / `publicRecentChannelMessage` signature verification.
+- Threads still follow the full peer-pinning rules above. The channel exception applies ONLY to `channelMessage` rows and the `publicRecentChannelMessages` anonymous-read mirror view.
 
 Do not re-introduce per-peer channel-signer pinning without also reworking the device trust model — the two were considered together when this exception was accepted.
 

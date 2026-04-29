@@ -1,7 +1,7 @@
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Hash, Radio, SignIn } from '@phosphor-icons/react';
-import { useMemo, useState, type FormEvent } from 'react';
-import { useReducer } from 'spacetimedb/tanstack';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useReducer, useSpacetimeDB } from 'spacetimedb/tanstack';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -24,12 +24,13 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Textarea } from '@/components/ui/textarea';
 import { buildLoginHref, useAuthSession } from '@/lib/auth-session';
+import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { buildRouteHead } from '@/lib/seo';
-import { useLiveTable, usePublicLiveTable } from '@/lib/spacetime-live-table';
+import { useLiveTable } from '@/lib/spacetime-live-table';
 import { useWorkspaceShell } from '@/features/workspace/use-workspace-shell';
 import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell';
-import { reducers, tables } from '@/module_bindings';
-import type { Agent, PublicChannel } from '@/module_bindings/types';
+import { reducers, tables, type DbConnection } from '@/module_bindings';
+import type { Agent, PublicChannelPageRow } from '@/module_bindings/types';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 
@@ -69,7 +70,14 @@ function AuthenticatedChannelsPage() {
   );
 }
 
-function sortPublicChannels(channels: PublicChannel[]): PublicChannel[] {
+const PUBLIC_CHANNEL_PAGE_SIZE = 25;
+
+type PublicChannelCursor = {
+  beforeLastMessageAtMicros?: bigint;
+  beforeChannelId?: bigint;
+};
+
+function sortPublicChannels<T extends PublicChannelPageRow>(channels: T[]): T[] {
   return [...channels].sort((left, right) => {
     if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch) {
       return -1;
@@ -77,8 +85,123 @@ function sortPublicChannels(channels: PublicChannel[]): PublicChannel[] {
     if (left.lastMessageAt.microsSinceUnixEpoch < right.lastMessageAt.microsSinceUnixEpoch) {
       return 1;
     }
+    if (left.channelId > right.channelId) return -1;
+    if (left.channelId < right.channelId) return 1;
     return left.slug.localeCompare(right.slug);
   });
+}
+
+function readPublicChannelPageError(error: unknown): string {
+  return error instanceof Error && error.message
+    ? error.message
+    : 'Unable to load public channels';
+}
+
+function usePublicChannelPage() {
+  const connectionState = useSpacetimeDB();
+  const connection = connectionState.getConnection?.() as DbConnection | null;
+  const isActive = connectionState.isActive && connection !== null;
+  const [cursorStack, setCursorStack] = useState<PublicChannelCursor[]>([{}]);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageRows, setPageRows] = useState<PublicChannelPageRow[]>([]);
+  const [loadingPage, setLoadingPage] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const cursor = cursorStack[pageIndex] ?? {};
+  const cursorKey = `${cursor.beforeLastMessageAtMicros?.toString() ?? 'start'}:${
+    cursor.beforeChannelId?.toString() ?? 'start'
+  }`;
+
+  useEffect(() => {
+    return deferEffectStateUpdate(() => {
+      setCursorStack([{}]);
+      setPageIndex(0);
+    });
+  }, [connection]);
+
+  useEffect(() => {
+    if (!isActive || !connection) {
+      return deferEffectStateUpdate(() => {
+        setPageRows([]);
+        setLoadingPage(false);
+        setPageError(null);
+      });
+    }
+
+    let cancelled = false;
+    const cancelStart = deferEffectStateUpdate(() => {
+      if (cancelled) {
+        return;
+      }
+      setLoadingPage(true);
+      setPageError(null);
+
+      void connection.procedures
+        .listPublicChannels({
+          beforeLastMessageAtMicros: cursor.beforeLastMessageAtMicros,
+          beforeChannelId: cursor.beforeChannelId,
+          limit: BigInt(PUBLIC_CHANNEL_PAGE_SIZE),
+        })
+        .then(rows => {
+          if (cancelled) {
+            return;
+          }
+          setPageRows(rows);
+          setLoadingPage(false);
+        })
+        .catch(error => {
+          if (cancelled) {
+            return;
+          }
+          setPageRows([]);
+          setLoadingPage(false);
+          setPageError(readPublicChannelPageError(error));
+        });
+    });
+
+    return () => {
+      cancelled = true;
+      cancelStart();
+    };
+  }, [connection, cursor.beforeChannelId, cursor.beforeLastMessageAtMicros, cursorKey, isActive]);
+
+  const channels = useMemo(() => {
+    return sortPublicChannels(pageRows);
+  }, [pageRows]);
+
+  const goToNextPage = () => {
+    const sortedPageRows = sortPublicChannels(pageRows);
+    const lastChannel = sortedPageRows[sortedPageRows.length - 1];
+    if (!lastChannel) {
+      return;
+    }
+
+    const nextPageIndex = pageIndex + 1;
+    setCursorStack(existingCursors => {
+      const nextCursors = existingCursors.slice(0, nextPageIndex);
+      nextCursors[nextPageIndex] = {
+        beforeLastMessageAtMicros: lastChannel.lastMessageAt.microsSinceUnixEpoch,
+        beforeChannelId: lastChannel.channelId,
+      };
+      return nextCursors;
+    });
+    setPageIndex(nextPageIndex);
+  };
+
+  const goToPreviousPage = () => {
+    setPageIndex(current => Math.max(0, current - 1));
+  };
+
+  return {
+    channels,
+    ready: isActive && !loadingPage,
+    error: pageError,
+    pageIndex,
+    canPrevious: pageIndex > 0,
+    canNext: pageRows.length >= PUBLIC_CHANNEL_PAGE_SIZE,
+    paginationBusy: loadingPage,
+    goToPreviousPage,
+    goToNextPage,
+  };
 }
 
 function describePublicJoinPermission(permission: string | null | undefined): string {
@@ -87,11 +210,7 @@ function describePublicJoinPermission(permission: string | null | undefined): st
 }
 
 function PublicChannelsPageContent() {
-  const [channels, ready, error] = usePublicLiveTable<PublicChannel>(
-    tables.publicChannel,
-    'publicChannel'
-  );
-  const sortedChannels = useMemo(() => sortPublicChannels(channels), [channels]);
+  const publicChannelPage = usePublicChannelPage();
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 p-4 md:p-8">
@@ -115,10 +234,10 @@ function PublicChannelsPageContent() {
         </Button>
       </header>
 
-      {error ? (
+      {publicChannelPage.error ? (
         <Alert variant="destructive">
           <AlertTitle>Channel subscription failed</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>{publicChannelPage.error}</AlertDescription>
         </Alert>
       ) : null}
 
@@ -132,7 +251,16 @@ function PublicChannelsPageContent() {
         </AlertDescription>
       </Alert>
 
-      <PublicChannelList ready={ready} channels={sortedChannels} />
+      <PublicChannelList
+        ready={publicChannelPage.ready}
+        channels={publicChannelPage.channels}
+        pageIndex={publicChannelPage.pageIndex}
+        canPrevious={publicChannelPage.canPrevious}
+        canNext={publicChannelPage.canNext}
+        paginationBusy={publicChannelPage.paginationBusy}
+        onPreviousPage={publicChannelPage.goToPreviousPage}
+        onNextPage={publicChannelPage.goToNextPage}
+      />
     </main>
   );
 }
@@ -141,10 +269,7 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
   const auth = useAuthSession();
   const navigate = useNavigate();
   const createChannelReducer = useReducer(reducers.createChannel);
-  const [channels, ready, error] = usePublicLiveTable<PublicChannel>(
-    tables.publicChannel,
-    'publicChannel'
-  );
+  const publicChannelPage = usePublicChannelPage();
   const [actors, actorsReady, actorsError] = useLiveTable<Agent>(
     tables.visibleAgents,
     'visibleAgents'
@@ -158,7 +283,6 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
   const [draftDiscoverable, setDraftDiscoverable] = useState(true);
   const [creating, setCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const sortedChannels = useMemo(() => sortPublicChannels(channels), [channels]);
   const authenticatedSession = auth.status === 'authenticated' ? auth.session : null;
   const normalizedSessionEmail = useMemo(
     () => normalizeEmail(authenticatedSession?.user.email ?? ''),
@@ -252,10 +376,10 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
         ) : null}
       </header>
 
-      {error ? (
+      {publicChannelPage.error ? (
         <Alert variant="destructive">
           <AlertTitle>Channel subscription failed</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>{publicChannelPage.error}</AlertDescription>
         </Alert>
       ) : null}
 
@@ -406,7 +530,16 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
         </Alert>
       )}
 
-      <PublicChannelList ready={ready} channels={sortedChannels} />
+      <PublicChannelList
+        ready={publicChannelPage.ready}
+        channels={publicChannelPage.channels}
+        pageIndex={publicChannelPage.pageIndex}
+        canPrevious={publicChannelPage.canPrevious}
+        canNext={publicChannelPage.canNext}
+        paginationBusy={publicChannelPage.paginationBusy}
+        onPreviousPage={publicChannelPage.goToPreviousPage}
+        onNextPage={publicChannelPage.goToNextPage}
+      />
     </Container>
   );
 }
@@ -414,9 +547,21 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
 function PublicChannelList({
   ready,
   channels,
+  pageIndex,
+  canPrevious,
+  canNext,
+  paginationBusy,
+  onPreviousPage,
+  onNextPage,
 }: {
   ready: boolean;
-  channels: PublicChannel[];
+  channels: PublicChannelPageRow[];
+  pageIndex: number;
+  canPrevious: boolean;
+  canNext: boolean;
+  paginationBusy: boolean;
+  onPreviousPage: () => void;
+  onNextPage: () => void;
 }) {
   if (!ready) {
     return (
@@ -429,50 +574,116 @@ function PublicChannelList({
 
   if (channels.length === 0) {
     return (
-      <Alert>
-        <AlertTitle>No public channels yet</AlertTitle>
-        <AlertDescription>Public channels will appear here as soon as agents create them.</AlertDescription>
-      </Alert>
+      <div className="space-y-3">
+        <Alert>
+          <AlertTitle>{pageIndex > 0 ? 'No more public channels' : 'No public channels yet'}</AlertTitle>
+          <AlertDescription>
+            {pageIndex > 0
+              ? 'This page is empty. Go back to the previous page to continue browsing.'
+              : 'Public channels will appear here as soon as agents create them.'}
+          </AlertDescription>
+        </Alert>
+        <PublicChannelPaginationControls
+          pageIndex={pageIndex}
+          canPrevious={canPrevious}
+          canNext={canNext}
+          paginationBusy={paginationBusy}
+          onPreviousPage={onPreviousPage}
+          onNextPage={onNextPage}
+        />
+      </div>
     );
   }
 
   return (
-    <section className="grid gap-3 md:grid-cols-2">
-      {channels.map(channel => (
-        <Card key={channel.channelId.toString()}>
-          <CardHeader className="space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0 space-y-1">
-                <CardTitle className="flex min-w-0 items-center gap-2">
-                  <Hash className="shrink-0" size={18} />
-                  <span className="truncate">{channel.title ?? channel.slug}</span>
-                </CardTitle>
-                <CardDescription className="truncate">/{channel.slug}</CardDescription>
+    <section className="space-y-3">
+      <div className="grid gap-3 md:grid-cols-2">
+        {channels.map(channel => (
+          <Card key={channel.channelId.toString()}>
+            <CardHeader className="space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <CardTitle className="flex min-w-0 items-center gap-2">
+                    <Hash className="shrink-0" size={18} />
+                    <span className="truncate">{channel.title ?? channel.slug}</span>
+                  </CardTitle>
+                  <CardDescription className="truncate">/{channel.slug}</CardDescription>
+                </div>
+                <Badge variant={channel.discoverable ? 'default' : 'secondary'}>
+                  {channel.discoverable ? 'Discoverable' : 'Public'}
+                </Badge>
               </div>
-              <Badge variant={channel.discoverable ? 'default' : 'secondary'}>
-                {channel.discoverable ? 'Discoverable' : 'Public'}
+              <Badge variant="outline" className="w-fit">
+                {describePublicJoinPermission(channel.publicJoinPermission)}
               </Badge>
-            </div>
-            <Badge variant="outline" className="w-fit">
-              {describePublicJoinPermission(channel.publicJoinPermission)}
-            </Badge>
-            {channel.description ? (
-              <p className="line-clamp-2 text-sm text-muted-foreground">{channel.description}</p>
-            ) : null}
-          </CardHeader>
-          <CardContent className="flex items-center justify-between gap-3">
-            <span className="text-sm text-muted-foreground">
-              {channel.lastMessageSeq.toString()} message
-              {channel.lastMessageSeq === 1n ? '' : 's'}
-            </span>
-            <Button asChild size="sm">
-              <Link to="/channels/$slug" params={{ slug: channel.slug }}>
-                Open
-              </Link>
-            </Button>
-          </CardContent>
-        </Card>
-      ))}
+              {channel.description ? (
+                <p className="line-clamp-2 text-sm text-muted-foreground">{channel.description}</p>
+              ) : null}
+            </CardHeader>
+            <CardContent className="flex items-center justify-between gap-3">
+              <span className="text-sm text-muted-foreground">
+                {channel.lastMessageSeq.toString()} message
+                {channel.lastMessageSeq === 1n ? '' : 's'}
+              </span>
+              <Button asChild size="sm">
+                <Link to="/channels/$slug" params={{ slug: channel.slug }}>
+                  Open
+                </Link>
+              </Button>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      <PublicChannelPaginationControls
+        pageIndex={pageIndex}
+        canPrevious={canPrevious}
+        canNext={canNext}
+        paginationBusy={paginationBusy}
+        onPreviousPage={onPreviousPage}
+        onNextPage={onNextPage}
+      />
     </section>
+  );
+}
+
+function PublicChannelPaginationControls({
+  pageIndex,
+  canPrevious,
+  canNext,
+  paginationBusy,
+  onPreviousPage,
+  onNextPage,
+}: {
+  pageIndex: number;
+  canPrevious: boolean;
+  canNext: boolean;
+  paginationBusy: boolean;
+  onPreviousPage: () => void;
+  onNextPage: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border bg-background p-3 sm:flex-row sm:items-center sm:justify-between">
+      <span className="text-sm text-muted-foreground">Page {pageIndex + 1}</span>
+      <div className="flex gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!canPrevious || paginationBusy}
+          onClick={onPreviousPage}
+        >
+          Previous
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!canNext || paginationBusy}
+          onClick={onNextPage}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
   );
 }

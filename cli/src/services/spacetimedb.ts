@@ -1,7 +1,6 @@
 import { tables, type DbConnection, type SubscriptionHandle } from '../../../webapp/src/module_bindings';
 import type {
   VisibleAgentRow,
-  VisibleAgentKeyBundleRow,
   VisibleThreadParticipantRow,
   VisibleThreadReadStateRow,
   VisibleThreadRow,
@@ -15,7 +14,6 @@ import type {
   VisibleInboxRow,
   VisibleMessageRow,
   VisibleChannelJoinRequestRow,
-  VisibleChannelMessageRow,
   VisibleChannelMembershipRow,
   VisibleChannelRow,
 } from '../../../webapp/src/module_bindings/types';
@@ -30,7 +28,6 @@ type ConnectionResult = {
 export type ShellRows = {
   inboxes: VisibleInboxRow[];
   actors: VisibleAgentRow[];
-  bundles: VisibleAgentKeyBundleRow[];
   participants: VisibleThreadParticipantRow[];
   readStates: VisibleThreadReadStateRow[];
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
@@ -43,7 +40,6 @@ export type ShellRows = {
   deviceBundles: VisibleDeviceKeyBundleRow[];
   messages: VisibleMessageRow[];
   channels: VisibleChannelRow[];
-  channelMessages: VisibleChannelMessageRow[];
   channelMemberships: VisibleChannelMembershipRow[];
   channelJoinRequests: VisibleChannelJoinRequestRow[];
 };
@@ -61,7 +57,6 @@ type TableLike<Row> = {
 const SHELL_VISIBLE_QUERIES = [
   tables.visibleInboxes,
   tables.visibleAgents,
-  tables.visibleAgentKeyBundles,
   tables.visibleThreadParticipants,
   tables.visibleThreadReadStates,
   tables.visibleThreadSecretEnvelopes,
@@ -74,7 +69,6 @@ const SHELL_VISIBLE_QUERIES = [
   tables.visibleDeviceKeyBundles,
   tables.visibleMessages,
   tables.visibleChannels,
-  tables.visibleChannelMessages,
   tables.visibleChannelMemberships,
   tables.visibleChannelJoinRequests,
 ] as const;
@@ -82,7 +76,6 @@ const SHELL_VISIBLE_QUERIES = [
 const SHELL_TABLE_ACCESSORS = [
   'visibleInboxes',
   'visibleAgents',
-  'visibleAgentKeyBundles',
   'visibleThreadParticipants',
   'visibleThreadReadStates',
   'visibleThreadSecretEnvelopes',
@@ -95,7 +88,6 @@ const SHELL_TABLE_ACCESSORS = [
   'visibleDeviceKeyBundles',
   'visibleMessages',
   'visibleChannels',
-  'visibleChannelMessages',
   'visibleChannelMemberships',
   'visibleChannelJoinRequests',
 ] as const satisfies ReadonlyArray<keyof DbConnection['db']>;
@@ -348,7 +340,6 @@ export async function subscribeMessageTables(conn: DbConnection): Promise<Subscr
       })
       .subscribe([
         tables.visibleAgents,
-        tables.visibleAgentKeyBundles,
         tables.visibleThreadParticipants,
         tables.visibleThreadReadStates,
         tables.visibleThreadSecretEnvelopes,
@@ -462,7 +453,6 @@ export function readInboxRows(conn: DbConnection): {
 
 export function readMessageRows(conn: DbConnection): {
   actors: VisibleAgentRow[];
-  bundles: VisibleAgentKeyBundleRow[];
   participants: VisibleThreadParticipantRow[];
   readStates: VisibleThreadReadStateRow[];
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
@@ -473,7 +463,6 @@ export function readMessageRows(conn: DbConnection): {
 } {
   return {
     actors: Array.from(conn.db.visibleAgents.iter()) as VisibleAgentRow[],
-    bundles: Array.from(conn.db.visibleAgentKeyBundles.iter()) as VisibleAgentKeyBundleRow[],
     participants: Array.from(
       conn.db.visibleThreadParticipants.iter()
     ) as VisibleThreadParticipantRow[],
@@ -545,7 +534,6 @@ export function readShellRows(conn: DbConnection): ShellRows {
   return {
     inboxes: inbox.inboxes,
     actors: inbox.actors,
-    bundles: message.bundles,
     participants: message.participants,
     readStates: message.readStates,
     secretEnvelopes: message.secretEnvelopes,
@@ -558,9 +546,6 @@ export function readShellRows(conn: DbConnection): ShellRows {
     deviceBundles: device.bundles,
     messages: message.messages,
     channels: Array.from(conn.db.visibleChannels.iter()) as VisibleChannelRow[],
-    channelMessages: Array.from(
-      conn.db.visibleChannelMessages.iter()
-    ) as VisibleChannelMessageRow[],
     channelMemberships: Array.from(
       conn.db.visibleChannelMemberships.iter()
     ) as VisibleChannelMembershipRow[],

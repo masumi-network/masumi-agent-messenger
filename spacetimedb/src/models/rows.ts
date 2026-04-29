@@ -84,6 +84,23 @@ export const VisibleAgentKeyBundleRow = t.object('VisibleAgentKeyBundleRow', {
   createdAt: t.timestamp(),
 });
 
+export const AgentPublicKeyLookupRequest = t.object('AgentPublicKeyLookupRequest', {
+  agentDbId: t.u64(),
+  keyKind: t.string(),
+  keyVersion: t.string(),
+});
+
+export const AgentPublicKeyLookupRow = t.object('AgentPublicKeyLookupRow', {
+  agentDbId: t.u64(),
+  publicIdentity: t.string(),
+  keyKind: t.string(),
+  keyVersion: t.string(),
+  publicKey: t.string(),
+  algorithm: t.string(),
+  keyBundleId: t.u64().optional(),
+  createdAt: t.timestamp(),
+});
+
 export const VisibleDeviceRow = t.object('VisibleDeviceRow', {
   id: t.u64(),
   deviceId: t.string(),
@@ -215,21 +232,6 @@ export const ChannelMessageRow = t.object('ChannelMessageRow', {
   createdAt: t.timestamp(),
 });
 
-export const VisibleChannelMessageRow = t.object('VisibleChannelMessageRow', {
-  id: t.u64(),
-  channelId: t.u64(),
-  channelSeq: t.u64(),
-  senderAgentDbId: t.u64(),
-  senderPublicIdentity: t.string(),
-  senderSeq: t.u64(),
-  senderSigningPublicKey: t.string(),
-  senderSigningKeyVersion: t.string(),
-  plaintext: t.string(),
-  signature: t.string(),
-  replyToMessageId: t.u64().optional(),
-  createdAt: t.timestamp(),
-});
-
 export const VisibleChannelRow = t.object('VisibleChannelRow', {
   id: t.u64(),
   slug: t.string(),
@@ -243,6 +245,53 @@ export const VisibleChannelRow = t.object('VisibleChannelRow', {
   createdAt: t.timestamp(),
   updatedAt: t.timestamp(),
   lastMessageAt: t.timestamp(),
+});
+
+export const PublicChannelMirrorRow = t.object('PublicChannelMirrorRow', {
+  id: t.u64(),
+  channelId: t.u64(),
+  slug: t.string(),
+  title: t.string().optional(),
+  description: t.string().optional(),
+  accessMode: t.string(),
+  discoverable: t.bool(),
+  lastMessageSeq: t.u64(),
+  createdAt: t.timestamp(),
+  updatedAt: t.timestamp(),
+  lastMessageAt: t.timestamp(),
+  publicJoinPermission: t.string(),
+  sortKey: t.string(),
+});
+
+export const PublicChannelPageRow = t.object('PublicChannelPageRow', {
+  id: t.u64(),
+  channelId: t.u64(),
+  slug: t.string(),
+  title: t.string().optional(),
+  description: t.string().optional(),
+  accessMode: t.string(),
+  discoverable: t.bool(),
+  lastMessageSeq: t.u64(),
+  createdAt: t.timestamp(),
+  updatedAt: t.timestamp(),
+  lastMessageAt: t.timestamp(),
+  publicJoinPermission: t.string(),
+});
+
+export const PublicRecentChannelMessageRow = t.object('PublicRecentChannelMessageRow', {
+  id: t.u64(),
+  channelId: t.u64(),
+  channelSeq: t.u64(),
+  channelSeqKey: t.string(),
+  senderAgentDbId: t.u64(),
+  senderPublicIdentity: t.string(),
+  senderSeq: t.u64(),
+  senderSigningKeyVersion: t.string(),
+  plaintext: t.string(),
+  signature: t.string(),
+  replyToMessageId: t.u64().optional(),
+  createdAt: t.timestamp(),
+  senderSigningPublicKey: t.string(),
 });
 
 export const VisibleChannelMembershipRow = t.object('VisibleChannelMembershipRow', {
@@ -350,7 +399,6 @@ export const VisibleContactAllowlistEntryRow = t.object('VisibleContactAllowlist
 
 export const VisibleMessageSnapshot = t.object('VisibleMessageSnapshot', {
   actors: t.array(VisibleAgentRow),
-  bundles: t.array(VisibleAgentKeyBundleRow),
   participants: t.array(VisibleThreadParticipantRow),
   readStates: t.array(VisibleThreadReadStateRow),
   secretEnvelopes: t.array(VisibleThreadSecretEnvelopeRow),
@@ -368,7 +416,6 @@ export const VisibleThreadMessagePage = t.object('VisibleThreadMessagePage', {
 
 export const VisibleThreadPage = t.object('VisibleThreadPage', {
   actors: t.array(VisibleAgentRow),
-  bundles: t.array(VisibleAgentKeyBundleRow),
   participants: t.array(VisibleThreadParticipantRow),
   readStates: t.array(VisibleThreadReadStateRow),
   threads: t.array(VisibleThreadRow),

@@ -1,31 +1,20 @@
 import { t, SenderError } from 'spacetimedb/server';
 
 import spacetimedb from '../../schema';
-import { MAX_MESSAGE_VERSION_CHARS } from '../../../../shared/message-limits';
 
 import * as model from '../../model';
 
 const {
-  SecretEnvelopeAttachment,
   VisibleThreadSecretEnvelopeRow,
-  requireNonEmpty,
-  requireMaxLength,
   dedupeRowsById,
   getReadableInbox,
   getOwnActorIdsForInbox,
-  getOwnedActor,
   getOwnedActorForRead,
-  requirePendingDirectContactResolvedForThreadMutation,
   getLatestVisibleThreadsForInbox,
   getLatestThreadMessages,
   buildSenderSecretVisibilityKey,
   canAnyAgentReadMessage,
-  getActiveThreadParticipants,
-  requireActiveThreadParticipant,
   requireVisibleThreadParticipant,
-  senderHasMessageForMembershipSecretVersion,
-  validateBackfillSecretEnvelopes,
-  insertAttachedSecretEnvelopes,
 } = model;
 
 function toVisibleThreadSecretEnvelopeRow(
@@ -168,69 +157,6 @@ export const listThreadSecretEnvelopes = spacetimedb.procedure(
           );
 
       return listReadableThreadSecretEnvelopes(tx, ownActorIds, keys);
-    });
-  }
-);
-
-export const backfillThreadSecretEnvelopes = spacetimedb.reducer(
-  {
-    agentDbId: t.u64(),
-    threadId: t.u64(),
-    membershipVersion: t.u64(),
-    secretVersion: t.string(),
-    attachedSecretEnvelopes: t.array(SecretEnvelopeAttachment),
-  },
-  (
-    ctx,
-    {
-      agentDbId,
-      threadId,
-      membershipVersion,
-      secretVersion,
-      attachedSecretEnvelopes,
-    }
-  ) => {
-    const senderActor = getOwnedActor(ctx, agentDbId);
-    const thread = ctx.db.thread.id.find(threadId);
-    if (!thread) throw new SenderError('Thread not found');
-    if (membershipVersion === 0n || membershipVersion >= thread.membershipVersion) {
-      throw new SenderError('Backfill membershipVersion must reference a prior thread membership');
-    }
-
-    requireActiveThreadParticipant(ctx, threadId, senderActor.id);
-    requirePendingDirectContactResolvedForThreadMutation(ctx, threadId);
-
-    const normalizedSecretVersion = requireNonEmpty(secretVersion, 'secretVersion');
-    requireMaxLength(normalizedSecretVersion, MAX_MESSAGE_VERSION_CHARS, 'secretVersion');
-    if (
-      !senderHasMessageForMembershipSecretVersion(
-        ctx,
-        threadId,
-        membershipVersion,
-        senderActor.id,
-        normalizedSecretVersion
-      )
-    ) {
-      throw new SenderError('No historical message exists for this sender secretVersion');
-    }
-
-    validateBackfillSecretEnvelopes({
-      ctx,
-      threadId,
-      membershipVersion,
-      senderAgent: senderActor,
-      secretVersion: normalizedSecretVersion,
-      activeParticipants: getActiveThreadParticipants(ctx, threadId),
-      attachedSecretEnvelopes,
-    });
-
-    insertAttachedSecretEnvelopes({
-      ctx,
-      threadId,
-      membershipVersion,
-      senderAgent: senderActor,
-      secretVersion: normalizedSecretVersion,
-      attachedSecretEnvelopes,
     });
   }
 );

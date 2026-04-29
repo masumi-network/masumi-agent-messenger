@@ -92,14 +92,6 @@ function normalizeThreadMessagePageSize(limit: bigint) {
     : Number(limit);
 }
 
-function compareMessageDesc(left: model.MessageRow, right: model.MessageRow) {
-  if (left.threadSeq > right.threadSeq) return -1;
-  if (left.threadSeq < right.threadSeq) return 1;
-  if (left.id > right.id) return -1;
-  if (left.id < right.id) return 1;
-  return 0;
-}
-
 function getThreadMessageUpperBound(
   thread: model.ThreadRow,
   beforeThreadSeq: bigint | undefined
@@ -129,9 +121,13 @@ function readVisibleMessageRowsForThread(params: {
       thread.id,
       lowerBound,
       scanUpperBound
-    ).sort(compareMessageDesc);
+    );
 
-    for (const message of candidates) {
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+      const message = candidates[index];
+      if (!message) {
+        continue;
+      }
       if (canReadMessage(message)) {
         rows.push(message);
         if (rows.length >= limit) {
@@ -222,7 +218,6 @@ export const visibleMessages = spacetimedb.view(
 function emptyVisibleMessageSnapshot() {
   return {
     actors: [],
-    bundles: [],
     participants: [],
     readStates: [],
     secretEnvelopes: [],
@@ -260,23 +255,6 @@ export const readVisibleMessageSnapshot = spacetimedb.procedure(
         .map(agentDbId => tx.db.agent.id.find(agentDbId))
         .filter((actor): actor is NonNullable<typeof actor> => Boolean(actor))
         .map(actor => toSanitizedVisibleAgentRow(tx, inbox.id, actor));
-
-      const bundles = Array.from(visibleAgentIds).flatMap(agentDbId =>
-        Array.from(tx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(agentDbId)).map(
-          bundle => ({
-            id: bundle.id,
-            agentDbId: bundle.agentDbId,
-            publicIdentity: bundle.publicIdentity,
-            encryptionPublicKey: bundle.encryptionPublicKey,
-            encryptionKeyVersion: bundle.encryptionKeyVersion,
-            encryptionAlgorithm: bundle.encryptionAlgorithm,
-            signingPublicKey: bundle.signingPublicKey,
-            signingKeyVersion: bundle.signingKeyVersion,
-            signingAlgorithm: bundle.signingAlgorithm,
-            createdAt: bundle.createdAt,
-          })
-        )
-      );
 
       const participants = participantRows.map(participant => ({
         id: participant.id,
@@ -370,7 +348,6 @@ export const readVisibleMessageSnapshot = spacetimedb.procedure(
 
       return {
         actors,
-        bundles,
         participants,
         readStates,
         secretEnvelopes,

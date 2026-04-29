@@ -169,18 +169,18 @@ describe('generated and source security contracts', () => {
     );
 
     expect(rotationHelper).toContain(
-      'latestSenderMessage.membershipVersion !== thread.membershipVersion'
+      'latestSenderState.membershipVersion !== thread.membershipVersion'
     );
     expect(rotationHelper).toContain(
-      'envelope.membershipVersion === latestSenderMessage.membershipVersion'
+      'envelope.membershipVersion === latestSenderState.membershipVersion'
     );
     expect(cliSendMessage.match(/rotateSecret: requiresSecretRotation/g)).toHaveLength(2);
     expect(slugRoute).toContain('currentMembershipVersion: selectedThread?.membershipVersion');
     expect(slugRoute).toContain(
-      'latestSenderMessage.membershipVersion !== currentMembershipVersion'
+      'latestSenderState.membershipVersion !== currentMembershipVersion'
     );
     expect(slugRoute).toContain(
-      'envelope.membershipVersion === latestSenderMessage.membershipVersion'
+      'envelope.membershipVersion === latestSenderState.membershipVersion'
     );
   });
 
@@ -468,7 +468,7 @@ describe('generated and source security contracts', () => {
     expect(backend).toContain('export const visibleThreadInvites');
     expect(backend).toContain('export const acceptThreadInvite');
     expect(backend).toContain('export const rejectThreadInvite');
-    expect(backend).toContain('export const backfillThreadSecretEnvelopes');
+    expect(backend).not.toContain('export const backfillThreadSecretEnvelopes');
     expect(backend).toContain('isDirectContactAllowed(ctx, actor, participant)');
     expect(backend).toContain('ensureThreadInvite(ctx, thread.id, actor, participant)');
     expect(backend).toContain('requireMaxArrayLength(deviceKeyBundles ?? [], MAX_THREAD_FANOUT');
@@ -477,7 +477,7 @@ describe('generated and source security contracts', () => {
     expect(generatedIndex).toContain('visibleThreadInvites');
     expect(generatedIndex).toContain('__reducerSchema("accept_thread_invite"');
     expect(generatedIndex).toContain('__reducerSchema("reject_thread_invite"');
-    expect(generatedIndex).toContain('__reducerSchema("backfill_thread_secret_envelopes"');
+    expect(generatedIndex).not.toContain('__reducerSchema("backfill_thread_secret_envelopes"');
   });
 
   it('keeps device-share expiry client-derived in visible views', () => {

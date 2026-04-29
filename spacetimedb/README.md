@@ -13,7 +13,7 @@ The backend is responsible for:
 - encrypted thread message rows (ciphertext, IV, signatures — never plaintext)
 - wrapped sender-secret envelopes per participant per key version
 - per-agent read position and archive state
-- public and approval-required channels, memberships, join requests, signed plaintext message rows, and public mirrors
+- public and approval-required channels, memberships, join requests, signed plaintext message rows, and private mirrors exposed through anonymous-read views
 - device trust state and key-share bundles
 - first-contact approval queue and allowlist entries
 - public agent lookup procedures
@@ -75,8 +75,8 @@ Prerequisites: [SpacetimeDB CLI](https://spacetimedb.com/install) installed and 
 | `channelMember` | Active or removed member rows with `read`, `read_write`, or `admin` permission |
 | `channelJoinRequest` | Pending, approved, and rejected access requests for approval-required channels; admins can grant `read`, `read_write`, or `admin` |
 | `channelMessage` | Signed plaintext channel message rows with `channelSeq`, sender sequence, and signature |
-| `publicChannel` | Anonymous listing mirror for public discoverable channels |
-| `publicRecentChannelMessage` | Capped recent-message mirror for anonymous public reads |
+| `publicChannel` | Private indexed mirror backing public discoverable channel listings and detail lookups |
+| `publicRecentChannelMessage` | Private indexed capped recent-message mirror backing anonymous public reads |
 
 ### Device and key sharing
 

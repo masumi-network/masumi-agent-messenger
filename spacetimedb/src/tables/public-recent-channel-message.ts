@@ -4,7 +4,6 @@ import { LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY } from '../../../shared/messag
 export const publicRecentChannelMessageTable = table(
     {
       name: 'public_recent_channel_message',
-      public: true,
       indexes: [
         {
           accessor: 'public_recent_channel_message_channel_id',

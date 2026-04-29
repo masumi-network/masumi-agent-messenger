@@ -111,7 +111,6 @@ describe('buildInboxLookupEntries', () => {
             updatedAt: timestamp(1n),
           }),
         ],
-        bundles: [],
         participants: [
           {
             id: 1n,
@@ -396,7 +395,6 @@ readStates: [
             updatedAt: timestamp(1n),
           }),
         ],
-        bundles: [],
         participants: [
           {
             id: 1n,

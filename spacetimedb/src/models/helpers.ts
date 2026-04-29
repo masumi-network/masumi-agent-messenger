@@ -75,6 +75,7 @@ import type {
   ModuleCtx,
   InboxRow,
   ActorRow,
+  AgentKeyBundleRow,
   DeviceKeyBundleRow,
   InboxAuthLeaseRow,
   RateLimitRow,
@@ -86,6 +87,7 @@ import type {
   ChannelRow,
   ChannelMemberRow,
   ChannelMessageRecordRow,
+  PublicChannelTableRow,
   ThreadInviteRow,
   ReadDbCtx,
   ReadAuthCtx,
@@ -955,6 +957,36 @@ export function buildAgentKeyBundleKey(
   return `${agentDbId.toString()}:${encryptionKeyVersion}:${signingKeyVersion}`;
 }
 
+export function buildAgentKeyBundleSortKey(
+  bundle: Pick<AgentKeyBundleRow, 'id' | 'createdAt'>
+): string {
+  return [
+    formatInvertedU64SortPart(bundle.createdAt.microsSinceUnixEpoch),
+    formatInvertedU64SortPart(bundle.id),
+  ].join(':');
+}
+
+export function buildPublicChannelSortKey(
+  channel: Pick<PublicChannelTableRow, 'channelId' | 'lastMessageAt'>
+): string {
+  return [
+    formatInvertedU64SortPart(channel.lastMessageAt.microsSinceUnixEpoch),
+    formatInvertedU64SortPart(channel.channelId),
+  ].join(':');
+}
+
+export function buildPublicChannelSortKeyFromCursor(
+  beforeLastMessageAtMicros: bigint,
+  beforeChannelId: bigint | undefined
+): string {
+  return [
+    formatInvertedU64SortPart(beforeLastMessageAtMicros),
+    beforeChannelId === undefined
+      ? '9'.repeat(U64_SORT_DIGITS)
+      : formatInvertedU64SortPart(beforeChannelId),
+  ].join(':');
+}
+
 export function buildContactAllowlistEntryKey(
   inboxId: bigint,
   kind: string,
@@ -1460,7 +1492,7 @@ export function buildInboxThreadSortKey(thread: Pick<ThreadRow, 'id' | 'lastMess
 }
 
 function findInboxThreadProjection(ctx: ReadDbCtx, uniqueKey: string) {
-  return Array.from(ctx.db.inboxThread.iter()).find(row => row.uniqueKey === uniqueKey);
+  return Array.from(ctx.db.inboxThread.inbox_thread_unique_key.filter(uniqueKey))[0] ?? null;
 }
 
 export function findInboxThreadBackfillState(ctx: ReadDbCtx, inboxId: bigint) {
@@ -1541,7 +1573,7 @@ export function refreshInboxThreadProjectionsForThread(ctx: ModuleCtx, thread: T
 }
 
 export function deleteInboxThreadProjectionsForThread(ctx: ModuleCtx, threadId: bigint) {
-  for (const row of Array.from(ctx.db.inboxThread.iter()).filter(row => row.threadId === threadId)) {
+  for (const row of ctx.db.inboxThread.inbox_thread_thread_id.filter(threadId)) {
     ctx.db.inboxThread.id.delete(row.id);
   }
 }
@@ -1556,17 +1588,16 @@ export function ensureInboxThreadProjectionsForInbox(ctx: ModuleCtx, inboxId: bi
   let scanned = 0;
   let lastParticipantId = existingState?.nextParticipantId ?? 0n;
 
-  const participants = Array.from(
-    ctx.db.threadParticipant.thread_participant_inbox_id.filter(inboxId)
-  )
-    .filter(participant => participant.id > lowerBound)
-    .sort((left, right) => {
-      if (left.id < right.id) return -1;
-      if (left.id > right.id) return 1;
-      return 0;
-    });
+  const participantPrefixRange = [inboxId] as unknown as Parameters<
+    typeof ctx.db.threadParticipant.thread_participant_inbox_id_id.filter
+  >[0];
+  const participants =
+    ctx.db.threadParticipant.thread_participant_inbox_id_id.filter(participantPrefixRange);
 
   for (const participant of participants) {
+    if (participant.id <= lowerBound) {
+      continue;
+    }
     scanned += 1;
     lastParticipantId = participant.id;
     const thread = ctx.db.thread.id.find(participant.threadId);
@@ -1607,19 +1638,21 @@ export function getVisibleInboxThreadPageRows(
   includeThread?: (row: InboxThreadRow, thread: ThreadRow) => boolean
 ): InboxThreadRow[] {
   const rows: InboxThreadRow[] = [];
+  const inboxThreadPrefixRange = [inboxId] as unknown as Parameters<
+    typeof ctx.db.inboxThread.inbox_thread_inbox_id_sort_key.filter
+  >[0];
 
-  const pageRows = Array.from(ctx.db.inboxThread.iter())
-    .filter(row => row.inboxId === inboxId)
-    .filter(row => afterSortKey === undefined || row.sortKey > afterSortKey)
-    .sort((left, right) => {
-      if (left.sortKey < right.sortKey) return -1;
-      if (left.sortKey > right.sortKey) return 1;
-      if (left.id < right.id) return -1;
-      if (left.id > right.id) return 1;
-      return 0;
-    });
+  // The SDK type accepts a scalar prefix here, but the JS runtime expects
+  // multi-column index prefixes to be array-wrapped. It also mis-serializes
+  // final-column Range values on full composite tuples, so cursor filtering
+  // happens after the indexed prefix scan while preserving index order.
+  const pageRows =
+    ctx.db.inboxThread.inbox_thread_inbox_id_sort_key.filter(inboxThreadPrefixRange);
 
   for (const row of pageRows) {
+    if (afterSortKey !== undefined && row.sortKey <= afterSortKey) {
+      continue;
+    }
     if (!isThreadVisibleInNormalViews(ctx, row.threadId)) {
       continue;
     }
@@ -2602,21 +2635,16 @@ export function getThreadMessagesInSeqRange(
     return [];
   }
 
-  return Array.from(
-    ctx.db.message.message_thread_id.filter(threadId)
-  )
-    .filter(
-      message =>
-        message.threadSeq >= lowerBoundInclusive &&
-        message.threadSeq < upperBoundExclusive
-    )
-    .sort((left, right) => {
-      if (left.threadSeq < right.threadSeq) return -1;
-      if (left.threadSeq > right.threadSeq) return 1;
-      if (left.id < right.id) return -1;
-      if (left.id > right.id) return 1;
-      return 0;
-    });
+  const rows: MessageRow[] = [];
+  for (let threadSeq = lowerBoundInclusive; threadSeq < upperBoundExclusive; threadSeq += 1n) {
+    const message = ctx.db.message.threadSeqKey.find(
+      buildMessageThreadSeqKey(threadId, threadSeq)
+    );
+    if (message) {
+      rows.push(message);
+    }
+  }
+  return rows;
 }
 
 export function getLatestThreadMessages(
@@ -2644,21 +2672,16 @@ export function getChannelMessagesInSeqRange(
     return [];
   }
 
-  return Array.from(
-    ctx.db.channelMessage.channel_message_channel_id.filter(channelId)
-  )
-    .filter(
-      message =>
-        message.channelSeq >= lowerBoundInclusive &&
-        message.channelSeq < upperBoundExclusive
-    )
-    .sort((left, right) => {
-      if (left.channelSeq < right.channelSeq) return -1;
-      if (left.channelSeq > right.channelSeq) return 1;
-      if (left.id < right.id) return -1;
-      if (left.id > right.id) return 1;
-      return 0;
-    });
+  const rows: ChannelMessageRecordRow[] = [];
+  for (let channelSeq = lowerBoundInclusive; channelSeq < upperBoundExclusive; channelSeq += 1n) {
+    const message = ctx.db.channelMessage.channelSeqKey.find(
+      buildChannelMessageSeqKey(channelId, channelSeq)
+    );
+    if (message) {
+      rows.push(message);
+    }
+  }
+  return rows;
 }
 
 export function getChannelMemberPageById(
@@ -2668,16 +2691,16 @@ export function getChannelMemberPageById(
   limit: number
 ) {
   const rows: ChannelMemberRow[] = [];
-  const members = Array.from(ctx.db.channelMember.iter())
-    .filter(member => member.channelId === channelId)
-    .filter(member => member.id > afterMemberId)
-    .sort((left, right) => {
-      if (left.id < right.id) return -1;
-      if (left.id > right.id) return 1;
-      return 0;
-    });
+  const channelMemberPrefixRange = [channelId] as unknown as Parameters<
+    typeof ctx.db.channelMember.channel_member_channel_id_id.filter
+  >[0];
+  const members =
+    ctx.db.channelMember.channel_member_channel_id_id.filter(channelMemberPrefixRange);
 
   for (const member of members) {
+    if (member.id <= afterMemberId) {
+      continue;
+    }
     rows.push(member);
     if (rows.length >= limit) {
       break;
@@ -3168,18 +3191,6 @@ export function deletePublicRecentChannelMessageRows(ctx: ModuleCtx, channelId: 
   }
 }
 
-// autoInc on this table is unreliable (issues already-used ids), so callers
-// derive the next id from max(id) + 1.
-export function nextPublicRecentChannelMessageId(ctx: ReadDbCtx): bigint {
-  let nextId = 1n;
-  for (const row of ctx.db.publicRecentChannelMessage.iter()) {
-    if (row.id >= nextId) {
-      nextId = row.id + 1n;
-    }
-  }
-  return nextId;
-}
-
 export function deletePublicChannelMirrorRows(ctx: ModuleCtx, channelId: bigint) {
   deletePublicChannelRow(ctx, channelId);
   deletePublicRecentChannelMessageRows(ctx, channelId);
@@ -3198,8 +3209,11 @@ export function deleteChannelAndDependents(ctx: ModuleCtx, channelId: bigint) {
   )) {
     ctx.db.channelJoinRequest.id.delete(request.id);
   }
+  const channelMemberPrefixRange = [channelId] as unknown as Parameters<
+    typeof ctx.db.channelMember.channel_member_channel_id_id.filter
+  >[0];
   for (const member of Array.from(
-    ctx.db.channelMember.channel_member_channel_id_id.filter(channelId)
+    ctx.db.channelMember.channel_member_channel_id_id.filter(channelMemberPrefixRange)
   )) {
     ctx.db.channelMember.id.delete(member.id);
   }
@@ -3230,6 +3244,10 @@ export function upsertPublicChannelRow(ctx: ModuleCtx, channel: ChannelRow) {
     createdAt: channel.createdAt,
     updatedAt: channel.updatedAt,
     lastMessageAt: channel.lastMessageAt,
+    sortKey: buildPublicChannelSortKey({
+      channelId: channel.id,
+      lastMessageAt: channel.lastMessageAt,
+    }),
   };
 
   if (existing) {
@@ -3244,6 +3262,18 @@ export function upsertPublicChannelRow(ctx: ModuleCtx, channel: ChannelRow) {
     id: 0n,
     ...row,
   });
+}
+
+export function repairPendingAgentKeyBundleSortKeys(ctx: ModuleCtx, agentDbId: bigint) {
+  for (const bundle of ctx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(agentDbId)) {
+    if (bundle.sortKey !== 'pending') {
+      continue;
+    }
+    ctx.db.agentKeyBundle.id.update({
+      ...bundle,
+      sortKey: buildAgentKeyBundleSortKey(bundle),
+    });
+  }
 }
 
 export function rebuildPublicRecentChannelMessages(ctx: ModuleCtx, channel: ChannelRow) {
@@ -3262,20 +3292,12 @@ export function rebuildPublicRecentChannelMessages(ctx: ModuleCtx, channel: Chan
       ? upperBound - BigInt(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)
       : 1n;
 
-  const recentMessages = getChannelMessagesInSeqRange(ctx, channel.id, lowerBound, upperBound)
-    .sort((left, right) => {
-      if (left.channelSeq > right.channelSeq) return -1;
-      if (left.channelSeq < right.channelSeq) return 1;
-      if (right.id > left.id) return 1;
-      if (right.id < left.id) return -1;
-      return 0;
-    })
-    .reverse();
+  const recentMessages = getChannelMessagesInSeqRange(ctx, channel.id, lowerBound, upperBound);
 
-  let nextId = nextPublicRecentChannelMessageId(ctx);
   for (const message of recentMessages) {
     ctx.db.publicRecentChannelMessage.insert({
-      id: nextId,
+      // Use the source message id so mirror writes do not need a table-wide id scan.
+      id: message.id,
       channelId: message.channelId,
       channelSeq: message.channelSeq,
       channelSeqKey: message.channelSeqKey,
@@ -3289,7 +3311,6 @@ export function rebuildPublicRecentChannelMessages(ctx: ModuleCtx, channel: Chan
       replyToMessageId: message.replyToMessageId,
       createdAt: message.createdAt,
     });
-    nextId += 1n;
   }
 }
 
@@ -3371,19 +3392,14 @@ export function insertPublicRecentChannelMessage(ctx: ModuleCtx, message: Channe
     return;
   }
 
-  let nextId = 1n;
-  for (const row of ctx.db.publicRecentChannelMessage.iter()) {
-    if (row.channelSeqKey === message.channelSeqKey) {
-      ctx.db.publicRecentChannelMessage.id.delete(row.id);
-      continue;
-    }
-    if (row.id >= nextId) {
-      nextId = row.id + 1n;
-    }
+  const existing = ctx.db.publicRecentChannelMessage.channelSeqKey.find(message.channelSeqKey);
+  if (existing) {
+    ctx.db.publicRecentChannelMessage.id.delete(existing.id);
   }
 
   ctx.db.publicRecentChannelMessage.insert({
-    id: nextId,
+    // Use the source message id so mirror writes do not need a table-wide id scan.
+    id: message.id,
     channelId: message.channelId,
     channelSeq: message.channelSeq,
     channelSeqKey: message.channelSeqKey,
@@ -3399,9 +3415,10 @@ export function insertPublicRecentChannelMessage(ctx: ModuleCtx, message: Channe
   });
 
   const latestRecentRows = Array.from(
-    ctx.db.publicRecentChannelMessage.iter()
-  ).filter(recentMessage => recentMessage.channelId === message.channelId)
-    .sort((left, right) => {
+    ctx.db.publicRecentChannelMessage.public_recent_channel_message_channel_id.filter(
+      message.channelId
+    )
+  ).sort((left, right) => {
     if (left.channelSeq > right.channelSeq) return -1;
     if (left.channelSeq < right.channelSeq) return 1;
     return Number(right.id - left.id);

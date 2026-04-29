@@ -11,7 +11,7 @@ import {
 } from "spacetimedb";
 
 export default __t.row({
-  id: __t.u64().primaryKey(),
+  id: __t.u64(),
   channelId: __t.u64().name("channel_id"),
   slug: __t.string(),
   title: __t.option(__t.string()),
@@ -23,4 +23,5 @@ export default __t.row({
   updatedAt: __t.timestamp().name("updated_at"),
   lastMessageAt: __t.timestamp().name("last_message_at"),
   publicJoinPermission: __t.string().name("public_join_permission"),
+  sortKey: __t.string().name("sort_key"),
 });

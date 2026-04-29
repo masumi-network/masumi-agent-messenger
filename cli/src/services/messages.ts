@@ -17,9 +17,11 @@ import {
 } from '../../../shared/inbox-state';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { timestampToISOString } from '../../../shared/spacetime-time';
+import type { DbConnection } from '../../../webapp/src/module_bindings';
 import type {
+  AgentPublicKeyLookupRequest,
+  AgentPublicKeyLookupRow,
   VisibleAgentRow,
-  VisibleAgentKeyBundleRow,
   VisibleThreadParticipantRow,
   VisibleThreadReadStateRow,
   VisibleThreadRow,
@@ -43,6 +45,8 @@ import {
   readMessageRows,
   subscribeMessageTables,
 } from './spacetimedb';
+
+const AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE = 100;
 
 export type InboxMessageItem = {
   id: string;
@@ -94,13 +98,14 @@ export type PaginatedNewMessageFeed = NewMessageFeed & {
 
 type MessageSnapshot = {
   actors: VisibleAgentRow[];
-  bundles: VisibleAgentKeyBundleRow[];
   participants: VisibleThreadParticipantRow[];
   readStates: VisibleThreadReadStateRow[];
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
   threads: VisibleThreadRow[];
   messages: VisibleMessageRow[];
 };
+
+type AgentPublicKeyKind = 'encryption' | 'signing';
 
 type UnreadMessageContext = {
   defaultActor: VisibleAgentRow;
@@ -110,8 +115,8 @@ type UnreadMessageContext = {
 
 function findVersionedKey(
   actor: VisibleAgentRow,
-  bundles: VisibleAgentKeyBundleRow[],
-  kind: 'encryption' | 'signing',
+  publicKeys: AgentPublicKeyLookupRow[],
+  kind: AgentPublicKeyKind,
   version: string
 ): string | null {
   if (kind === 'encryption' && actor.currentEncryptionKeyVersion === version) {
@@ -120,10 +125,132 @@ function findVersionedKey(
   if (kind === 'signing' && actor.currentSigningKeyVersion === version) {
     return actor.currentSigningPublicKey;
   }
-  if (kind === 'encryption') {
-    return bundles.find(bundle => bundle.encryptionKeyVersion === version)?.encryptionPublicKey ?? null;
+  return (
+    publicKeys.find(key => key.keyKind === kind && key.keyVersion === version)?.publicKey ??
+    null
+  );
+}
+
+function addPublicKeyLookupRequest(params: {
+  requestsByKey: Map<string, AgentPublicKeyLookupRequest>;
+  actorsById: Map<bigint, VisibleAgentRow>;
+  agentDbId: bigint;
+  keyKind: AgentPublicKeyKind;
+  keyVersion: string;
+}) {
+  const actor = params.actorsById.get(params.agentDbId);
+  if (
+    params.keyKind === 'encryption' &&
+    actor?.currentEncryptionKeyVersion === params.keyVersion
+  ) {
+    return;
   }
-  return bundles.find(bundle => bundle.signingKeyVersion === version)?.signingPublicKey ?? null;
+  if (
+    params.keyKind === 'signing' &&
+    actor?.currentSigningKeyVersion === params.keyVersion
+  ) {
+    return;
+  }
+
+  const requestKey = `${params.agentDbId.toString()}:${params.keyKind}:${params.keyVersion}`;
+  params.requestsByKey.set(requestKey, {
+    agentDbId: params.agentDbId,
+    keyKind: params.keyKind,
+    keyVersion: params.keyVersion,
+  });
+}
+
+export function collectMessagePublicKeyLookupRequests(params: {
+  messages: VisibleMessageRow[];
+  secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
+  actorsById: Map<bigint, VisibleAgentRow>;
+}): AgentPublicKeyLookupRequest[] {
+  const requestsByKey = new Map<string, AgentPublicKeyLookupRequest>();
+  const messageSecretKeys = new Set(
+    params.messages.map(message =>
+      [
+        message.threadId.toString(),
+        message.membershipVersion.toString(),
+        message.senderAgentDbId.toString(),
+        message.secretVersion,
+      ].join(':')
+    )
+  );
+
+  for (const message of params.messages) {
+    addPublicKeyLookupRequest({
+      requestsByKey,
+      actorsById: params.actorsById,
+      agentDbId: message.senderAgentDbId,
+      keyKind: 'signing',
+      keyVersion: message.signingKeyVersion,
+    });
+  }
+
+  for (const envelope of params.secretEnvelopes) {
+    const messageSecretKey = [
+      envelope.threadId.toString(),
+      envelope.membershipVersion.toString(),
+      envelope.senderAgentDbId.toString(),
+      envelope.secretVersion,
+    ].join(':');
+    if (!messageSecretKeys.has(messageSecretKey)) {
+      continue;
+    }
+
+    addPublicKeyLookupRequest({
+      requestsByKey,
+      actorsById: params.actorsById,
+      agentDbId: envelope.senderAgentDbId,
+      keyKind: 'encryption',
+      keyVersion: envelope.senderEncryptionKeyVersion,
+    });
+    addPublicKeyLookupRequest({
+      requestsByKey,
+      actorsById: params.actorsById,
+      agentDbId: envelope.senderAgentDbId,
+      keyKind: 'signing',
+      keyVersion: envelope.signingKeyVersion,
+    });
+  }
+
+  return Array.from(requestsByKey.values());
+}
+
+export async function lookupMessagePublicKeys(params: {
+  conn: DbConnection;
+  agentDbId: bigint;
+  messages: VisibleMessageRow[];
+  secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
+  actorsById: Map<bigint, VisibleAgentRow>;
+}): Promise<AgentPublicKeyLookupRow[]> {
+  const requests = collectMessagePublicKeyLookupRequests({
+    messages: params.messages,
+    secretEnvelopes: params.secretEnvelopes,
+    actorsById: params.actorsById,
+  });
+  const rows: AgentPublicKeyLookupRow[] = [];
+  for (let index = 0; index < requests.length; index += AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE) {
+    rows.push(
+      ...(await params.conn.procedures.lookupAgentPublicKeys({
+        agentDbId: params.agentDbId,
+        requests: requests.slice(index, index + AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE),
+      }))
+    );
+  }
+  return rows;
+}
+
+export function buildPublicKeysByActorId(
+  publicKeys: AgentPublicKeyLookupRow[]
+): Map<bigint, AgentPublicKeyLookupRow[]> {
+  const publicKeysByActorId = new Map<bigint, AgentPublicKeyLookupRow[]>();
+  for (const publicKey of publicKeys) {
+    const list = publicKeysByActorId.get(publicKey.agentDbId) ?? [];
+    list.push(publicKey);
+    publicKeysByActorId.set(publicKey.agentDbId, list);
+  }
+  return publicKeysByActorId;
 }
 
 function normalizePage(value: number | undefined): number {
@@ -296,7 +423,7 @@ export async function decryptVisibleMessage(params: {
   message: VisibleMessageRow;
   defaultActor: VisibleAgentRow;
   actorsById: Map<bigint, VisibleAgentRow>;
-  bundlesByActorId: Map<bigint, VisibleAgentKeyBundleRow[]>;
+  publicKeysByActorId: Map<bigint, AgentPublicKeyLookupRow[]>;
   ownActorIds?: Set<bigint>;
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
   recipientKeyPair: AgentKeyPair | null;
@@ -356,7 +483,7 @@ export async function decryptVisibleMessage(params: {
       trustNotice = `Key rotation: ${senderActor.slug} refreshed keys.`;
       const messageSigningKey = findVersionedKey(
         senderActor,
-        params.bundlesByActorId.get(senderActor.id) ?? [],
+        params.publicKeysByActorId.get(senderActor.id) ?? [],
         'signing',
         params.message.signingKeyVersion
       );
@@ -405,22 +532,22 @@ export async function decryptVisibleMessage(params: {
     };
   }
 
-  const senderBundles = params.bundlesByActorId.get(senderActor.id) ?? [];
+  const senderPublicKeys = params.publicKeysByActorId.get(senderActor.id) ?? [];
   const senderEncryptionPublicKey = findVersionedKey(
     senderActor,
-    senderBundles,
+    senderPublicKeys,
     'encryption',
     envelope.senderEncryptionKeyVersion
   );
   const messageSigningPublicKey = findVersionedKey(
     senderActor,
-    senderBundles,
+    senderPublicKeys,
     'signing',
     params.message.signingKeyVersion
   );
   const envelopeSigningPublicKey = findVersionedKey(
     senderActor,
-    senderBundles,
+    senderPublicKeys,
     'signing',
     envelope.signingKeyVersion
   );
@@ -640,12 +767,6 @@ export async function readNewMessages(params: {
       });
 
       const actorsById = new Map(snapshot.actors.map(actor => [actor.id, actor] as const));
-      const bundlesByActorId = new Map<bigint, VisibleAgentKeyBundleRow[]>();
-      for (const bundle of snapshot.bundles) {
-        const list = bundlesByActorId.get(bundle.agentDbId) ?? [];
-        list.push(bundle);
-        bundlesByActorId.set(bundle.agentDbId, list);
-      }
       const participantsByThreadId = buildParticipantsByThreadId(snapshot.participants);
       const threadsById = new Map(snapshot.threads.map(thread => [thread.id, thread] as const));
       const counterpartByThreadId = buildDirectCounterpartyByThreadId({
@@ -666,6 +787,15 @@ export async function readNewMessages(params: {
 
         return true;
       });
+      const publicKeysByActorId = buildPublicKeysByActorId(
+        await lookupMessagePublicKeys({
+          conn,
+          agentDbId: defaultActor.id,
+          messages: scopedUnreadMessages,
+          secretEnvelopes: snapshot.secretEnvelopes,
+          actorsById,
+        })
+      );
 
       const messages = await Promise.all(
         scopedUnreadMessages.map(async message => {
@@ -675,7 +805,7 @@ export async function readNewMessages(params: {
             message,
             defaultActor,
             actorsById,
-            bundlesByActorId,
+            publicKeysByActorId,
             ownActorIds,
             secretEnvelopes: snapshot.secretEnvelopes,
             recipientKeyPair,

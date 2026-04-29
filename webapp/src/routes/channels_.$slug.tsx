@@ -72,10 +72,9 @@ import type {
   Agent,
   ChannelMemberListRow,
   ChannelMessageRow,
-  PublicChannel,
+  PublicChannelMirrorRow,
   PublicRecentChannelMessage,
   VisibleChannelJoinRequestRow,
-  VisibleChannelMessageRow,
   VisibleChannelMembershipRow,
   VisibleChannelRow,
 } from '@/module_bindings/types';
@@ -131,10 +130,7 @@ type ChannelPageDetails = {
 type ChannelAccessMode = 'public' | 'approval_required';
 type PublicJoinPermission = 'read' | 'read_write';
 
-type CombinedChannelMessage =
-  | ChannelMessageRow
-  | PublicRecentChannelMessage
-  | VisibleChannelMessageRow;
+type CombinedChannelMessage = ChannelMessageRow | PublicRecentChannelMessage;
 
 function compareBigint(left: bigint, right: bigint): number {
   if (left < right) return -1;
@@ -175,7 +171,7 @@ function normalizePublicJoinPermission(permission: string | null | undefined): P
   return permission === 'read_write' ? 'read_write' : 'read';
 }
 
-function toPublicChannelDetails(channel: PublicChannel): ChannelPageDetails {
+function toPublicChannelDetails(channel: PublicChannelMirrorRow): ChannelPageDetails {
   return {
     channelId: channel.channelId,
     slug: channel.slug,
@@ -277,6 +273,20 @@ function channelMessageKey(message: { channelId: bigint; channelSeq: bigint }): 
   return `${message.channelId.toString()}:${message.channelSeq.toString()}`;
 }
 
+function mergeChannelMessageRows(
+  current: ChannelMessageRow[],
+  incoming: ChannelMessageRow[]
+): ChannelMessageRow[] {
+  const byKey = new Map<string, ChannelMessageRow>();
+  for (const message of current) {
+    byKey.set(channelMessageKey(message), message);
+  }
+  for (const message of incoming) {
+    byKey.set(channelMessageKey(message), message);
+  }
+  return Array.from(byKey.values());
+}
+
 function toDecryptDomainMessage(error: unknown): string {
   const raw = error instanceof Error ? error.message : '';
   const text = raw.toLowerCase();
@@ -343,12 +353,12 @@ function AuthenticatedChannelPage({ slug }: { slug: string }) {
 
 function PublicChannelPageContent({ slug }: { slug: string }) {
   const publicChannelQuery = useMemo(
-    () => tables.publicChannel.where(row => row.slug.eq(slug)),
+    () => tables.publicChannels.where(row => row.slug.eq(slug)),
     [slug]
   );
-  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannel>(
+  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannelMirrorRow>(
     publicChannelQuery,
-    'publicChannel'
+    'publicChannels'
   );
   const publicChannel = useMemo(
     () => channels.find(row => row.slug === slug) ?? null,
@@ -360,12 +370,12 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
   );
   const channelId = channel?.channelId ?? 0n;
   const messageQuery = useMemo(
-    () => tables.publicRecentChannelMessage.where(row => row.channelId.eq(channelId)),
+    () => tables.publicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
   const [messages, messagesReady, messagesError] = usePublicLiveTable<PublicRecentChannelMessage>(
     messageQuery,
-    'publicRecentChannelMessage',
+    'publicRecentChannelMessages',
     { enabled: channel !== null }
   );
   const [decryptedByKey, setDecryptedByKey] = useState<Record<string, DecryptedChannelMessage>>({});
@@ -664,12 +674,12 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const setChannelMemberPermissionReducer = useReducer(reducers.setChannelMemberPermission);
   const updateChannelSettingsReducer = useReducer(reducers.updateChannelSettings);
   const publicChannelQuery = useMemo(
-    () => tables.publicChannel.where(row => row.slug.eq(slug)),
+    () => tables.publicChannels.where(row => row.slug.eq(slug)),
     [slug]
   );
-  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannel>(
+  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannelMirrorRow>(
     publicChannelQuery,
-    'publicChannel'
+    'publicChannels'
   );
   const visibleChannelQuery = useMemo(
     () => tables.visibleChannels.where(row => row.slug.eq(slug)),
@@ -738,25 +748,17 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     { enabled: channel !== null }
   );
   const messageQuery = useMemo(
-    () => tables.publicRecentChannelMessage.where(row => row.channelId.eq(channelId)),
+    () => tables.publicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
   const [messages, messagesReady, messagesError] = usePublicLiveTable<PublicRecentChannelMessage>(
     messageQuery,
-    'publicRecentChannelMessage',
+    'publicRecentChannelMessages',
     { enabled: channel !== null }
   );
-  const liveMessageQuery = useMemo(
-    () => tables.visibleChannelMessages.where(row => row.channelId.eq(channelId)),
-    [channelId]
-  );
-  const [liveMessages, liveMessagesReady, liveMessagesError] =
-    useLiveTable<VisibleChannelMessageRow>(
-      liveMessageQuery,
-      'visibleChannelMessages',
-      { enabled: channel !== null }
-    );
   const [historyMessages, setHistoryMessages] = useState<ChannelMessageRow[]>([]);
+  const [historyReady, setHistoryReady] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [memberRows, setMemberRows] = useState<ChannelMemberListRow[]>([]);
   const [decryptedByKey, setDecryptedByKey] = useState<Record<string, DecryptedChannelMessage>>({});
   const [draft, setDraft] = useState('');
@@ -805,6 +807,12 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const canSend = membership?.permission === 'read_write' || membership?.permission === 'admin';
   const canManage = membership?.permission === 'admin';
   const canListMembers = Boolean(membership);
+  const canReadChannelHistory = Boolean(
+    authenticatedSession &&
+      activeActor &&
+      channel &&
+      (channel.accessMode === 'public' || membership)
+  );
   const ownJoinRequest = useMemo(
     () =>
       activeActor
@@ -849,17 +857,6 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         }),
     [channelId, messages]
   );
-  const sortedLiveMessages = useMemo(
-    () =>
-      [...liveMessages]
-        .filter(message => message.channelId === channelId)
-        .sort((left, right) => {
-          if (left.channelSeq < right.channelSeq) return -1;
-          if (left.channelSeq > right.channelSeq) return 1;
-          return Number(left.id - right.id);
-        }),
-    [channelId, liveMessages]
-  );
   const combinedMessages = useMemo(() => {
     const byKey = new Map<string, CombinedChannelMessage>();
     for (const message of historyMessagesForChannel) {
@@ -868,15 +865,12 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     for (const message of sortedMessages) {
       byKey.set(channelMessageKey(message), message);
     }
-    for (const message of sortedLiveMessages) {
-      byKey.set(channelMessageKey(message), message);
-    }
     return Array.from(byKey.values()).sort((left, right) => {
       if (left.channelSeq < right.channelSeq) return -1;
       if (left.channelSeq > right.channelSeq) return 1;
       return Number(left.id - right.id);
     });
-  }, [historyMessagesForChannel, sortedLiveMessages, sortedMessages]);
+  }, [historyMessagesForChannel, sortedMessages]);
   const earliestLoadedSeq = combinedMessages[0]?.channelSeq ?? null;
   const canLoadOlder = Boolean(
     authenticatedSession && activeActor && channel && earliestLoadedSeq !== null && earliestLoadedSeq > 1n
@@ -885,6 +879,8 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   useEffect(() => {
     return deferEffectStateUpdate(() => {
       setHistoryMessages([]);
+      setHistoryReady(false);
+      setHistoryError(null);
       setMemberRows([]);
       setDecryptedByKey({});
       setActionError(null);
@@ -893,6 +889,60 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
       lastMessageKeyRef.current = null;
     });
   }, [channelId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!canReadChannelHistory || !connection || !channel || !activeActor) {
+      const cancelReady = deferEffectStateUpdate(() => {
+        if (!cancelled) {
+          setHistoryReady(true);
+          setHistoryError(null);
+        }
+      });
+      return () => {
+        cancelled = true;
+        cancelReady();
+      };
+    }
+
+    const cancelClearError = deferEffectStateUpdate(() => {
+      if (!cancelled) {
+        setHistoryError(null);
+      }
+    });
+    void connection.procedures
+      .listChannelMessages({
+        agentDbId: activeActor.id,
+        channelId: channel.channelId,
+        channelSlug: undefined,
+        beforeChannelSeq: undefined,
+        limit: 25n,
+      })
+      .then(rows => {
+        if (cancelled) {
+          return;
+        }
+        setHistoryMessages(current => mergeChannelMessageRows(current, rows));
+        setHistoryReady(true);
+      })
+      .catch(error => {
+        if (cancelled) {
+          return;
+        }
+        setHistoryError(error instanceof Error ? error.message : 'Unable to load channel messages');
+        setHistoryReady(true);
+      });
+
+    return () => {
+      cancelled = true;
+      cancelClearError();
+    };
+  }, [
+    activeActor,
+    canReadChannelHistory,
+    channel,
+    connection,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1227,14 +1277,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         limit: 25n,
       });
       setHistoryMessages(current => {
-        const byKey = new Map<string, ChannelMessageRow>();
-        for (const message of current) {
-          byKey.set(channelMessageKey(message), message);
-        }
-        for (const message of rows) {
-          byKey.set(channelMessageKey(message), message);
-        }
-        return Array.from(byKey.values());
+        return mergeChannelMessageRows(current, rows);
       });
       requestAnimationFrame(() => {
         const el = feedScrollRef.current;
@@ -1261,7 +1304,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         row => row.slug === slug
       ) ?? null;
     const freshPublicChannel =
-      (Array.from(connection.db.publicChannel.iter()) as PublicChannel[]).find(
+      (Array.from(connection.db.publicChannels.iter()) as PublicChannelMirrorRow[]).find(
         row => row.slug === slug
       ) ?? null;
     const freshChannelId = freshVisibleChannel?.id ?? freshPublicChannel?.channelId;
@@ -1377,18 +1420,17 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         actorsError ??
         membershipsError ??
         joinRequestsError ??
-        liveMessagesError
+        historyError
       : null);
   const authenticatedTablesReady =
     auth.status !== 'authenticated' ||
     (visibleChannelsReady &&
       actorsReady &&
       membershipsReady &&
-      joinRequestsReady &&
-      liveMessagesReady);
+      joinRequestsReady);
   const pageReady = channelsReady && authenticatedTablesReady;
   const channelMessagesReady =
-    messagesReady && (auth.status !== 'authenticated' || liveMessagesReady);
+    messagesReady && (auth.status !== 'authenticated' || historyReady);
 
   const timelineMeta = useMemo(
     () =>

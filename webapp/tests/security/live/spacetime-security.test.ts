@@ -4,7 +4,6 @@ import { DbConnection, tables } from '@/module_bindings';
 import type {
   Agent,
   VisibleAgentRow,
-  VisibleAgentKeyBundleRow,
   VisibleThreadRow,
   VisibleThreadParticipantRow,
   VisibleInboxRow,
@@ -29,6 +28,7 @@ import {
   formatEncryptedMessageBody,
   parseDecryptedMessagePlaintext,
 } from '../../../../shared/message-format';
+import { generateClientThreadId } from '../../../../shared/inbox-state';
 
 if (!globalThis.crypto) {
   globalThis.crypto = webcrypto as Crypto;
@@ -68,7 +68,6 @@ type ProvisionedClient = {
 const VISIBLE_QUERIES = [
   tables.visibleInboxes,
   tables.visibleAgents,
-  tables.visibleAgentKeyBundles,
   tables.visibleThreads,
   tables.visibleThreadParticipants,
   tables.visibleThreadReadStates,
@@ -108,10 +107,6 @@ function listVisibleInboxes(conn: DbConnection): VisibleInboxRow[] {
 
 function listVisibleActors(conn: DbConnection): VisibleAgentRow[] {
   return Array.from(conn.db.visibleAgents.iter());
-}
-
-function listVisibleBundles(conn: DbConnection): VisibleAgentKeyBundleRow[] {
-  return Array.from(conn.db.visibleAgentKeyBundles.iter());
 }
 
 function listVisibleThreads(conn: DbConnection): VisibleThreadRow[] {
@@ -296,22 +291,30 @@ async function provisionClient(label: string, token: string): Promise<Provisione
   };
 }
 
-function findVersionedKey(
+async function findVersionedKey(
+  conn: DbConnection,
+  viewerAgentDbId: bigint,
   actor: VisibleAgentRow,
-  bundles: VisibleAgentKeyBundleRow[],
   kind: 'encryption' | 'signing',
   version: string
-): string | null {
+): Promise<string | null> {
   if (kind === 'encryption' && actor.currentEncryptionKeyVersion === version) {
     return actor.currentEncryptionPublicKey;
   }
   if (kind === 'signing' && actor.currentSigningKeyVersion === version) {
     return actor.currentSigningPublicKey;
   }
-  if (kind === 'encryption') {
-    return bundles.find(bundle => bundle.encryptionKeyVersion === version)?.encryptionPublicKey ?? null;
-  }
-  return bundles.find(bundle => bundle.signingKeyVersion === version)?.signingPublicKey ?? null;
+  const rows = await conn.procedures.lookupAgentPublicKeys({
+    agentDbId: viewerAgentDbId,
+    requests: [
+      {
+        agentDbId: actor.id,
+        keyKind: kind,
+        keyVersion: version,
+      },
+    ],
+  });
+  return rows[0]?.publicKey ?? null;
 }
 
 async function decryptLatestMessage(
@@ -335,22 +338,24 @@ async function decryptLatestMessage(
     throw new Error('Recipient envelope missing');
   }
 
-  const bundles = listVisibleBundles(recipient.conn).filter(bundle => bundle.agentDbId === sender.id);
-  const senderEncryptionPublicKey = findVersionedKey(
+  const senderEncryptionPublicKey = await findVersionedKey(
+    recipient.conn,
+    recipient.actor.id,
     sender,
-    bundles,
     'encryption',
     envelope.senderEncryptionKeyVersion
   );
-  const messageSigningPublicKey = findVersionedKey(
+  const messageSigningPublicKey = await findVersionedKey(
+    recipient.conn,
+    recipient.actor.id,
     sender,
-    bundles,
     'signing',
     message.signingKeyVersion
   );
-  const envelopeSigningPublicKey = findVersionedKey(
+  const envelopeSigningPublicKey = await findVersionedKey(
+    recipient.conn,
+    recipient.actor.id,
     sender,
-    bundles,
     'signing',
     envelope.signingKeyVersion
   );
@@ -557,7 +562,6 @@ describe.skipIf(!liveEnvReady)('live spacetime security', () => {
     try {
       expect(listVisibleInboxes(anonymous.conn)).toHaveLength(0);
       expect(listVisibleActors(anonymous.conn)).toHaveLength(0);
-      expect(listVisibleBundles(anonymous.conn)).toHaveLength(0);
       expect(listVisibleThreads(anonymous.conn)).toHaveLength(0);
       expect(listVisibleParticipants(anonymous.conn)).toHaveLength(0);
       expect(listVisibleSecretEnvelopes(anonymous.conn)).toHaveLength(0);
@@ -707,13 +711,51 @@ describe.skipIf(!liveEnvReady)('live spacetime security', () => {
     const existingRequestIds = new Set(
       listVisibleContactRequests(mallory.conn).map(request => request.id.toString())
     );
+    const publishedAlice = (
+      await mallory.conn.procedures.lookupPublishedAgentBySlug({
+        slug: alice.actor.slug,
+      })
+    )[0];
+    if (!publishedAlice) {
+      throw new Error('Published Alice actor lookup failed');
+    }
+    const pendingThreadId = generateClientThreadId();
+    const firstPrepared = await prepareEncryptedMessage({
+      threadId: pendingThreadId,
+      senderActorId: mallory.actor.id,
+      senderPublicIdentity: mallory.actor.publicIdentity,
+      senderSeq: 1n,
+      payload: {
+        contentType: 'text/plain',
+        body: 'hidden first contact',
+      },
+      keyPair: mallory.keyPair,
+      recipients: [
+        toActorPublicKeys(mallory.actor),
+        toPublishedActorPublicKeys(publishedAlice),
+      ],
+      existingSecret: null,
+      latestKnownSecretVersion: null,
+      rotateSecret: false,
+      replyToMessageId: null,
+    });
 
     await Promise.resolve(
-      mallory.conn.reducers.createPendingDirectContactRequest({
+      mallory.conn.reducers.requestDirectContactWithFirstMessage({
         agentDbId: mallory.actor.id,
         otherAgentPublicIdentity: alice.actor.publicIdentity,
+        threadId: pendingThreadId,
         membershipLocked: true,
         title: `pending-hidden-${RUN_SUFFIX}`,
+        secretVersion: firstPrepared.secretVersion,
+        signingKeyVersion: firstPrepared.signingKeyVersion,
+        senderSeq: 1n,
+        ciphertext: firstPrepared.ciphertext,
+        iv: firstPrepared.iv,
+        cipherAlgorithm: firstPrepared.cipherAlgorithm,
+        signature: firstPrepared.signature,
+        replyToMessageId: undefined,
+        attachedSecretEnvelopes: firstPrepared.attachedSecretEnvelopes,
       })
     );
 
@@ -739,51 +781,6 @@ describe.skipIf(!liveEnvReady)('live spacetime security', () => {
     if (!pendingRequest) {
       throw new Error('Pending direct-contact request did not become visible');
     }
-
-    const publishedAlice = (
-      await mallory.conn.procedures.lookupPublishedAgentBySlug({
-        slug: alice.actor.slug,
-      })
-    )[0];
-    if (!publishedAlice) {
-      throw new Error('Published Alice actor lookup failed');
-    }
-
-    const firstPrepared = await prepareEncryptedMessage({
-      threadId: pendingRequest.threadId,
-      senderActorId: mallory.actor.id,
-      senderPublicIdentity: mallory.actor.publicIdentity,
-      senderSeq: 1n,
-      payload: {
-        contentType: 'text/plain',
-        body: 'hidden first contact',
-      },
-      keyPair: mallory.keyPair,
-      recipients: [
-        toActorPublicKeys(mallory.actor),
-        toPublishedActorPublicKeys(publishedAlice),
-      ],
-      existingSecret: null,
-      latestKnownSecretVersion: null,
-      rotateSecret: false,
-      replyToMessageId: null,
-    });
-
-    await Promise.resolve(
-      mallory.conn.reducers.sendEncryptedMessage({
-        agentDbId: mallory.actor.id,
-        threadId: pendingRequest.threadId,
-        secretVersion: firstPrepared.secretVersion,
-        signingKeyVersion: firstPrepared.signingKeyVersion,
-        senderSeq: 1n,
-        ciphertext: firstPrepared.ciphertext,
-        iv: firstPrepared.iv,
-        cipherAlgorithm: firstPrepared.cipherAlgorithm,
-        signature: firstPrepared.signature,
-        replyToMessageId: undefined,
-        attachedSecretEnvelopes: firstPrepared.attachedSecretEnvelopes,
-      })
-    );
 
     await waitFor(
       () =>
@@ -833,23 +830,61 @@ describe.skipIf(!liveEnvReady)('live spacetime security', () => {
 
   it('blocks membership changes on pending direct-contact threads until requester approval or allowlist', async () => {
     const existingRequestIds = new Set(
-      listVisibleContactRequests(alice.conn).map(request => request.id.toString())
+      listVisibleContactRequests(bob.conn).map(request => request.id.toString())
     );
+    const publishedMallory = (
+      await bob.conn.procedures.lookupPublishedAgentBySlug({
+        slug: mallory.actor.slug,
+      })
+    )[0];
+    if (!publishedMallory) {
+      throw new Error('Published Mallory actor lookup failed');
+    }
+    const pendingThreadId = generateClientThreadId();
+    const firstPrepared = await prepareEncryptedMessage({
+      threadId: pendingThreadId,
+      senderActorId: bob.actor.id,
+      senderPublicIdentity: bob.actor.publicIdentity,
+      senderSeq: 1n,
+      payload: {
+        contentType: 'text/plain',
+        body: 'pending membership contact',
+      },
+      keyPair: bob.keyPair,
+      recipients: [
+        toActorPublicKeys(bob.actor),
+        toPublishedActorPublicKeys(publishedMallory),
+      ],
+      existingSecret: null,
+      latestKnownSecretVersion: null,
+      rotateSecret: false,
+      replyToMessageId: null,
+    });
 
     await Promise.resolve(
-      alice.conn.reducers.createPendingDirectContactRequest({
-        agentDbId: alice.actor.id,
+      bob.conn.reducers.requestDirectContactWithFirstMessage({
+        agentDbId: bob.actor.id,
         otherAgentPublicIdentity: mallory.actor.publicIdentity,
+        threadId: pendingThreadId,
         membershipLocked: false,
         title: `pending-membership-${RUN_SUFFIX}`,
+        secretVersion: firstPrepared.secretVersion,
+        signingKeyVersion: firstPrepared.signingKeyVersion,
+        senderSeq: 1n,
+        ciphertext: firstPrepared.ciphertext,
+        iv: firstPrepared.iv,
+        cipherAlgorithm: firstPrepared.cipherAlgorithm,
+        signature: firstPrepared.signature,
+        replyToMessageId: undefined,
+        attachedSecretEnvelopes: firstPrepared.attachedSecretEnvelopes,
       })
     );
 
     await waitFor(
       () =>
-        listVisibleContactRequests(alice.conn).some(
+        listVisibleContactRequests(bob.conn).some(
           request =>
-            request.requesterAgentDbId === alice.actor.id &&
+            request.requesterAgentDbId === bob.actor.id &&
             request.targetPublicIdentity === mallory.actor.publicIdentity &&
             request.status === 'pending' &&
             !existingRequestIds.has(request.id.toString())
@@ -857,9 +892,9 @@ describe.skipIf(!liveEnvReady)('live spacetime security', () => {
       'pending direct-contact membership request visibility'
     );
 
-    const pendingRequest = listVisibleContactRequests(alice.conn).find(
+    const pendingRequest = listVisibleContactRequests(bob.conn).find(
       request =>
-        request.requesterAgentDbId === alice.actor.id &&
+        request.requesterAgentDbId === bob.actor.id &&
         request.targetPublicIdentity === mallory.actor.publicIdentity &&
         request.status === 'pending' &&
         !existingRequestIds.has(request.id.toString())
@@ -870,10 +905,10 @@ describe.skipIf(!liveEnvReady)('live spacetime security', () => {
 
     await expect(
       Promise.resolve(
-        alice.conn.reducers.addThreadParticipant({
-          agentDbId: alice.actor.id,
+        bob.conn.reducers.addThreadParticipant({
+          agentDbId: bob.actor.id,
           threadId: pendingRequest.threadId,
-          participantPublicIdentity: bob.actor.publicIdentity,
+          participantPublicIdentity: alice.actor.publicIdentity,
         })
       )
     ).rejects.toThrow(/requester is allowlisted|request is approved/i);

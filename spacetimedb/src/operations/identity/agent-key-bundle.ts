@@ -8,13 +8,15 @@ import * as model from '../../model';
 const {
   MAX_THREAD_FANOUT,
   MAX_CHANNEL_MESSAGE_PAGE_SIZE,
-  MAX_VISIBLE_AGENT_KEY_BUNDLES_PER_AGENT,
+  MAX_AGENT_PUBLIC_KEY_LOOKUP_REQUESTS,
   MAX_AGENT_KEY_BUNDLE_PAGE_SIZE,
   DEFAULT_AGENT_ENCRYPTION_ALGORITHM,
   DEFAULT_AGENT_SIGNING_ALGORITHM,
   AGENT_KEY_ROTATE_RATE_WINDOW_MS,
   AGENT_KEY_ROTATE_RATE_MAX_PER_WINDOW,
   DeviceKeyBundleAttachment,
+  AgentPublicKeyLookupRequest,
+  AgentPublicKeyLookupRow,
   PublishedAgentSigningKeyLookupRequest,
   PublishedAgentSigningKeyLookupRow,
   VisibleAgentKeyBundleRow,
@@ -28,10 +30,10 @@ const {
   requireMaxArrayLength,
   refreshInboxAuthLeaseForInbox,
   buildAgentKeyBundleKey,
-  getReadableInbox,
+  buildAgentKeyBundleSortKey,
+  repairPendingAgentKeyBundleSortKeys,
   getOwnedActorWithInbox,
   getOwnedActorForRead,
-  buildLatestVisibleAgentIdsForInbox,
   buildVisibleAgentIdsForInbox,
   getOwnedDevice,
   invalidatePendingDeviceShareRequests,
@@ -39,31 +41,111 @@ const {
   insertDeviceKeyBundle,
 } = model;
 
-function compareAgentKeyBundleDesc(
-  left: model.AgentKeyBundleRow,
-  right: model.AgentKeyBundleRow
-) {
-  if (left.createdAt.microsSinceUnixEpoch > right.createdAt.microsSinceUnixEpoch) return -1;
-  if (left.createdAt.microsSinceUnixEpoch < right.createdAt.microsSinceUnixEpoch) return 1;
-  if (left.id > right.id) return -1;
-  if (left.id < right.id) return 1;
-  return 0;
+type AgentPublicKeyKind = 'encryption' | 'signing';
+
+function normalizeAgentPublicKeyKind(value: string): AgentPublicKeyKind {
+  const normalized = requireNonEmpty(value, 'keyKind');
+  if (normalized !== 'encryption' && normalized !== 'signing') {
+    throw new SenderError('keyKind must be encryption or signing');
+  }
+  return normalized;
 }
 
-export const visibleAgentKeyBundles = spacetimedb.view(
-  { public: true },
-  t.array(VisibleAgentKeyBundleRow),
-  ctx => {
-    const inbox = getReadableInbox(ctx);
-    if (!inbox) {
-      return [];
-    }
-
-    return Array.from(buildLatestVisibleAgentIdsForInbox(ctx, inbox.id)).flatMap(agentDbId =>
-      Array.from(ctx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(agentDbId))
-        .sort(compareAgentKeyBundleDesc)
-        .slice(0, MAX_VISIBLE_AGENT_KEY_BUNDLES_PER_AGENT)
+function findAgentPublicKeyBundle(
+  ctx: model.ReadDbCtx,
+  agentDbId: bigint,
+  kind: AgentPublicKeyKind,
+  keyVersion: string
+) {
+  if (kind === 'encryption') {
+    return (
+      Array.from(
+        ctx.db.agentKeyBundle.agent_key_bundle_agent_db_id_encryption_key_version.filter([
+          agentDbId,
+          keyVersion,
+        ])
+      )[0] ?? null
     );
+  }
+
+  return (
+    Array.from(
+      ctx.db.agentKeyBundle.agent_key_bundle_agent_db_id_signing_key_version.filter([
+        agentDbId,
+        keyVersion,
+      ])
+    )[0] ?? null
+  );
+}
+
+function toAgentPublicKeyLookupRow(
+  bundle: model.AgentKeyBundleRow,
+  kind: AgentPublicKeyKind,
+  keyVersion: string
+) {
+  return {
+    agentDbId: bundle.agentDbId,
+    publicIdentity: bundle.publicIdentity,
+    keyKind: kind,
+    keyVersion,
+    publicKey:
+      kind === 'encryption' ? bundle.encryptionPublicKey : bundle.signingPublicKey,
+    algorithm:
+      kind === 'encryption' ? bundle.encryptionAlgorithm : bundle.signingAlgorithm,
+    keyBundleId: bundle.id,
+    createdAt: bundle.createdAt,
+  };
+}
+
+export const lookupAgentPublicKeys = spacetimedb.procedure(
+  {
+    agentDbId: t.u64(),
+    requests: t.array(AgentPublicKeyLookupRequest),
+  },
+  t.array(AgentPublicKeyLookupRow),
+  (ctx, { agentDbId, requests }) => {
+    return ctx.withTx(tx => {
+      requireMaxArrayLength(
+        requests,
+        MAX_AGENT_PUBLIC_KEY_LOOKUP_REQUESTS,
+        'requests'
+      );
+
+      const actor = getOwnedActorForRead(tx, agentDbId);
+      const visibleAgentIds = buildVisibleAgentIdsForInbox(tx, actor.inboxId);
+      const seen = new Set<string>();
+      const resolved: Array<ReturnType<typeof toAgentPublicKeyLookupRow>> = [];
+
+      for (const request of requests) {
+        if (!visibleAgentIds.has(request.agentDbId)) {
+          throw new SenderError('Requested agent is not visible to this actor');
+        }
+
+        const keyKind = normalizeAgentPublicKeyKind(request.keyKind);
+        const keyVersion = requireNonEmpty(request.keyVersion, 'keyVersion');
+        requireMaxLength(keyVersion, MAX_MESSAGE_VERSION_CHARS, 'keyVersion');
+
+        const requestKey = `${request.agentDbId.toString()}:${keyKind}:${keyVersion}`;
+        if (seen.has(requestKey)) {
+          continue;
+        }
+        seen.add(requestKey);
+
+        const bundle = findAgentPublicKeyBundle(
+          tx,
+          request.agentDbId,
+          keyKind,
+          keyVersion
+        );
+        if (!bundle) {
+          continue;
+        }
+
+        resolved.push(toAgentPublicKeyLookupRow(bundle, keyKind, keyVersion));
+      }
+
+      return resolved;
+    });
   }
 );
 
@@ -91,14 +173,31 @@ export const lookupAgentKeyBundles = spacetimedb.procedure(
         throw new SenderError('Peer agent is not visible to this actor');
       }
 
-      const bundles = Array.from(
-        tx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(peerAgentDbId)
-      ).sort(compareAgentKeyBundleDesc);
-      const filtered =
-        beforeBundleId === undefined
-          ? bundles
-          : bundles.filter(bundle => bundle.id < beforeBundleId);
-      return filtered.slice(0, pageSize);
+      repairPendingAgentKeyBundleSortKeys(tx, peerAgentDbId);
+      let cursorSortKey: string | undefined;
+      if (beforeBundleId !== undefined) {
+        const cursorBundle = tx.db.agentKeyBundle.id.find(beforeBundleId);
+        if (!cursorBundle || cursorBundle.agentDbId !== peerAgentDbId) {
+          throw new SenderError('beforeBundleId is not valid for this peer agent');
+        }
+        cursorSortKey = buildAgentKeyBundleSortKey(cursorBundle);
+      }
+      const peerBundlePrefixRange = [peerAgentDbId] as unknown as Parameters<
+        typeof tx.db.agentKeyBundle.agent_key_bundle_agent_db_id_sort_key.filter
+      >[0];
+      const bundles =
+        tx.db.agentKeyBundle.agent_key_bundle_agent_db_id_sort_key.filter(peerBundlePrefixRange);
+      const rows: model.AgentKeyBundleRow[] = [];
+      for (const bundle of bundles) {
+        if (cursorSortKey !== undefined && bundle.sortKey <= cursorSortKey) {
+          continue;
+        }
+        rows.push(bundle);
+        if (rows.length >= pageSize) {
+          break;
+        }
+      }
+      return rows;
     });
   }
 );
@@ -320,7 +419,7 @@ export const rotateAgentKeys = spacetimedb.reducer(
         updatedAt: ctx.timestamp,
     });
 
-    ctx.db.agentKeyBundle.insert({
+    const createdKeyBundle = ctx.db.agentKeyBundle.insert({
       id: 0n,
       agentDbId: actor.id,
         publicIdentity: actor.publicIdentity,
@@ -336,6 +435,11 @@ export const rotateAgentKeys = spacetimedb.reducer(
         signingKeyVersion: normalizedSigningVersion,
         signingAlgorithm: normalizedSigningAlgorithm,
         createdAt: ctx.timestamp,
+        sortKey: 'pending',
+    });
+    ctx.db.agentKeyBundle.id.update({
+      ...createdKeyBundle,
+      sortKey: buildAgentKeyBundleSortKey(createdKeyBundle),
     });
 
     for (const deviceId of normalizedRevokeDeviceIds) {

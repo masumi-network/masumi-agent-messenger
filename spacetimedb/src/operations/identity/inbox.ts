@@ -27,6 +27,7 @@ const {
   upsertInboxAuthLease,
   refreshInboxAuthLeaseForInbox,
   buildAgentKeyBundleKey,
+  buildAgentKeyBundleSortKey,
   getDefaultInboxIdentity,
   getRequiredInboxById,
   getOwnedInboxAnyStatus,
@@ -270,7 +271,7 @@ export const upsertInboxFromOidcIdentity = spacetimedb.reducer(
         updatedAt: ctx.timestamp,
       });
 
-      ctx.db.agentKeyBundle.insert({
+      const createdKeyBundle = ctx.db.agentKeyBundle.insert({
         id: 0n,
         agentDbId: createdInboxActor.id,
         publicIdentity: createdInboxActor.publicIdentity,
@@ -286,6 +287,11 @@ export const upsertInboxFromOidcIdentity = spacetimedb.reducer(
           signingKeyVersion: normalizedSigningVersion,
           signingAlgorithm: normalizedSigningAlgorithm,
           createdAt: ctx.timestamp,
+          sortKey: 'pending',
+      });
+      ctx.db.agentKeyBundle.id.update({
+        ...createdKeyBundle,
+        sortKey: buildAgentKeyBundleSortKey(createdKeyBundle),
       });
 
       upsertInboxDevice(
@@ -431,7 +437,7 @@ export const createInboxIdentity = spacetimedb.reducer(
       updatedAt: ctx.timestamp,
     });
 
-    ctx.db.agentKeyBundle.insert({
+    const createdKeyBundle = ctx.db.agentKeyBundle.insert({
       id: 0n,
       agentDbId: createdAgent.id,
       publicIdentity: createdAgent.publicIdentity,
@@ -447,6 +453,11 @@ export const createInboxIdentity = spacetimedb.reducer(
         signingKeyVersion: normalizedSigningVersion,
         signingAlgorithm: normalizedSigningAlgorithm,
         createdAt: ctx.timestamp,
+        sortKey: 'pending',
+    });
+    ctx.db.agentKeyBundle.id.update({
+      ...createdKeyBundle,
+      sortKey: buildAgentKeyBundleSortKey(createdKeyBundle),
     });
   }
 );

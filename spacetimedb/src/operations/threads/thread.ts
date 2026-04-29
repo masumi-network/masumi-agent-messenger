@@ -146,22 +146,6 @@ function buildVisibleThreadPage(
       .map(agentDbId => tx.db.agent.id.find(agentDbId))
       .filter((actor): actor is NonNullable<typeof actor> => Boolean(actor))
       .map(actor => toSanitizedVisibleAgentRow(tx, inboxId, actor)),
-    bundles: Array.from(actorIds).flatMap(agentDbId =>
-      Array.from(tx.db.agentKeyBundle.agent_key_bundle_agent_db_id.filter(agentDbId)).map(
-        bundle => ({
-          id: bundle.id,
-          agentDbId: bundle.agentDbId,
-          publicIdentity: bundle.publicIdentity,
-          encryptionPublicKey: bundle.encryptionPublicKey,
-          encryptionKeyVersion: bundle.encryptionKeyVersion,
-          encryptionAlgorithm: bundle.encryptionAlgorithm,
-          signingPublicKey: bundle.signingPublicKey,
-          signingKeyVersion: bundle.signingKeyVersion,
-          signingAlgorithm: bundle.signingAlgorithm,
-          createdAt: bundle.createdAt,
-        })
-      )
-    ),
     participants,
     readStates: Array.from(ownActorIds).flatMap(agentDbId =>
       Array.from(tx.db.threadReadState.thread_read_state_agent_db_id.filter(agentDbId))

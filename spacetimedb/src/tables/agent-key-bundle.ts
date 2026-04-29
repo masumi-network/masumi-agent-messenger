@@ -10,6 +10,11 @@ export const agentKeyBundleTable = table(
           columns: ['agentDbId'],
         },
         {
+          accessor: 'agent_key_bundle_agent_db_id_sort_key',
+          algorithm: 'btree',
+          columns: ['agentDbId', 'sortKey'],
+        },
+        {
           accessor: 'agent_key_bundle_public_identity',
           algorithm: 'btree',
           columns: ['publicIdentity'],
@@ -38,5 +43,6 @@ export const agentKeyBundleTable = table(
       signingKeyVersion: t.string(),
       signingAlgorithm: t.string(),
       createdAt: t.timestamp(),
+      sortKey: t.string().default('pending'),
     }
 );

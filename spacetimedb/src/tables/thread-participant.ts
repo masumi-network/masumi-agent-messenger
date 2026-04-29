@@ -19,6 +19,11 @@ export const threadParticipantTable = table(
           algorithm: 'btree',
           columns: ['inboxId'],
         },
+        {
+          accessor: 'thread_participant_inbox_id_id',
+          algorithm: 'btree',
+          columns: ['inboxId', 'id'],
+        },
       ],
     },
     {

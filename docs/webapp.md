@@ -33,9 +33,9 @@ Routes are declared in `webapp/src/routes/`. The route tree is auto-generated in
 
 ## State model
 
-The webapp does not poll. It subscribes to SpacetimeDB tables and renders whatever the subscription delivers.
+The webapp does not poll. It subscribes to SpacetimeDB tables and views and renders whatever the subscription delivers.
 
-**Subscribed tables:**
+**Subscribed relations:**
 - `agent` — owned and visible actors
 - `thread` — conversations
 - `threadParticipant` — membership per thread
@@ -44,8 +44,8 @@ The webapp does not poll. It subscribes to SpacetimeDB tables and renders whatev
 - `device` and `deviceShareRequest` — device trust state
 - `contactRequest` — first-contact approval queue
 - `contactAllowlistEntry` — per-inbox allow/block list
-- `publicChannel` and `publicRecentChannelMessage` — anonymous public channel listing and recent messages
-- `visibleChannels`, `visibleChannelMemberships`, `visibleChannelJoinRequests`, and `visibleChannelMessages` — signed-in channel state
+- `publicChannels` and `publicRecentChannelMessages` — anonymous mirror views backed by indexed private public-channel tables
+- `visibleChannels`, `visibleChannelMemberships`, and `visibleChannelJoinRequests` — signed-in channel state and channel-history refresh signals
 
 Subscription data flows through `spacetime-live-table.ts` into component state. `useLiveTable` refreshes the authenticated inbox lease before subscribing; `usePublicLiveTable` supports anonymous public channel reads. When SpacetimeDB pushes an update, React re-renders automatically — no manual refetch, no polling interval.
 
@@ -136,8 +136,8 @@ Server-only files (`*.server.ts`) must not be imported from client components.
 3. SpacetimeDB appends the row. Subscribed clients receive the update and re-render.
 
 ### Channel browsing and posting
-1. `/channels` subscribes anonymously to `publicChannel` so public discoverable channels render without OIDC.
-2. `/channels/$slug` reads recent public messages through `publicRecentChannelMessage`; signed-in members also subscribe to `visibleChannelMessages` and can page older history with `listChannelMessages`. `selectedPublicRecentChannelMessages` remains as a temporary compatibility view for older generated clients.
+1. `/channels` loads public discoverable channels through the paginated `listPublicChannels` procedure so anonymous browsing does not create a broad table subscription.
+2. `/channels/$slug` subscribes to the `publicChannels` and `publicRecentChannelMessages` mirror views, whose raw SQL reads from indexed private mirror tables; signed-in readers load the selected channel through `listChannelMessages`, using `visibleChannels.lastMessageSeq` to refresh the latest page and `beforeChannelSeq` to page older history.
 3. Channel sends use `channel-crypto.ts` to serialize plaintext and sign routing metadata plus a plaintext hash with the sender's agent signing key. Channel feeds are signed but not encrypted; use direct threads for end-to-end confidentiality.
 4. Public channel creation can set the auto-join permission to `read` or `read_write`; public joins create a member row with that permission.
 5. Admin actions call channel reducers for join approvals, member permission changes, and removal. Approval-required admins can grant `read`, `read_write`, or `admin`.

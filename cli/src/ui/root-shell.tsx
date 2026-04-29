@@ -56,7 +56,6 @@ import {
   sendChannelMessage,
   setChannelMemberPermission,
   updateChannelSettings,
-  verifyChannelMessages,
   type ChannelMemberListItem,
   type ChannelMessageItem,
 } from '../services/channel';
@@ -93,9 +92,14 @@ import {
   type SecretKind,
 } from '../services/secret-store';
 import { getStoredActorKeyPair } from '../services/actor-keys';
-import { decryptVisibleMessage } from '../services/messages';
+import {
+  buildPublicKeysByActorId,
+  decryptVisibleMessage,
+  lookupMessagePublicKeys,
+} from '../services/messages';
 import { findDefaultActorByEmail } from '../../../shared/inbox-state';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
+import type { DbConnection } from '../../../webapp/src/module_bindings';
 import type { VisibleAgentRow, VisibleMessageRow } from '../../../webapp/src/module_bindings/types';
 
 type ShellRoute =
@@ -254,6 +258,7 @@ type ShellConnectionState =
       connection: 'live' | 'reconnecting' | 'error';
       error: string | null;
       auth: AuthSessionContext;
+      conn: DbConnection;
       rows: ShellRows;
     };
 
@@ -278,18 +283,30 @@ type LiveThreadMessage = {
   optimistic?: boolean;
 };
 
+type LiveThreadRenderRow = {
+  key: string;
+  messageIndex: number;
+  text: string;
+  color?: string;
+  bold?: boolean;
+};
+
 type LiveThreadWindow = {
-  visibleMessages: LiveThreadMessage[];
+  visibleRows: LiveThreadRenderRow[];
   firstMessage: LiveThreadMessage | null;
   totalMessages: number;
   windowStart: number;
   windowEnd: number;
+  totalRows: number;
+  rowWindowStart: number;
+  rowWindowEnd: number;
   canScrollOlder: boolean;
   canScrollNewer: boolean;
 };
 
 type ChannelMessagesPageState = {
   channelId: string | null;
+  lastMessageSeq: string | null;
   messages: ChannelMessageItem[];
   beforeSeqStack: Array<string | null>;
   pageIndex: number;
@@ -340,8 +357,6 @@ const DEFAULT_SECURITY_STATE: ShellSecurityState = {
 };
 
 const DEFAULT_AGENT_DISCOVERY_TAKE = 10;
-const THREAD_MESSAGE_WINDOW_SIZE = 4;
-const MAX_MESSAGE_BODY_LINES = 15;
 const MAX_TUI_DESCRIPTION_LINES = 4;
 const CHANNEL_MESSAGE_PAGE_SIZE = 8;
 const CHANNEL_MEMBER_PAGE_SIZE = 8;
@@ -421,6 +436,7 @@ function createInitialDiscoverDetailState(): DiscoverDetailState {
 function createInitialChannelMessagesState(): ChannelMessagesPageState {
   return {
     channelId: null,
+    lastMessageSeq: null,
     messages: [],
     beforeSeqStack: [null],
     pageIndex: 0,
@@ -498,10 +514,6 @@ function maskValue(value: string): string {
   return value ? '•'.repeat(value.length) : '';
 }
 
-function capTextLines(text: string, maxLines: number): string {
-  return capTextToLines(text, maxLines).join('\n');
-}
-
 function capTextToLines(text: string, maxLines: number): string[] {
   const normalized = text.replace(/\r\n/g, '\n');
   const lines = normalized.split('\n');
@@ -539,8 +551,55 @@ function truncateAndPadText(text: string, maxWidth: number): string {
   return `${truncated}${' '.repeat(Math.max(0, maxWidth - Array.from(truncated).length))}`;
 }
 
+function padText(text: string, maxWidth: number): string {
+  return `${text}${' '.repeat(Math.max(0, maxWidth - textWidth(text)))}`;
+}
+
 function textWidth(text: string): number {
   return Array.from(text).length;
+}
+
+function sliceTextWidth(text: string, start: number, end?: number): string {
+  return Array.from(text).slice(start, end).join('');
+}
+
+function wrapSingleLineToWidth(line: string, maxWidth: number): string[] {
+  if (maxWidth <= 0) {
+    return [''];
+  }
+
+  if (textWidth(line) <= maxWidth) {
+    return [line.length > 0 ? line : ' '];
+  }
+
+  const rows: string[] = [];
+  let remaining = line;
+  while (textWidth(remaining) > maxWidth) {
+    const candidate = sliceTextWidth(remaining, 0, maxWidth);
+    const candidateChars = Array.from(candidate);
+    let breakAt = -1;
+    for (let index = candidateChars.length - 1; index > 0; index -= 1) {
+      if (/\s/.test(candidateChars[index] ?? '')) {
+        breakAt = index;
+        break;
+      }
+    }
+
+    const nextBreak = breakAt > 0 ? breakAt : maxWidth;
+    const row = sliceTextWidth(remaining, 0, nextBreak).trimEnd();
+    rows.push(row.length > 0 ? row : ' ');
+    remaining = sliceTextWidth(remaining, nextBreak).trimStart();
+  }
+
+  rows.push(remaining.length > 0 ? remaining : ' ');
+  return rows;
+}
+
+function wrapTextToLines(text: string, maxWidth: number): string[] {
+  const normalized = text.replace(/\r\n/g, '\n');
+  return normalized
+    .split('\n')
+    .flatMap(line => wrapSingleLineToWidth(line, maxWidth));
 }
 
 function formatDiscoveryListRow(params: {
@@ -996,6 +1055,7 @@ function useRootShellConnection(profileName: string) {
             connection: 'live',
             error: null,
             auth,
+            conn,
             rows: readShellRows(conn),
           });
         };
@@ -1210,7 +1270,68 @@ function mergeLiveThreadMessages(params: {
   return [...byId.values()].sort(compareLiveThreadMessages);
 }
 
+function buildThreadMessageRenderRows(params: {
+  messages: LiveThreadMessage[];
+  width: number;
+}): LiveThreadRenderRow[] {
+  const safeWidth = Math.max(1, params.width);
+  const bodyWidth = Math.max(1, safeWidth - 2);
+
+  return params.messages.flatMap((message, messageIndex) => {
+    const header = `${message.senderLabel} · ${formatTimestamp(message.createdAt)}${
+      message.optimistic ? ' · syncing...' : ''
+    }`;
+    const rows: LiveThreadRenderRow[] = [
+      {
+        key: `${message.id}:header`,
+        messageIndex,
+        text: padText(sliceTextWidth(header, 0, safeWidth), safeWidth),
+        color: 'cyan',
+        bold: true,
+      },
+    ];
+
+    if (message.trustNotice) {
+      rows.push({
+        key: `${message.id}:trust-notice`,
+        messageIndex,
+        text: padText(sliceTextWidth(`  ${message.trustNotice}`, 0, safeWidth), safeWidth),
+        color: 'yellow',
+      });
+    }
+
+    if (message.trustWarning) {
+      rows.push({
+        key: `${message.id}:trust-warning`,
+        messageIndex,
+        text: padText(sliceTextWidth(`  ${message.trustWarning}`, 0, safeWidth), safeWidth),
+        color: 'red',
+      });
+    }
+
+    const body = message.body.trim().length > 0 ? message.body : '(empty message)';
+    const bodyRows = wrapTextToLines(body, bodyWidth);
+    bodyRows.forEach((line, rowIndex) => {
+      rows.push({
+        key: `${message.id}:body:${rowIndex.toString()}:${line}`,
+        messageIndex,
+        text: padText(`  ${line.length > 0 ? line : ' '}`, safeWidth),
+        color: message.body.trim().length > 0 ? undefined : 'gray',
+      });
+    });
+
+    rows.push({
+      key: `${message.id}:gap`,
+      messageIndex,
+      text: padText(' ', safeWidth),
+    });
+
+    return rows;
+  });
+}
+
 async function buildLiveThreadMessages(params: {
+  conn: DbConnection;
   rows: ShellRows;
   auth: AuthSessionContext;
   normalizedEmail: string;
@@ -1238,12 +1359,6 @@ async function buildLiveThreadMessages(params: {
     },
   });
   const actorsById = new Map(params.rows.actors.map(row => [row.id, row] as const));
-  const bundlesByActorId = new Map<bigint, typeof params.rows.bundles>();
-  for (const bundle of params.rows.bundles) {
-    const list = bundlesByActorId.get(bundle.agentDbId) ?? [];
-    list.push(bundle);
-    bundlesByActorId.set(bundle.agentDbId, list);
-  }
   const ownActorIds = new Set(
     params.rows.actors
       .filter(row => row.inboxId === actor.inboxId)
@@ -1253,6 +1368,15 @@ async function buildLiveThreadMessages(params: {
   const threadMessages = params.rows.messages
     .filter(message => message.threadId === requestedThreadId)
     .sort(compareVisibleThreadMessages);
+  const publicKeysByActorId = buildPublicKeysByActorId(
+    await lookupMessagePublicKeys({
+      conn: params.conn,
+      agentDbId: actor.id,
+      messages: threadMessages,
+      secretEnvelopes: params.rows.secretEnvelopes,
+      actorsById,
+    })
+  );
 
   return await Promise.all(
     threadMessages.map(async message => {
@@ -1261,7 +1385,7 @@ async function buildLiveThreadMessages(params: {
         message,
         defaultActor: actor,
         actorsById,
-        bundlesByActorId,
+        publicKeysByActorId,
         ownActorIds,
         secretEnvelopes: params.rows.secretEnvelopes,
         recipientKeyPair,
@@ -1294,13 +1418,15 @@ function useLiveThreadMessages(params: {
   optimisticMessages: LiveThreadMessage[];
   refreshToken: string;
   inboxFocus: InboxFocus;
+  messageWidth: number;
+  messageMaxRows: number;
 }) {
   const [threadMessages, setThreadMessages] = useState<LiveThreadMessage[]>([]);
   const [threadMessagesError, setThreadMessagesError] = useState<string | null>(null);
-  const [scrollOffset, setScrollOffset] = useState(0);
+  const [rowScrollOffset, setRowScrollOffset] = useState(0);
 
   useEffect(() => {
-    setScrollOffset(0);
+    setRowScrollOffset(0);
   }, [params.selectedInboxItem?.threadId]);
 
   useEffect(() => {
@@ -1312,12 +1438,13 @@ function useLiveThreadMessages(params: {
     ) {
       setThreadMessages([]);
       setThreadMessagesError(null);
-      setScrollOffset(0);
+      setRowScrollOffset(0);
       return;
     }
 
     let cancelled = false;
     void buildLiveThreadMessages({
+      conn: params.connectionState.conn,
       rows: params.connectionState.rows,
       auth: params.connectionState.auth,
       normalizedEmail: params.normalizedEmail,
@@ -1350,17 +1477,6 @@ function useLiveThreadMessages(params: {
     params.inboxFocus,
   ]);
 
-  useEffect(() => {
-    const maxOffset = Math.max(
-      mergeLiveThreadMessages({
-        liveMessages: threadMessages,
-        optimisticMessages: params.optimisticMessages,
-      }).length - THREAD_MESSAGE_WINDOW_SIZE,
-      0
-    );
-    setScrollOffset(current => Math.min(current, maxOffset));
-  }, [threadMessages, params.optimisticMessages]);
-
   const allMessages = useMemo(
     () =>
       mergeLiveThreadMessages({
@@ -1370,132 +1486,124 @@ function useLiveThreadMessages(params: {
     [threadMessages, params.optimisticMessages]
   );
 
+  const allRows = useMemo(
+    () =>
+      buildThreadMessageRenderRows({
+        messages: allMessages,
+        width: params.messageWidth,
+      }),
+    [allMessages, params.messageWidth]
+  );
+
+  useEffect(() => {
+    const maxOffset = Math.max(allRows.length - params.messageMaxRows, 0);
+    setRowScrollOffset(current => Math.min(current, maxOffset));
+  }, [allRows.length, params.messageMaxRows]);
+
   const window = useMemo<LiveThreadWindow>(() => {
     const totalMessages = allMessages.length;
-    const windowEnd = Math.max(totalMessages - scrollOffset, 0);
-    const windowStart = Math.max(0, windowEnd - THREAD_MESSAGE_WINDOW_SIZE);
+    const maxRows = Math.max(1, params.messageMaxRows);
+    const rowWindowEnd = Math.max(allRows.length - rowScrollOffset, 0);
+    const rowWindowStart = Math.max(0, rowWindowEnd - maxRows);
+    const visibleRows = allRows.slice(rowWindowStart, rowWindowEnd);
+    const visibleMessageIndexes = visibleRows.map(row => row.messageIndex);
+    const windowStart =
+      visibleMessageIndexes.length > 0 ? Math.min(...visibleMessageIndexes) : 0;
+    const windowEnd =
+      visibleMessageIndexes.length > 0 ? Math.max(...visibleMessageIndexes) + 1 : 0;
 
     return {
-      visibleMessages: allMessages.slice(windowStart, windowEnd),
+      visibleRows,
       firstMessage: allMessages[0] ?? null,
       totalMessages,
       windowStart,
       windowEnd,
-      canScrollOlder: windowStart > 0,
-      canScrollNewer: windowEnd < totalMessages,
+      totalRows: allRows.length,
+      rowWindowStart,
+      rowWindowEnd,
+      canScrollOlder: rowWindowStart > 0,
+      canScrollNewer: rowWindowEnd < allRows.length,
     };
-  }, [allMessages, scrollOffset]);
+  }, [allMessages, allRows, params.messageMaxRows, rowScrollOffset]);
 
   return {
-    threadMessages: window.visibleMessages,
+    threadMessageRows: window.visibleRows,
     threadMessagesError,
     firstThreadMessage: window.firstMessage,
     totalThreadMessages: window.totalMessages,
     threadWindowStart: window.windowStart,
     threadWindowEnd: window.windowEnd,
+    totalThreadRows: window.totalRows,
+    threadRowWindowStart: window.rowWindowStart,
+    threadRowWindowEnd: window.rowWindowEnd,
     canScrollOlder: window.canScrollOlder,
     canScrollNewer: window.canScrollNewer,
     scrollOlder: () =>
-      setScrollOffset(current =>
-        Math.min(
-          current + THREAD_MESSAGE_WINDOW_SIZE,
-          Math.max(allMessages.length - THREAD_MESSAGE_WINDOW_SIZE, 0)
-        )
+      setRowScrollOffset(current =>
+        Math.min(current + 1, Math.max(allRows.length - params.messageMaxRows, 0))
       ),
     scrollNewer: () =>
-      setScrollOffset(current => Math.max(current - THREAD_MESSAGE_WINDOW_SIZE, 0)),
-    resetThreadWindow: () => setScrollOffset(0),
+      setRowScrollOffset(current => Math.max(current - 1, 0)),
+    resetThreadWindow: () => setRowScrollOffset(0),
   };
 }
 
-function useLiveChannelMessages(params: {
-  connectionState: ShellConnectionState;
-  routeType: ShellRoute['type'];
-  channelMode: ChannelMode;
-  channelTab: ChannelTab;
-  selectedChannelId: string | null;
-}): {
-  liveChannelMessages: ChannelMessageItem[];
-  liveChannelMessagesError: string | null;
-  liveChannelMessagesLoading: boolean;
-  liveChannelMessagesLoaded: boolean;
-} {
-  const [messages, setMessages] = useState<ChannelMessageItem[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+type RenderListRow = {
+  key: string;
+  text: string;
+  selected: boolean;
+};
 
-  useEffect(() => {
-    if (
-      params.connectionState.mode !== 'ready' ||
-      params.routeType !== 'channels' ||
-      params.channelMode !== 'detail' ||
-      params.channelTab !== 'messages' ||
-      !params.selectedChannelId
-    ) {
-      setMessages([]);
-      setError(null);
-      setLoading(false);
-      setLoaded(false);
-      return;
-    }
+function buildWrappedListRows(params: {
+  items: string[];
+  selectedIndex: number;
+  width: number;
+}): RenderListRow[] {
+  return params.items.flatMap((item, itemIndex) => {
+    const selected = itemIndex === params.selectedIndex;
+    const firstPrefix = selected ? '▸ ' : '  ';
+    const continuationPrefix = '  ';
+    const rawLines = item.replace(/\r\n/g, '\n').split('\n');
+    const rows: RenderListRow[] = [];
 
-    let cancelled = false;
-    const selectedChannelId = params.selectedChannelId;
-    const rows = params.connectionState.rows.channelMessages
-      .filter(message => message.channelId.toString() === selectedChannelId)
-      .sort((left, right) => {
-        if (left.channelSeq < right.channelSeq) return -1;
-        if (left.channelSeq > right.channelSeq) return 1;
-        return Number(left.id - right.id);
-      })
-      .slice(-CHANNEL_MESSAGE_PAGE_SIZE);
-
-    setLoading(true);
-    void verifyChannelMessages(
-      null,
-      rows.map(message => ({
-        ...message,
-        replyToMessageId: message.replyToMessageId ?? null,
-      }))
-    )
-      .then(result => {
-        if (!cancelled) {
-          setMessages(result);
-          setError(null);
-          setLoaded(true);
-        }
-      })
-      .catch(cause => {
-        if (!cancelled) {
-          setMessages([]);
-          setError(toCliError(cause).message);
-          setLoaded(true);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-        }
+    rawLines.forEach((rawLine, rawLineIndex) => {
+      const prefix = rawLineIndex === 0 ? firstPrefix : continuationPrefix;
+      const bodyWidth = Math.max(1, params.width - textWidth(prefix));
+      const wrappedLines = wrapSingleLineToWidth(rawLine, bodyWidth);
+      wrappedLines.forEach((line, wrappedIndex) => {
+        const linePrefix = rawLineIndex === 0 && wrappedIndex === 0 ? firstPrefix : continuationPrefix;
+        rows.push({
+          key: `${itemIndex}:${rawLineIndex}:${wrappedIndex}:${line}`,
+          text: padText(`${linePrefix}${line}`, params.width),
+          selected,
+        });
       });
+    });
 
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    params.channelMode,
-    params.channelTab,
-    params.connectionState,
-    params.routeType,
-    params.selectedChannelId,
-  ]);
+    return rows;
+  });
+}
 
-  return {
-    liveChannelMessages: messages,
-    liveChannelMessagesError: error,
-    liveChannelMessagesLoading: loading,
-    liveChannelMessagesLoaded: loaded,
-  };
+function sliceListRowsAroundSelection(params: {
+  rows: RenderListRow[];
+  maxRows?: number;
+}): RenderListRow[] {
+  if (!params.maxRows || params.maxRows <= 0 || params.rows.length <= params.maxRows) {
+    return params.rows;
+  }
+
+  const selectedRowIndexes = params.rows
+    .map((row, index) => (row.selected ? index : -1))
+    .filter(index => index >= 0);
+  const selectedStart = selectedRowIndexes[0] ?? 0;
+  const selectedEnd = selectedRowIndexes[selectedRowIndexes.length - 1] ?? selectedStart;
+  let start = Math.max(0, selectedEnd - params.maxRows + 1);
+  if (selectedStart < start) {
+    start = selectedStart;
+  }
+  start = Math.min(start, Math.max(0, params.rows.length - params.maxRows));
+
+  return params.rows.slice(start, start + params.maxRows);
 }
 
 function renderList(params: {
@@ -1504,6 +1612,7 @@ function renderList(params: {
   empty: string;
   color?: string;
   maxWidth?: number;
+  maxRows?: number;
 }) {
   if (params.items.length === 0) {
     return (
@@ -1513,22 +1622,45 @@ function renderList(params: {
     );
   }
 
+  const width = params.maxWidth ? Math.max(1, params.maxWidth) : undefined;
+  const rows = width
+      ? sliceListRowsAroundSelection({
+        rows: buildWrappedListRows({
+          items: params.items,
+          selectedIndex: params.selectedIndex,
+          width,
+        }),
+        maxRows: params.maxRows,
+      })
+    : [];
+
   return (
     <Box flexDirection="column" width={params.maxWidth}>
-      {params.items.map((item, index) => {
-        const selected = index === params.selectedIndex;
-        const row = `${selected ? '▸ ' : '  '}${item}`;
-        return (
+      {width
+        ? rows.map(row => (
           <Text
-            key={`${index}:${item}`}
-            color={selected ? 'cyan' : params.color}
-            bold={selected}
+            key={row.key}
+            color={row.selected ? 'cyan' : params.color}
+            bold={row.selected}
             wrap="truncate"
           >
-            {params.maxWidth ? truncateAndPadText(row, params.maxWidth) : row}
+            {row.text}
           </Text>
-        );
-      })}
+        ))
+        : params.items.map((item, index) => {
+            const selected = index === params.selectedIndex;
+            const row = `${selected ? '▸ ' : '  '}${item}`;
+            return (
+              <Text
+                key={`${index}:${item}`}
+                color={selected ? 'cyan' : params.color}
+                bold={selected}
+                wrap="wrap"
+              >
+                {row}
+              </Text>
+            );
+          })}
     </Box>
   );
 }
@@ -1690,56 +1822,22 @@ function TabStrip<T extends string>({
 }
 
 function MessageBodyLines({ text, width }: { text: string; width?: number }) {
-  const lines = capTextToLines(text, MAX_MESSAGE_BODY_LINES);
   const safeWidth = width ? Math.max(1, width - 2) : undefined;
+  const lines = safeWidth
+    ? wrapTextToLines(text, safeWidth)
+    : text.replace(/\r\n/g, '\n').split('\n');
+
   return (
     <Box flexDirection="column" marginLeft={2} width={safeWidth}>
       {lines.map((line, index) => (
         <Text key={`${index}:${line}`} wrap="truncate">
           {safeWidth
-            ? truncateAndPadText(line.length > 0 ? line : ' ', safeWidth)
+            ? padText(line.length > 0 ? line : ' ', safeWidth)
             : line.length > 0
               ? line
               : ' '}
         </Text>
       ))}
-    </Box>
-  );
-}
-
-function ThreadMessageBlock({
-  message,
-  width,
-}: {
-  message: LiveThreadMessage;
-  width?: number;
-}) {
-  const safeWidth = width ? Math.max(1, width) : undefined;
-  const header = `${message.senderLabel} · ${formatTimestamp(message.createdAt)}${
-    message.optimistic ? ' · syncing...' : ''
-  }`;
-  return (
-    <Box key={message.id} flexDirection="column" marginBottom={1} width="100%">
-      <Box marginBottom={1}>
-        <Text color="cyan" wrap="truncate" bold>
-          {safeWidth ? truncateAndPadText(header, safeWidth) : header}
-        </Text>
-      </Box>
-      {message.trustNotice ? (
-        <Text color="yellow" wrap="truncate">
-          {safeWidth
-            ? truncateAndPadText(`  ${message.trustNotice}`, safeWidth)
-            : `  ${message.trustNotice}`}
-        </Text>
-      ) : null}
-      {message.trustWarning ? (
-        <Text color="red" wrap="truncate">
-          {safeWidth
-            ? truncateAndPadText(`  ${message.trustWarning}`, safeWidth)
-            : `  ${message.trustWarning}`}
-        </Text>
-      ) : null}
-      <MessageBodyLines text={message.body} width={safeWidth} />
     </Box>
   );
 }
@@ -2116,6 +2214,9 @@ export function RootShell({
   void onHandoff;
   const { exit } = useApp();
   const terminalSize = useTerminalSize();
+  const contentListWidth = Math.max(1, terminalSize.columns - SIDEBAR_WIDTH - 3);
+  const contentListMaxRows = Math.max(3, terminalSize.rows - 12);
+  const threadMessageMaxRows = Math.max(3, terminalSize.rows - 15);
   const { state: connectionState, reconnect } = useRootShellConnection(options.profile);
   const [route, setRoute] = useState<ShellRoute>(initialSnapshot?.route ?? { type: 'auth' });
   const [activeInboxSlug, setActiveInboxSlug] = useState<string | null>(
@@ -2465,12 +2566,15 @@ export function RootShell({
   });
 
   const {
-    threadMessages,
+    threadMessageRows,
     threadMessagesError,
     firstThreadMessage,
     totalThreadMessages,
     threadWindowStart,
     threadWindowEnd,
+    totalThreadRows,
+    threadRowWindowStart,
+    threadRowWindowEnd,
     canScrollOlder,
     canScrollNewer,
     scrollOlder,
@@ -2488,6 +2592,8 @@ export function RootShell({
         : [],
     refreshToken: `${liveInboxRefreshToken}:${securityRefreshToken}`,
     inboxFocus,
+    messageWidth: contentListWidth,
+    messageMaxRows: threadMessageMaxRows,
   });
 
   const selectedInboxItemKind = selectedInboxItem?.kind ?? null;
@@ -2625,25 +2731,10 @@ export function RootShell({
     ],
     [selectedChannel?.isAdmin, selectedChannelApprovals.length]
   );
-  const {
-    liveChannelMessages,
-    liveChannelMessagesError,
-    liveChannelMessagesLoading,
-    liveChannelMessagesLoaded,
-  } = useLiveChannelMessages({
-    connectionState,
-    routeType: route.type,
-    channelMode,
-    channelTab,
-    selectedChannelId: selectedChannel?.id ?? null,
-  });
   const selectedChannelMessagePageIndex =
     channelMessagesState.channelId === selectedChannel?.id ? channelMessagesState.pageIndex : 0;
-  const shouldUseLiveChannelMessages =
-    selectedChannel !== null && selectedChannelMessagePageIndex === 0;
-  const selectedChannelMessageItems = shouldUseLiveChannelMessages
-    ? liveChannelMessages
-    : channelMessagesState.channelId === selectedChannel?.id
+  const selectedChannelMessageItems =
+    channelMessagesState.channelId === selectedChannel?.id
       ? channelMessagesState.messages
       : [];
   const selectedChannelMemberItems =
@@ -2654,17 +2745,13 @@ export function RootShell({
     selectedChannelMemberItems[clampIndex(channelMemberIndex, selectedChannelMemberItems.length)] ??
     null;
   const selectedChannelMessagesLoading =
-    shouldUseLiveChannelMessages
-      ? liveChannelMessagesLoading && !liveChannelMessagesLoaded
-      : channelMessagesState.channelId === selectedChannel?.id && channelMessagesState.loading;
+    channelMessagesState.channelId === selectedChannel?.id && channelMessagesState.loading;
   const selectedChannelMembersLoading =
     channelMembersState.channelId === selectedChannel?.id && channelMembersState.loading;
   const selectedChannelMessagesError =
-    shouldUseLiveChannelMessages
-      ? liveChannelMessagesError
-      : channelMessagesState.channelId === selectedChannel?.id
-        ? channelMessagesState.error
-        : null;
+    channelMessagesState.channelId === selectedChannel?.id
+      ? channelMessagesState.error
+      : null;
   const selectedChannelMembersError =
     channelMembersState.channelId === selectedChannel?.id ? channelMembersState.error : null;
   const canPageChannelMessagesNewer = selectedChannelMessagePageIndex > 0;
@@ -3093,6 +3180,7 @@ export function RootShell({
     setChannelMessagesState(current => ({
       ...current,
       channelId: selectedChannel.id,
+      lastMessageSeq: selectedChannel.lastMessageSeq,
       loading: true,
       error: null,
       beforeSeqStack,
@@ -3115,6 +3203,7 @@ export function RootShell({
 
       setChannelMessagesState({
         channelId: selectedChannel.id,
+        lastMessageSeq: selectedChannel.lastMessageSeq,
         messages: result.messages,
         beforeSeqStack,
         pageIndex,
@@ -3129,6 +3218,7 @@ export function RootShell({
       setChannelMessagesState(current => ({
         ...current,
         channelId: selectedChannel.id,
+        lastMessageSeq: selectedChannel.lastMessageSeq,
         loading: false,
         loaded: true,
         error: toCliError(error).message,
@@ -3285,7 +3375,17 @@ export function RootShell({
     if (route.type !== 'channels' || channelMode !== 'detail' || channelTab !== 'messages') {
       return;
     }
-    if (!selectedChannel || channelMessagesState.channelId === selectedChannel.id) {
+    if (!selectedChannel) {
+      return;
+    }
+    const stateMatchesChannel = channelMessagesState.channelId === selectedChannel.id;
+    const shouldLoadSelectedChannel =
+      !stateMatchesChannel ||
+      (!channelMessagesState.loading &&
+        channelMessagesState.pageIndex === 0 &&
+        channelMessagesState.lastMessageSeq !== selectedChannel.lastMessageSeq) ||
+      (!channelMessagesState.loading && !channelMessagesState.loaded);
+    if (!shouldLoadSelectedChannel) {
       return;
     }
     void loadSelectedChannelMessages({
@@ -3295,10 +3395,15 @@ export function RootShell({
     });
   }, [
     channelMessagesState.channelId,
+    channelMessagesState.lastMessageSeq,
+    channelMessagesState.loaded,
+    channelMessagesState.loading,
+    channelMessagesState.pageIndex,
     channelMode,
     channelTab,
     route.type,
     selectedChannel?.id,
+    selectedChannel?.lastMessageSeq,
   ]);
 
   useEffect(() => {
@@ -6142,7 +6247,6 @@ export function RootShell({
   const headerRuleWidth = Math.max(0, Math.min(terminalSize.columns - 22, 58));
   const fullRuleWidth = Math.max(0, Math.min(terminalSize.columns, 80));
   const fullContentWidth = Math.max(1, fullRuleWidth);
-  const contentListWidth = Math.max(1, terminalSize.columns - SIDEBAR_WIDTH - 3);
   const activePanelWidth = model ? contentListWidth : fullContentWidth;
 
   const contentHeader = (
@@ -6719,22 +6823,26 @@ export function RootShell({
 
         {route.type === 'inboxes' ? (
           <Box flexDirection="column">
-            <FixedLine
-              text={`section ${inboxSection} · filter ${threadFilter}`}
-              width={contentListWidth}
-              color="gray"
-            />
-            <Box marginTop={1}>
-              <TabStrip
-                tabs={model.inboxes.sections.map(section => ({
-                  key: section.key,
-                  label: section.label,
-                  count: section.count,
-                }))}
-                active={inboxSection}
-                width={contentListWidth}
-              />
-            </Box>
+            {inboxFocus === 'navigator' ? (
+              <>
+                <FixedLine
+                  text={`section ${inboxSection} · filter ${threadFilter}`}
+                  width={contentListWidth}
+                  color="gray"
+                />
+                <Box marginTop={1}>
+                  <TabStrip
+                    tabs={model.inboxes.sections.map(section => ({
+                      key: section.key,
+                      label: section.label,
+                      count: section.count,
+                    }))}
+                    active={inboxSection}
+                    width={contentListWidth}
+                  />
+                </Box>
+              </>
+            ) : null}
             {inboxFocus === 'navigator' ? (
               <Box marginTop={1} flexDirection="column">
                 <Text color="cyan" bold>
@@ -6748,16 +6856,16 @@ export function RootShell({
                       ? 'No pending requests for this agent.'
                       : 'No threads match this section and filter.',
                   maxWidth: contentListWidth,
+                  maxRows: contentListMaxRows,
                 })}
               </Box>
             ) : null}
             <Box marginTop={1} flexDirection="column">
-              <Text
-                color={inboxFocus === 'detail' || inboxFocus === 'composer' ? 'cyan' : 'white'}
-                bold={inboxFocus === 'detail' || inboxFocus === 'composer'}
-              >
-                ◆ Thread detail
-              </Text>
+              {inboxFocus === 'navigator' ? (
+                <Text color="white" bold={false}>
+                  ◆ Thread detail
+                </Text>
+              ) : null}
               {selectedRequest ? (
                 <Box flexDirection="column">
                   <FixedLine
@@ -6780,9 +6888,10 @@ export function RootShell({
                     </Box>
                   ) : null}
                   {firstThreadMessage ? (
-                    <Text>
-                      First message: <Text color="white">{capTextLines(firstThreadMessage.body, MAX_MESSAGE_BODY_LINES)}</Text>
-                    </Text>
+                    <Box marginTop={1} flexDirection="column">
+                      <Text color="gray">First message</Text>
+                      <MessageBodyLines text={firstThreadMessage.body} width={contentListWidth} />
+                    </Box>
                   ) : selectedRequest.direction === 'outgoing' ? (
                     <Box marginTop={1} flexDirection="column">
                       <Text color="yellow">
@@ -6842,18 +6951,25 @@ export function RootShell({
                             totalThreadMessages === 0
                               ? '0-0'
                               : `${(threadWindowStart + 1).toString()}-${threadWindowEnd.toString()}`
-                          } of ${totalThreadMessages.toString()}`}
+                          } of ${totalThreadMessages.toString()}${
+                            totalThreadRows > threadMessageMaxRows
+                              ? ` · rows ${(threadRowWindowStart + 1).toString()}-${threadRowWindowEnd.toString()} of ${totalThreadRows.toString()}`
+                              : ''
+                          }`}
                           width={contentListWidth}
                           color="gray"
                         />
                         {threadMessagesError ? <Text color="red">✗ {threadMessagesError}</Text> : null}
-                        {threadMessages.length > 0 ? (
-                          threadMessages.map(message => (
-                            <ThreadMessageBlock
-                              key={message.id}
-                              message={message}
-                              width={contentListWidth}
-                            />
+                        {threadMessageRows.length > 0 ? (
+                          threadMessageRows.map(row => (
+                            <Text
+                              key={row.key}
+                              color={row.color}
+                              bold={row.bold}
+                              wrap="truncate"
+                            >
+                              {row.text}
+                            </Text>
                           ))
                         ) : (
                           <Text color="gray">No visible messages yet.</Text>
@@ -6938,6 +7054,7 @@ export function RootShell({
                     selectedIndex: clampIndex(selectedChannelIndex, model.channels.channels.length),
                     empty: 'No channels for the active agent yet. Press N or + to add one.',
                     maxWidth: contentListWidth,
+                    maxRows: contentListMaxRows,
                   })}
                 {selectedChannel ? (
                   <Box marginTop={1} flexDirection="column">
@@ -7081,6 +7198,7 @@ export function RootShell({
                           ),
                           empty: 'No visible channel members yet.',
                           maxWidth: contentListWidth,
+                          maxRows: contentListMaxRows,
                         })}
                         {selectedChannelMember ? (
                           <Box marginTop={1} flexDirection="column">
@@ -7120,6 +7238,7 @@ export function RootShell({
                       ),
                       empty: `No pending join approvals for #${selectedChannel.slug}.`,
                       maxWidth: contentListWidth,
+                      maxRows: contentListMaxRows,
                     })}
                     {selectedChannelApproval ? (
                       <Box marginTop={1} flexDirection="column">
@@ -7170,6 +7289,7 @@ export function RootShell({
                 selectedIndex: clampIndex(selectedAgentIndex, model.agents.agentSummaries.length),
                 empty: 'No owned agents found.',
                 maxWidth: contentListWidth,
+                maxRows: contentListMaxRows,
               })}
               {selectedAgent ? (
                 <Box marginTop={1} flexDirection="column">
@@ -7430,6 +7550,7 @@ export function RootShell({
                   selectedIndex: clampIndex(securityActionIndex, securityActions.length),
                   empty: 'No account actions available.',
                   maxWidth: contentListWidth,
+                  maxRows: contentListMaxRows,
                 })}
               </Box>
             ) : (
@@ -7453,6 +7574,7 @@ export function RootShell({
                   selectedIndex: clampIndex(deviceSelection, model.account.devices.length),
                   empty: 'No trusted devices found.',
                   maxWidth: contentListWidth,
+                  maxRows: contentListMaxRows,
                 })}
               </Box>
             )}

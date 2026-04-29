@@ -19,6 +19,16 @@ export const channelTable = table(
           algorithm: 'btree',
           columns: ['discoverable'],
         },
+        {
+          accessor: 'channel_access_mode_discoverable_sort_key',
+          algorithm: 'btree',
+          columns: ['accessMode', 'discoverableSortKey'],
+        },
+        {
+          accessor: 'channel_discoverable_sort_key',
+          algorithm: 'btree',
+          columns: ['discoverable', 'discoverableSortKey'],
+        },
       ],
     },
     {

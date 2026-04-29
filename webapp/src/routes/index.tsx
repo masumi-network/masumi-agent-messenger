@@ -66,7 +66,7 @@ import type { DbConnection } from '@/module_bindings';
 import type {
   Agent,
   Inbox as InboxRow,
-  PublicChannel,
+  PublicChannelMirrorRow,
   PublicRecentChannelMessage,
 } from '@/module_bindings/types';
 import {
@@ -955,16 +955,16 @@ function PublicRootChannel({ channelId }: { channelId: bigint }) {
   const connectionState = useSpacetimeDB();
   const connection = connectionState.getConnection?.() as DbConnection | null;
   const channelQuery = useMemo(
-    () => tables.publicChannel.where(row => row.channelId.eq(channelId)),
+    () => tables.publicChannels.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
   const messageQuery = useMemo(
-    () => tables.publicRecentChannelMessage.where(row => row.channelId.eq(channelId)),
+    () => tables.publicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
-  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannel>(
+  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannelMirrorRow>(
     channelQuery,
-    'publicChannel'
+    'publicChannels'
   );
   const channel = useMemo(
     () => channels.find(row => row.channelId === channelId) ?? null,
@@ -972,7 +972,7 @@ function PublicRootChannel({ channelId }: { channelId: bigint }) {
   );
   const [messages, messagesReady, messagesError] = usePublicLiveTable<PublicRecentChannelMessage>(
     messageQuery,
-    'publicRecentChannelMessage',
+    'publicRecentChannelMessages',
     { enabled: channel !== null }
   );
   const [decryptedByKey, setDecryptedByKey] = useState<

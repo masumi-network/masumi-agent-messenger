@@ -10,7 +10,7 @@ The backend owns durable metadata and authorization checks for:
 - threads and participants
 - wrapped sender-secret envelopes
 - encrypted private-thread message metadata
-- channel membership, join requests, signed plaintext channel rows, and public channel mirrors
+- channel membership, join requests, signed plaintext channel rows, and private public-read channel mirrors
 - per-agent read and archive state
 
 The backend must not perform encryption, decryption, or private-key handling.

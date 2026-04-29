@@ -52,8 +52,28 @@ export const AgentKeyBundle = __t.object("AgentKeyBundle", {
   signingKeyVersion: __t.string(),
   signingAlgorithm: __t.string(),
   createdAt: __t.timestamp(),
+  sortKey: __t.string(),
 });
 export type AgentKeyBundle = __Infer<typeof AgentKeyBundle>;
+
+export const AgentPublicKeyLookupRequest = __t.object("AgentPublicKeyLookupRequest", {
+  agentDbId: __t.u64(),
+  keyKind: __t.string(),
+  keyVersion: __t.string(),
+});
+export type AgentPublicKeyLookupRequest = __Infer<typeof AgentPublicKeyLookupRequest>;
+
+export const AgentPublicKeyLookupRow = __t.object("AgentPublicKeyLookupRow", {
+  agentDbId: __t.u64(),
+  publicIdentity: __t.string(),
+  keyKind: __t.string(),
+  keyVersion: __t.string(),
+  publicKey: __t.string(),
+  algorithm: __t.string(),
+  keyBundleId: __t.option(__t.u64()),
+  createdAt: __t.timestamp(),
+});
+export type AgentPublicKeyLookupRow = __Infer<typeof AgentPublicKeyLookupRow>;
 
 export const Channel = __t.object("Channel", {
   id: __t.u64(),
@@ -419,8 +439,45 @@ export const PublicChannel = __t.object("PublicChannel", {
   updatedAt: __t.timestamp(),
   lastMessageAt: __t.timestamp(),
   publicJoinPermission: __t.string(),
+  sortKey: __t.string(),
 });
 export type PublicChannel = __Infer<typeof PublicChannel>;
+
+export const PublicChannelMirrorRow = __t.object("PublicChannelMirrorRow", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  slug: __t.string(),
+  title: __t.option(__t.string()),
+  description: __t.option(__t.string()),
+  accessMode: __t.string(),
+  discoverable: __t.bool(),
+  lastMessageSeq: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+  lastMessageAt: __t.timestamp(),
+  publicJoinPermission: __t.string(),
+  sortKey: __t.string(),
+});
+export type PublicChannelMirrorRow = __Infer<typeof PublicChannelMirrorRow>;
+
+export const PublicChannelPageRow = __t.object("PublicChannelPageRow", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  slug: __t.string(),
+  title: __t.option(__t.string()),
+  description: __t.option(__t.string()),
+  accessMode: __t.string(),
+  discoverable: __t.bool(),
+  lastMessageSeq: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+  lastMessageAt: __t.timestamp(),
+  publicJoinPermission: __t.string(),
+});
+export type PublicChannelPageRow = __Infer<typeof PublicChannelPageRow>;
+
+export const PublicChannels = __t.object("PublicChannels", {});
+export type PublicChannels = __Infer<typeof PublicChannels>;
 
 export const PublicRecentChannelMessage = __t.object("PublicRecentChannelMessage", {
   id: __t.u64(),
@@ -438,6 +495,26 @@ export const PublicRecentChannelMessage = __t.object("PublicRecentChannelMessage
   senderSigningPublicKey: __t.string(),
 });
 export type PublicRecentChannelMessage = __Infer<typeof PublicRecentChannelMessage>;
+
+export const PublicRecentChannelMessageRow = __t.object("PublicRecentChannelMessageRow", {
+  id: __t.u64(),
+  channelId: __t.u64(),
+  channelSeq: __t.u64(),
+  channelSeqKey: __t.string(),
+  senderAgentDbId: __t.u64(),
+  senderPublicIdentity: __t.string(),
+  senderSeq: __t.u64(),
+  senderSigningKeyVersion: __t.string(),
+  plaintext: __t.string(),
+  signature: __t.string(),
+  replyToMessageId: __t.option(__t.u64()),
+  createdAt: __t.timestamp(),
+  senderSigningPublicKey: __t.string(),
+});
+export type PublicRecentChannelMessageRow = __Infer<typeof PublicRecentChannelMessageRow>;
+
+export const PublicRecentChannelMessages = __t.object("PublicRecentChannelMessages", {});
+export type PublicRecentChannelMessages = __Infer<typeof PublicRecentChannelMessages>;
 
 export const PublishedAgentLookupRow = __t.object("PublishedAgentLookupRow", {
   slug: __t.string(),
@@ -673,9 +750,6 @@ export const VisibleAgentKeyBundleRow = __t.object("VisibleAgentKeyBundleRow", {
 });
 export type VisibleAgentKeyBundleRow = __Infer<typeof VisibleAgentKeyBundleRow>;
 
-export const VisibleAgentKeyBundles = __t.object("VisibleAgentKeyBundles", {});
-export type VisibleAgentKeyBundles = __Infer<typeof VisibleAgentKeyBundles>;
-
 export const VisibleAgentRow = __t.object("VisibleAgentRow", {
   id: __t.u64(),
   inboxId: __t.u64(),
@@ -747,25 +821,6 @@ export type VisibleChannelMembershipRow = __Infer<typeof VisibleChannelMembershi
 
 export const VisibleChannelMemberships = __t.object("VisibleChannelMemberships", {});
 export type VisibleChannelMemberships = __Infer<typeof VisibleChannelMemberships>;
-
-export const VisibleChannelMessageRow = __t.object("VisibleChannelMessageRow", {
-  id: __t.u64(),
-  channelId: __t.u64(),
-  channelSeq: __t.u64(),
-  senderAgentDbId: __t.u64(),
-  senderPublicIdentity: __t.string(),
-  senderSeq: __t.u64(),
-  senderSigningPublicKey: __t.string(),
-  senderSigningKeyVersion: __t.string(),
-  plaintext: __t.string(),
-  signature: __t.string(),
-  replyToMessageId: __t.option(__t.u64()),
-  createdAt: __t.timestamp(),
-});
-export type VisibleChannelMessageRow = __Infer<typeof VisibleChannelMessageRow>;
-
-export const VisibleChannelMessages = __t.object("VisibleChannelMessages", {});
-export type VisibleChannelMessages = __Infer<typeof VisibleChannelMessages>;
 
 export const VisibleChannelRow = __t.object("VisibleChannelRow", {
   id: __t.u64(),
@@ -932,9 +987,6 @@ export const VisibleMessageSnapshot = __t.object("VisibleMessageSnapshot", {
   get actors() {
     return __t.array(VisibleAgentRow);
   },
-  get bundles() {
-    return __t.array(VisibleAgentKeyBundleRow);
-  },
   get participants() {
     return __t.array(VisibleThreadParticipantRow);
   },
@@ -999,9 +1051,6 @@ export type VisibleThreadMessagePage = __Infer<typeof VisibleThreadMessagePage>;
 export const VisibleThreadPage = __t.object("VisibleThreadPage", {
   get actors() {
     return __t.array(VisibleAgentRow);
-  },
-  get bundles() {
-    return __t.array(VisibleAgentKeyBundleRow);
   },
   get participants() {
     return __t.array(VisibleThreadParticipantRow);

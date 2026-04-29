@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Timestamp } from 'spacetimedb';
 import type {
   Agent,
+  PublicChannel,
   VisibleChannelMembershipRow,
   VisibleChannelRow,
 } from '../../../webapp/src/module_bindings/types';
@@ -9,9 +10,12 @@ import type {
 const mocks = vi.hoisted(() => ({
   createChannel: vi.fn(),
   updateChannelSettings: vi.fn(),
+  joinPublicChannel: vi.fn(),
+  listChannelMessages: vi.fn(),
   disconnectConnection: vi.fn(),
   ensureAuthenticatedSession: vi.fn(),
   iterVisibleAgents: vi.fn(),
+  iterPublicChannels: vi.fn(),
   iterVisibleChannels: vi.fn(),
   iterVisibleChannelMemberships: vi.fn(),
   unsubscribe: vi.fn(),
@@ -27,7 +31,12 @@ vi.mock('./spacetimedb', () => ({
   disconnectConnection: mocks.disconnectConnection,
 }));
 
-import { createChannel, updateChannelSettings } from './channel';
+import {
+  createChannel,
+  joinPublicChannel,
+  readAuthenticatedChannelMessages,
+  updateChannelSettings,
+} from './channel';
 
 function timestamp(microsSinceUnixEpoch: bigint) {
   return new Timestamp(microsSinceUnixEpoch);
@@ -81,6 +90,26 @@ function channel(row: Partial<VisibleChannelRow> & Pick<VisibleChannelRow, 'id' 
   };
 }
 
+function publicChannel(
+  row: Partial<PublicChannel> & Pick<PublicChannel, 'channelId' | 'slug'>
+): PublicChannel {
+  return {
+    id: row.id ?? row.channelId,
+    channelId: row.channelId,
+    slug: row.slug,
+    title: row.title,
+    description: row.description,
+    accessMode: row.accessMode ?? 'public',
+    discoverable: row.discoverable ?? true,
+    lastMessageSeq: row.lastMessageSeq ?? 0n,
+    createdAt: row.createdAt ?? timestamp(1n),
+    updatedAt: row.updatedAt ?? timestamp(1n),
+    lastMessageAt: row.lastMessageAt ?? timestamp(1n),
+    publicJoinPermission: row.publicJoinPermission ?? 'read',
+    sortKey: row.sortKey ?? 'sort',
+  };
+}
+
 function membership(
   row: Partial<VisibleChannelMembershipRow> &
     Pick<VisibleChannelMembershipRow, 'id' | 'channelId' | 'agentDbId'>
@@ -102,13 +131,17 @@ function makeConnection() {
     reducers: {
       createChannel: mocks.createChannel,
       updateChannelSettings: mocks.updateChannelSettings,
+      joinPublicChannel: mocks.joinPublicChannel,
+    },
+    procedures: {
+      listChannelMessages: mocks.listChannelMessages,
     },
     db: {
       visibleAgents: {
         iter: mocks.iterVisibleAgents,
       },
-      publicChannel: {
-        iter: () => [],
+      publicChannels: {
+        iter: mocks.iterPublicChannels,
       },
       visibleChannels: {
         iter: mocks.iterVisibleChannels,
@@ -146,9 +179,12 @@ describe('channel mutations', () => {
     vi.restoreAllMocks();
     mocks.createChannel.mockReset();
     mocks.updateChannelSettings.mockReset();
+    mocks.joinPublicChannel.mockReset();
+    mocks.listChannelMessages.mockReset();
     mocks.disconnectConnection.mockReset();
     mocks.ensureAuthenticatedSession.mockReset();
     mocks.iterVisibleAgents.mockReset();
+    mocks.iterPublicChannels.mockReset();
     mocks.iterVisibleChannels.mockReset();
     mocks.iterVisibleChannelMemberships.mockReset();
     mocks.unsubscribe.mockReset();
@@ -176,7 +212,9 @@ describe('channel mutations', () => {
       conn: makeConnection(),
     });
     mocks.iterVisibleChannels.mockReturnValue([]);
+    mocks.iterPublicChannels.mockReturnValue([]);
     mocks.iterVisibleChannelMemberships.mockReturnValue([]);
+    mocks.listChannelMessages.mockResolvedValue([]);
   });
 
   it('refuses channel mutations from a default agent with pending deregistration', async () => {
@@ -241,6 +279,65 @@ describe('channel mutations', () => {
     );
   });
 
+  it('waits for the joined membership before reporting join permission', async () => {
+    mocks.iterVisibleAgents.mockReturnValue([
+      actor({
+        id: 1n,
+        inboxId: 10n,
+        slug: 'owner',
+      }),
+    ]);
+    mocks.iterVisibleChannels.mockReturnValue([
+      channel({
+        id: 5n,
+        slug: 'ops',
+        publicJoinPermission: 'read',
+      }),
+    ]);
+    let joined = false;
+    let membershipReadsAfterJoin = 0;
+    mocks.joinPublicChannel.mockImplementation(async () => {
+      joined = true;
+    });
+    mocks.iterVisibleChannelMemberships.mockImplementation(() => {
+      if (!joined) {
+        return [];
+      }
+      membershipReadsAfterJoin += 1;
+      return membershipReadsAfterJoin > 1
+        ? [
+            membership({
+              id: 9n,
+              channelId: 5n,
+              agentDbId: 1n,
+              permission: 'read_write',
+            }),
+          ]
+        : [];
+    });
+
+    const result = await joinPublicChannel({
+      profileName: 'default',
+      slug: 'ops',
+      reporter: {
+        info() {},
+        success() {},
+        verbose() {},
+      },
+    });
+
+    expect(mocks.joinPublicChannel).toHaveBeenCalledWith({
+      agentDbId: 1n,
+      channelId: undefined,
+      channelSlug: 'ops',
+    });
+    expect(result).toMatchObject({
+      channelId: '5',
+      permission: 'read_write',
+      status: 'joined',
+    });
+  });
+
   it('passes channel settings updates through the generated reducer as an admin', async () => {
     mocks.iterVisibleAgents.mockReturnValue([
       actor({
@@ -287,5 +384,75 @@ describe('channel mutations', () => {
         discoverable: false,
       })
     );
+  });
+
+  it('uses the public channel mirror for authenticated reads outside visible channel state', async () => {
+    mocks.iterVisibleAgents.mockReturnValue([
+      actor({
+        id: 1n,
+        inboxId: 10n,
+        slug: 'owner',
+      }),
+    ]);
+    mocks.iterVisibleChannels.mockReturnValue([]);
+    mocks.iterPublicChannels.mockReturnValue([
+      publicChannel({
+        id: 8n,
+        channelId: 5n,
+        slug: 'ops',
+        publicJoinPermission: 'read_write',
+      }),
+    ]);
+
+    const result = await readAuthenticatedChannelMessages({
+      profileName: 'default',
+      slug: 'ops',
+      reporter: {
+        info() {},
+        success() {},
+        verbose() {},
+      },
+    });
+
+    expect(mocks.listChannelMessages).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentDbId: 1n,
+        channelId: 5n,
+        channelSlug: undefined,
+      })
+    );
+    expect(result).toMatchObject({
+      slug: 'ops',
+      anonymous: false,
+      cappedToRecent: false,
+      messages: [],
+    });
+  });
+
+  it('reports channel not found locally before authenticated reads without visible or public rows', async () => {
+    mocks.iterVisibleAgents.mockReturnValue([
+      actor({
+        id: 1n,
+        inboxId: 10n,
+        slug: 'owner',
+      }),
+    ]);
+    mocks.iterVisibleChannels.mockReturnValue([]);
+    mocks.iterPublicChannels.mockReturnValue([]);
+
+    await expect(
+      readAuthenticatedChannelMessages({
+        profileName: 'default',
+        slug: 'hidden-ops',
+        reporter: {
+          info() {},
+          success() {},
+          verbose() {},
+        },
+      })
+    ).rejects.toMatchObject({
+      code: 'CHANNEL_NOT_FOUND',
+    });
+    expect(mocks.listChannelMessages).not.toHaveBeenCalled();
   });
 });

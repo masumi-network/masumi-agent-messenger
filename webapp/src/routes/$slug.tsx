@@ -134,6 +134,8 @@ import {
 } from '@/lib/crypto';
 import { DbConnection, reducers, tables } from '@/module_bindings';
 import type {
+  AgentPublicKeyLookupRequest,
+  AgentPublicKeyLookupRow,
   Agent,
   Thread,
   Device,
@@ -142,7 +144,6 @@ import type {
   VisibleChannelJoinRequestRow,
   VisibleChannelMembershipRow,
   VisibleChannelRow,
-  VisibleAgentKeyBundleRow,
   VisibleContactRequestRow,
   VisibleContactAllowlistEntryRow,
   VisibleMessageRow,
@@ -193,7 +194,7 @@ const THREAD_TIMELINE_PAGE_SIZE = 25;
 const THREAD_LIST_SCROLL_LOAD_THRESHOLD_PX = 64;
 
 type Message = VisibleMessageRow;
-type AgentKeyBundle = VisibleAgentKeyBundleRow;
+type AgentPublicKey = AgentPublicKeyLookupRow;
 type ThreadParticipant = VisibleThreadParticipantRow;
 type ThreadReadState = VisibleThreadReadStateRow;
 
@@ -272,7 +273,7 @@ type DisplayInbox = Pick<
 };
 type KeyRotationNotice = {
   actor: Agent;
-  bundle: AgentKeyBundle;
+  publicKey: AgentPublicKey;
 };
 type ThreadTimelineItem =
   | {
@@ -872,6 +873,112 @@ function compareTimestamp(
   return 0;
 }
 
+type AgentPublicKeyKind = 'encryption' | 'signing';
+
+const AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE = 100;
+
+function publicKeyRequestKey(request: AgentPublicKeyLookupRequest): string {
+  return `${request.agentDbId.toString()}:${request.keyKind}:${request.keyVersion}`;
+}
+
+function publicKeyRowKey(row: AgentPublicKey): string {
+  return `${row.agentDbId.toString()}:${row.keyKind}:${row.keyVersion}`;
+}
+
+function addPublicKeyLookupRequest(params: {
+  requestsByKey: Map<string, AgentPublicKeyLookupRequest>;
+  actorById: Map<bigint, Agent>;
+  agentDbId: bigint;
+  keyKind: AgentPublicKeyKind;
+  keyVersion: string;
+}) {
+  const actor = params.actorById.get(params.agentDbId);
+  if (
+    params.keyKind === 'encryption' &&
+    actor?.currentEncryptionKeyVersion === params.keyVersion
+  ) {
+    return;
+  }
+  if (
+    params.keyKind === 'signing' &&
+    actor?.currentSigningKeyVersion === params.keyVersion
+  ) {
+    return;
+  }
+
+  const request = {
+    agentDbId: params.agentDbId,
+    keyKind: params.keyKind,
+    keyVersion: params.keyVersion,
+  } satisfies AgentPublicKeyLookupRequest;
+  params.requestsByKey.set(publicKeyRequestKey(request), request);
+}
+
+function collectMessagePublicKeyLookupRequests(params: {
+  messages: Message[];
+  secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
+  actorById: Map<bigint, Agent>;
+}): AgentPublicKeyLookupRequest[] {
+  const requestsByKey = new Map<string, AgentPublicKeyLookupRequest>();
+  const messageSecretKeys = new Set(
+    params.messages.map(message =>
+      [
+        message.threadId.toString(),
+        message.membershipVersion.toString(),
+        message.senderAgentDbId.toString(),
+        message.secretVersion,
+      ].join(':')
+    )
+  );
+
+  for (const message of params.messages) {
+    addPublicKeyLookupRequest({
+      requestsByKey,
+      actorById: params.actorById,
+      agentDbId: message.senderAgentDbId,
+      keyKind: 'signing',
+      keyVersion: message.signingKeyVersion,
+    });
+  }
+
+  for (const envelope of params.secretEnvelopes) {
+    const messageSecretKey = [
+      envelope.threadId.toString(),
+      envelope.membershipVersion.toString(),
+      envelope.senderAgentDbId.toString(),
+      envelope.secretVersion,
+    ].join(':');
+    if (!messageSecretKeys.has(messageSecretKey)) {
+      continue;
+    }
+
+    addPublicKeyLookupRequest({
+      requestsByKey,
+      actorById: params.actorById,
+      agentDbId: envelope.senderAgentDbId,
+      keyKind: 'encryption',
+      keyVersion: envelope.senderEncryptionKeyVersion,
+    });
+    addPublicKeyLookupRequest({
+      requestsByKey,
+      actorById: params.actorById,
+      agentDbId: envelope.senderAgentDbId,
+      keyKind: 'signing',
+      keyVersion: envelope.signingKeyVersion,
+    });
+  }
+
+  return Array.from(requestsByKey.values());
+}
+
+function mergePublicKeyRows(current: AgentPublicKey[], incoming: AgentPublicKey[]): AgentPublicKey[] {
+  const rowsByKey = new Map(current.map(row => [publicKeyRowKey(row), row] as const));
+  for (const row of incoming) {
+    rowsByKey.set(publicKeyRowKey(row), row);
+  }
+  return Array.from(rowsByKey.values());
+}
+
 function mergeThreadTimeline(
   messages: Message[],
   keyRotationNotices: KeyRotationNotice[]
@@ -882,7 +989,7 @@ function mergeThreadTimeline(
   for (const message of messages) {
     while (
       noticeIndex < keyRotationNotices.length &&
-      compareTimestamp(keyRotationNotices[noticeIndex].bundle.createdAt, message.createdAt) <= 0
+      compareTimestamp(keyRotationNotices[noticeIndex].publicKey.createdAt, message.createdAt) <= 0
     ) {
       timeline.push({
         kind: 'keyRotation',
@@ -942,8 +1049,8 @@ function getActiveActorKeyError(issue: DefaultKeyIssue): string | null {
 
 function findVersionedKey(
   actor: Agent,
-  bundles: AgentKeyBundle[],
-  kind: 'encryption' | 'signing',
+  publicKeys: AgentPublicKey[],
+  kind: AgentPublicKeyKind,
   version: string
 ): string | null {
   if (kind === 'encryption' && actor.currentEncryptionKeyVersion === version) {
@@ -952,10 +1059,10 @@ function findVersionedKey(
   if (kind === 'signing' && actor.currentSigningKeyVersion === version) {
     return actor.currentSigningPublicKey;
   }
-  if (kind === 'encryption') {
-    return bundles.find(bundle => bundle.encryptionKeyVersion === version)?.encryptionPublicKey ?? null;
-  }
-  return bundles.find(bundle => bundle.signingKeyVersion === version)?.signingPublicKey ?? null;
+  return (
+    publicKeys.find(key => key.keyKind === kind && key.keyVersion === version)?.publicKey ??
+    null
+  );
 }
 
 function threadSummary(thread: Thread, participants: ThreadParticipant[], actorById: Map<bigint, Agent>): string {
@@ -1145,7 +1252,8 @@ function AuthenticatedInboxPage() {
     VisibleThreadSecretEnvelopeRow[]
   >([]);
   const [pagedThreadActors, setPagedThreadActors] = useState<Agent[]>([]);
-  const [pagedThreadBundles, setPagedThreadBundles] = useState<AgentKeyBundle[]>([]);
+  const [agentPublicKeys, setAgentPublicKeys] = useState<AgentPublicKey[]>([]);
+  const [publicKeyLookupPending, setPublicKeyLookupPending] = useState(false);
   const [pagedThreadParticipants, setPagedThreadParticipants] = useState<ThreadParticipant[]>([]);
   const [pagedThreadReadStates, setPagedThreadReadStates] = useState<ThreadReadState[]>([]);
   const [pagedThreads, setPagedThreads] = useState<Thread[]>([]);
@@ -1371,7 +1479,6 @@ function AuthenticatedInboxPage() {
     () => mergeRowsById(liveActors, pagedThreadActors),
     [liveActors, pagedThreadActors]
   );
-  const agentKeyBundles = pagedThreadBundles;
   const threads = useMemo(
     () => mergeRowsById(liveThreads, pagedThreads),
     [liveThreads, pagedThreads]
@@ -1751,7 +1858,6 @@ function AuthenticatedInboxPage() {
     };
 
     mergePageRows(setPagedThreadActors, page.actors);
-    mergePageRows(setPagedThreadBundles, page.bundles);
     mergePageRows(setPagedThreadParticipants, page.participants);
     mergePageRows(setPagedThreadReadStates, page.readStates);
     mergePageRows(setPagedThreads, page.threads);
@@ -1827,7 +1933,8 @@ function AuthenticatedInboxPage() {
     if (!liveConnection || !activeActorId) {
       return deferEffectStateUpdate(() => {
         setPagedThreadActors([]);
-        setPagedThreadBundles([]);
+        setAgentPublicKeys([]);
+        setPublicKeyLookupPending(false);
         setPagedThreadParticipants([]);
         setPagedThreadReadStates([]);
         setPagedThreads([]);
@@ -2437,15 +2544,15 @@ function AuthenticatedInboxPage() {
     [actors]
   );
 
-  const bundlesByActorId = useMemo(() => {
-    const map = new Map<bigint, AgentKeyBundle[]>();
-    for (const bundle of agentKeyBundles) {
-      const rows = map.get(bundle.agentDbId);
-      if (rows) rows.push(bundle);
-      else map.set(bundle.agentDbId, [bundle]);
+  const publicKeysByActorId = useMemo(() => {
+    const map = new Map<bigint, AgentPublicKey[]>();
+    for (const publicKey of agentPublicKeys) {
+      const rows = map.get(publicKey.agentDbId);
+      if (rows) rows.push(publicKey);
+      else map.set(publicKey.agentDbId, [publicKey]);
     }
     return map;
-  }, [agentKeyBundles]);
+  }, [agentPublicKeys]);
 
   const participantsByThreadId = useMemo(() => {
     const map = new Map<bigint, ThreadParticipant[]>();
@@ -3224,6 +3331,8 @@ function AuthenticatedInboxPage() {
     return deferEffectStateUpdate(() => {
       setPagedThreadMessages([]);
       setPagedThreadSecretEnvelopes([]);
+      setAgentPublicKeys([]);
+      setPublicKeyLookupPending(false);
       setThreadHistoryExhausted(false);
       setThreadHistoryLoading(false);
     });
@@ -3318,30 +3427,107 @@ function AuthenticatedInboxPage() {
     [messages, pagedThreadMessages, selectedThread]
   );
 
+  useEffect(() => {
+    if (!liveConnection || !activeActor || selectedThreadMessages.length === 0) {
+      return deferEffectStateUpdate(() => {
+        setPublicKeyLookupPending(false);
+      });
+    }
+
+    const requests = collectMessagePublicKeyLookupRequests({
+      messages: selectedThreadMessages,
+      secretEnvelopes: loadedThreadSecretEnvelopes,
+      actorById,
+    });
+    if (requests.length === 0) {
+      return deferEffectStateUpdate(() => {
+        setPublicKeyLookupPending(false);
+      });
+    }
+
+    let cancelled = false;
+    deferEffectStateUpdate(() => {
+      if (!cancelled) {
+        setPublicKeyLookupPending(true);
+      }
+    });
+
+    const lookupPublicKeys = async () => {
+      const rows: AgentPublicKey[] = [];
+      for (let index = 0; index < requests.length; index += AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE) {
+        rows.push(
+          ...(await liveConnection.procedures.lookupAgentPublicKeys({
+            agentDbId: activeActor.id,
+            requests: requests.slice(index, index + AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE),
+          }))
+        );
+      }
+      return rows;
+    };
+
+    void lookupPublicKeys()
+      .then(rows => {
+        if (cancelled) return;
+        setAgentPublicKeys(current => mergePublicKeyRows(current, rows));
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setActorActionError(
+          error instanceof Error ? error.message : 'Unable to load historical public keys'
+        );
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setPublicKeyLookupPending(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeActor,
+    actorById,
+    liveConnection,
+    loadedThreadSecretEnvelopes,
+    selectedThreadMessages,
+  ]);
+
   const selectedThreadKeyRotations = useMemo(() => {
     if (!selectedThread) return [];
 
+    const seenRotationKeys = new Set<string>();
     return selectedThreadParticipants
       .flatMap(participant => {
         const actor = actorById.get(participant.agentDbId);
         if (!actor) return [];
 
-        return (bundlesByActorId.get(participant.agentDbId) ?? [])
-          .filter(bundle => compareTimestamp(bundle.createdAt, participant.joinedAt) > 0)
-          .map(
-            bundle =>
-              ({
-                actor,
-                bundle,
-              }) satisfies KeyRotationNotice
-          );
+        return (publicKeysByActorId.get(participant.agentDbId) ?? []).flatMap(publicKey => {
+          if (compareTimestamp(publicKey.createdAt, participant.joinedAt) <= 0) {
+            return [];
+          }
+          const rotationKey =
+            publicKey.keyBundleId !== undefined
+              ? `${publicKey.agentDbId.toString()}:${publicKey.keyBundleId.toString()}`
+              : publicKeyRowKey(publicKey);
+          if (seenRotationKeys.has(rotationKey)) {
+            return [];
+          }
+          seenRotationKeys.add(rotationKey);
+          return [
+            {
+              actor,
+              publicKey,
+            } satisfies KeyRotationNotice,
+          ];
+        });
       })
       .sort((left, right) => {
-        const timeOrder = compareTimestamp(left.bundle.createdAt, right.bundle.createdAt);
+        const timeOrder = compareTimestamp(left.publicKey.createdAt, right.publicKey.createdAt);
         if (timeOrder !== 0) return timeOrder;
-        return Number(left.bundle.id - right.bundle.id);
+        return publicKeyRowKey(left.publicKey).localeCompare(publicKeyRowKey(right.publicKey));
       });
-  }, [actorById, bundlesByActorId, selectedThread, selectedThreadParticipants]);
+  }, [actorById, publicKeysByActorId, selectedThread, selectedThreadParticipants]);
 
   const selectedThreadTimeline = useMemo(
     () => mergeThreadTimeline(selectedThreadMessages, selectedThreadKeyRotations),
@@ -3473,7 +3659,7 @@ function AuthenticatedInboxPage() {
     }
 
     if (latestItem.kind === 'keyRotation') {
-      return `key-rotation-${latestItem.notice.bundle.id.toString()}`;
+      return `key-rotation-${publicKeyRowKey(latestItem.notice.publicKey)}`;
     }
 
     return `message-${latestItem.message.id.toString()}`;
@@ -3682,6 +3868,9 @@ function AuthenticatedInboxPage() {
         setDecryptedMessageById({});
       });
     }
+    if (publicKeyLookupPending) {
+      return;
+    }
 
     let cancelled = false;
 
@@ -3711,7 +3900,7 @@ function AuthenticatedInboxPage() {
           } else if (comparison.status === 'rotated') {
             const messageSigningKey = findVersionedKey(
               senderActor,
-              bundlesByActorId.get(senderActor.id) ?? [],
+              publicKeysByActorId.get(senderActor.id) ?? [],
               'signing',
               message.signingKeyVersion
             );
@@ -3754,22 +3943,22 @@ function AuthenticatedInboxPage() {
           continue;
         }
 
-        const senderBundles = bundlesByActorId.get(senderActor.id) ?? [];
+        const senderPublicKeys = publicKeysByActorId.get(senderActor.id) ?? [];
         const senderEncryptionPublicKey = findVersionedKey(
           senderActor,
-          senderBundles,
+          senderPublicKeys,
           'encryption',
           envelope.senderEncryptionKeyVersion
         );
         const messageSigningPublicKey = findVersionedKey(
           senderActor,
-          senderBundles,
+          senderPublicKeys,
           'signing',
           message.signingKeyVersion
         );
         const envelopeSigningPublicKey = findVersionedKey(
           senderActor,
-          senderBundles,
+          senderPublicKeys,
           'signing',
           envelope.signingKeyVersion
         );
@@ -3917,8 +4106,9 @@ function AuthenticatedInboxPage() {
     activeActor,
     actorById,
     actorKeyPair,
-    bundlesByActorId,
     loadedThreadSecretEnvelopes,
+    publicKeyLookupPending,
+    publicKeysByActorId,
     selectedThread,
     selectedThreadMessages,
   ]);
@@ -5941,9 +6131,9 @@ function AuthenticatedInboxPage() {
                                   const timelineMeta = paginatedThreadTimeline.map((item) => {
                                     if (item.kind === 'keyRotation') {
                                       return {
-                                        senderId: `krot:${item.notice.bundle.id.toString()}`,
+                                        senderId: `krot:${publicKeyRowKey(item.notice.publicKey)}`,
                                         createdAtMs: Number(
-                                          item.notice.bundle.createdAt.microsSinceUnixEpoch / 1000n
+                                          item.notice.publicKey.createdAt.microsSinceUnixEpoch / 1000n
                                         ),
                                       };
                                     }
@@ -5973,7 +6163,7 @@ function AuthenticatedInboxPage() {
                                     const showUnreadDivider = index === firstUnreadIndex;
                                     if (item.kind === 'keyRotation') {
                                       return (
-                                        <div key={`kr-${item.notice.bundle.id.toString()}`}>
+                                        <div key={`kr-${publicKeyRowKey(item.notice.publicKey)}`}>
                                           {dayLabel ? <DayDivider label={dayLabel} /> : null}
                                           {showUnreadDivider ? <UnreadDivider /> : null}
                                           <div
@@ -5982,7 +6172,7 @@ function AuthenticatedInboxPage() {
                                           >
                                             <KeyRotationItem
                                               actorName={describeActor(item.notice.actor)}
-                                              timestamp={formatTimestamp(item.notice.bundle.createdAt)}
+                                              timestamp={formatTimestamp(item.notice.publicKey.createdAt)}
                                             />
                                           </div>
                                         </div>

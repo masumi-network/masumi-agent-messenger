@@ -18,7 +18,8 @@ import {
 import type {
   Agent,
   ChannelMemberListRow,
-  PublicChannel,
+  PublicChannelMirrorRow,
+  PublicChannelPageRow,
   PublicRecentChannelMessage,
   VisibleChannelJoinRequestRow,
   VisibleChannelMembershipRow,
@@ -132,10 +133,14 @@ export type ChannelApprovalPermissionPrompt = (request: ChannelJoinRequestItem) 
 
 type ChannelSnapshot = {
   actors: Agent[];
-  publicChannels: PublicChannel[];
   visibleChannels: VisibleChannelRow[];
   memberships: VisibleChannelMembershipRow[];
   requests: VisibleChannelJoinRequestRow[];
+};
+
+type JoinedPublicChannelSnapshot = {
+  channel: VisibleChannelRow;
+  membership: VisibleChannelMembershipRow;
 };
 
 function subscribeQueries(
@@ -164,7 +169,6 @@ function subscribeQueries(
 function readChannelSnapshot(conn: DbConnection): ChannelSnapshot {
   return {
     actors: Array.from(conn.db.visibleAgents.iter()) as Agent[],
-    publicChannels: Array.from(conn.db.publicChannel.iter()) as PublicChannel[],
     visibleChannels: Array.from(conn.db.visibleChannels.iter()) as VisibleChannelRow[],
     memberships: Array.from(
       conn.db.visibleChannelMemberships.iter()
@@ -175,7 +179,81 @@ function readChannelSnapshot(conn: DbConnection): ChannelSnapshot {
   };
 }
 
-function publicChannelToListItem(channel: PublicChannel): ChannelListItem {
+async function readPublicChannelMirrorBySlug(
+  conn: DbConnection,
+  normalizedSlug: string
+): Promise<PublicChannelMirrorRow | null> {
+  const publicChannelQuery = tables.publicChannels.where(row => row.slug.eq(normalizedSlug));
+  const subscription = await subscribeQueries(
+    conn,
+    [publicChannelQuery],
+    'Live public channel subscription failed.'
+  );
+  try {
+    return (
+      (Array.from(conn.db.publicChannels.iter()) as PublicChannelMirrorRow[]).find(
+        row => row.slug === normalizedSlug
+      ) ?? null
+    );
+  } finally {
+    subscription.unsubscribe();
+  }
+}
+
+function findJoinedPublicChannelSnapshot(params: {
+  snapshot: ChannelSnapshot;
+  slug: string;
+  actorId: bigint;
+}): JoinedPublicChannelSnapshot | null {
+  const channel =
+    params.snapshot.visibleChannels.find(row => row.slug === params.slug) ?? null;
+  if (!channel) {
+    return null;
+  }
+
+  const membership =
+    params.snapshot.memberships.find(
+      row =>
+        row.channelId === channel.id &&
+        row.agentDbId === params.actorId &&
+        row.active
+    ) ?? null;
+  if (!membership) {
+    return null;
+  }
+
+  return { channel, membership };
+}
+
+async function waitForJoinedPublicChannel(params: {
+  read: () => ChannelSnapshot;
+  slug: string;
+  actorId: bigint;
+  timeoutMs?: number;
+}): Promise<JoinedPublicChannelSnapshot> {
+  const timeoutAt = Date.now() + (params.timeoutMs ?? 10_000);
+
+  while (Date.now() < timeoutAt) {
+    const joined = findJoinedPublicChannelSnapshot({
+      snapshot: params.read(),
+      slug: params.slug,
+      actorId: params.actorId,
+    });
+    if (joined) {
+      return joined;
+    }
+
+    await new Promise(resolve => {
+      setTimeout(resolve, 100);
+    });
+  }
+
+  throw connectivityError('Timed out waiting for channel membership to sync.', {
+    code: 'SPACETIMEDB_CHANNEL_JOIN_TIMEOUT',
+  });
+}
+
+function publicChannelToListItem(channel: PublicChannelMirrorRow | PublicChannelPageRow): ChannelListItem {
   return {
     id: channel.channelId.toString(),
     slug: channel.slug,
@@ -581,6 +659,20 @@ async function requireLocalKeyPair(params: {
   return keyPair;
 }
 
+function sortPublicChannels<T extends PublicChannelMirrorRow | PublicChannelPageRow>(channels: T[]): T[] {
+  return [...channels].sort((left, right) => {
+    if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch) {
+      return -1;
+    }
+    if (left.lastMessageAt.microsSinceUnixEpoch < right.lastMessageAt.microsSinceUnixEpoch) {
+      return 1;
+    }
+    if (left.channelId > right.channelId) return -1;
+    if (left.channelId < right.channelId) return 1;
+    return left.slug.localeCompare(right.slug);
+  });
+}
+
 async function connectForAuthenticatedChannels(params: {
   profileName: string;
   reporter: TaskReporter;
@@ -603,7 +695,6 @@ async function connectForAuthenticatedChannels(params: {
       conn,
       [
         tables.visibleAgents,
-        tables.publicChannel,
         tables.visibleChannels,
         tables.visibleChannelMemberships,
         tables.visibleChannelJoinRequests,
@@ -624,6 +715,7 @@ async function connectForAuthenticatedChannels(params: {
 
 export async function listPublicChannels(params: {
   profileName: string;
+  limit?: string;
   reporter: TaskReporter;
 }): Promise<ChannelListResult> {
   const profile = await loadProfile(params.profileName);
@@ -632,31 +724,17 @@ export async function listPublicChannels(params: {
     databaseName: profile.spacetimeDbName,
   });
   try {
-    const subscription = await subscribeQueries(
-      conn,
-      [tables.publicChannel],
-      'Live public channel subscription failed.'
-    );
-    try {
-      const channels = (Array.from(conn.db.publicChannel.iter()) as PublicChannel[])
-        .sort((left, right) => {
-          if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch) {
-            return -1;
-          }
-          if (left.lastMessageAt.microsSinceUnixEpoch < right.lastMessageAt.microsSinceUnixEpoch) {
-            return 1;
-          }
-          return left.slug.localeCompare(right.slug);
-        })
-        .map(publicChannelToListItem);
-      params.reporter.success(`Loaded ${channels.length.toString()} public channel${channels.length === 1 ? '' : 's'}`);
-      return {
-        profile: profile.name,
-        channels,
-      };
-    } finally {
-      subscription.unsubscribe();
-    }
+    const pageRows = await conn.procedures.listPublicChannels({
+      beforeLastMessageAtMicros: undefined,
+      beforeChannelId: undefined,
+      limit: parseOptionalU64(params.limit, 'limit') ?? 25n,
+    });
+    const channels = sortPublicChannels(pageRows).map(publicChannelToListItem);
+    params.reporter.success(`Loaded ${channels.length.toString()} public channel${channels.length === 1 ? '' : 's'}`);
+    return {
+      profile: profile.name,
+      channels,
+    };
   } finally {
     disconnectConnection(conn);
   }
@@ -674,7 +752,7 @@ export async function readPublicChannelMessages(params: {
     databaseName: profile.spacetimeDbName,
   });
   try {
-    const publicChannelQuery = tables.publicChannel.where(row => row.slug.eq(normalizedSlug));
+    const publicChannelQuery = tables.publicChannels.where(row => row.slug.eq(normalizedSlug));
     const channelSubscription = await subscribeQueries(
       conn,
       [publicChannelQuery],
@@ -682,7 +760,7 @@ export async function readPublicChannelMessages(params: {
     );
     try {
       const channel =
-        (Array.from(conn.db.publicChannel.iter()) as PublicChannel[]).find(
+        (Array.from(conn.db.publicChannels.iter()) as PublicChannelMirrorRow[]).find(
           row => row.slug === normalizedSlug
         ) ?? null;
       if (!channel) {
@@ -690,7 +768,7 @@ export async function readPublicChannelMessages(params: {
           code: 'CHANNEL_NOT_FOUND',
         });
       }
-      const publicRecentQuery = tables.publicRecentChannelMessage.where(row =>
+      const publicRecentQuery = tables.publicRecentChannelMessages.where(row =>
         row.channelId.eq(channel.channelId)
       );
       const publicRecentSubscription = await subscribeQueries(
@@ -700,7 +778,7 @@ export async function readPublicChannelMessages(params: {
       );
       try {
         const rows = (Array.from(
-          conn.db.publicRecentChannelMessage.iter()
+          conn.db.publicRecentChannelMessages.iter()
         ) as PublicRecentChannelMessage[]).sort((left, right) => {
           if (left.channelSeq < right.channelSeq) return -1;
           if (left.channelSeq > right.channelSeq) return 1;
@@ -744,7 +822,7 @@ export async function showPublicChannel(params: {
     databaseName: profile.spacetimeDbName,
   });
   try {
-    const publicChannelQuery = tables.publicChannel.where(row => row.slug.eq(normalizedSlug));
+    const publicChannelQuery = tables.publicChannels.where(row => row.slug.eq(normalizedSlug));
     const subscription = await subscribeQueries(
       conn,
       [publicChannelQuery],
@@ -752,7 +830,7 @@ export async function showPublicChannel(params: {
     );
     try {
       const channel =
-        (Array.from(conn.db.publicChannel.iter()) as PublicChannel[]).find(
+        (Array.from(conn.db.publicChannels.iter()) as PublicChannelMirrorRow[]).find(
           row => row.slug === normalizedSlug
         ) ?? null;
       params.reporter.success(channel ? `Loaded #${channel.slug}` : `Channel ${normalizedSlug} not found`);
@@ -788,8 +866,9 @@ export async function readAuthenticatedChannelMessages(params: {
     });
     const visibleChannel =
       snapshot.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
-    const publicChannel =
-      snapshot.publicChannels.find(row => row.slug === normalizedSlug) ?? null;
+    const publicChannel = visibleChannel
+      ? null
+      : await readPublicChannelMirrorBySlug(conn, normalizedSlug);
     if (!visibleChannel && !publicChannel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
@@ -993,29 +1072,18 @@ export async function joinPublicChannel(params: {
       channelId: undefined,
       channelSlug: normalizedSlug,
     });
-    const updatedSnapshot = readChannelSnapshot(conn);
-    const joinedChannel =
-      updatedSnapshot.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
-    const joinedMembership = joinedChannel
-      ? updatedSnapshot.memberships.find(
-          membership =>
-            membership.channelId === joinedChannel.id &&
-            membership.agentDbId === actor.id &&
-            membership.active
-        ) ?? null
-      : null;
-    const publicChannel =
-      updatedSnapshot.publicChannels.find(row => row.slug === normalizedSlug) ?? null;
-    const permission =
-      joinedMembership?.permission ??
-      joinedChannel?.publicJoinPermission ??
-      publicChannel?.publicJoinPermission ??
-      'read';
+    const { channel: joinedChannel, membership: joinedMembership } =
+      await waitForJoinedPublicChannel({
+        read: () => readChannelSnapshot(conn),
+        slug: normalizedSlug,
+        actorId: actor.id,
+      });
+    const permission = joinedMembership.permission;
     params.reporter.success(`Joined public channel ${params.slug}`);
     return {
       profile: profile.name,
       slug: normalizedSlug,
-      channelId: joinedChannel?.id.toString() ?? publicChannel?.channelId.toString(),
+      channelId: joinedChannel.id.toString(),
       permission,
       status: 'joined',
     };
@@ -1166,15 +1234,9 @@ export async function listChannelJoinRequests(params: {
     const snapshot = readChannelSnapshot(conn);
     const channelSlug = params.slug ? normalizeChannelSlugInput(params.slug) : null;
     const selectedChannel = channelSlug
-      ? snapshot.visibleChannels.find(row => row.slug === channelSlug) ??
-        snapshot.publicChannels.find(row => row.slug === channelSlug) ??
-        null
+      ? snapshot.visibleChannels.find(row => row.slug === channelSlug) ?? null
       : null;
-    const selectedChannelId = selectedChannel
-      ? 'channelId' in selectedChannel
-        ? selectedChannel.channelId
-        : selectedChannel.id
-      : null;
+    const selectedChannelId = selectedChannel?.id ?? null;
 
     if (channelSlug && !selectedChannel) {
       throw userError(`Channel \`${channelSlug}\` is not visible.`, {

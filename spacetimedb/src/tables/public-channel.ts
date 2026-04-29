@@ -3,8 +3,13 @@ import { table, t } from 'spacetimedb/server';
 export const publicChannelTable = table(
     {
       name: 'public_channel',
-      public: true,
-      indexes: [],
+      indexes: [
+        {
+          accessor: 'public_channel_discoverable_sort_key',
+          algorithm: 'btree',
+          columns: ['discoverable', 'sortKey'],
+        },
+      ],
     },
     {
       id: t.u64().primaryKey().autoInc(),
@@ -19,5 +24,6 @@ export const publicChannelTable = table(
       updatedAt: t.timestamp(),
       lastMessageAt: t.timestamp(),
       publicJoinPermission: t.string().default('read'),
+      sortKey: t.string(),
     }
 );

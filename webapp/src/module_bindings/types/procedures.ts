@@ -10,10 +10,12 @@ import * as ClaimDeviceKeyBundleProcedure from "../claim_device_key_bundle_proce
 import * as ListChannelMembersProcedure from "../list_channel_members_procedure";
 import * as ListChannelMessagesProcedure from "../list_channel_messages_procedure";
 import * as ListDiscoverableChannelsProcedure from "../list_discoverable_channels_procedure";
+import * as ListPublicChannelsProcedure from "../list_public_channels_procedure";
 import * as ListThreadMessagesProcedure from "../list_thread_messages_procedure";
 import * as ListThreadSecretEnvelopesProcedure from "../list_thread_secret_envelopes_procedure";
 import * as ListVisibleThreadsProcedure from "../list_visible_threads_procedure";
 import * as LookupAgentKeyBundlesProcedure from "../lookup_agent_key_bundles_procedure";
+import * as LookupAgentPublicKeysProcedure from "../lookup_agent_public_keys_procedure";
 import * as LookupPublishedAgentBySlugProcedure from "../lookup_published_agent_by_slug_procedure";
 import * as LookupPublishedAgentSigningKeysProcedure from "../lookup_published_agent_signing_keys_procedure";
 import * as LookupPublishedAgentsByEmailProcedure from "../lookup_published_agents_by_email_procedure";
@@ -30,6 +32,8 @@ export type ListChannelMessagesArgs = __Infer<typeof ListChannelMessagesProcedur
 export type ListChannelMessagesResult = __Infer<typeof ListChannelMessagesProcedure.returnType>;
 export type ListDiscoverableChannelsArgs = __Infer<typeof ListDiscoverableChannelsProcedure.params>;
 export type ListDiscoverableChannelsResult = __Infer<typeof ListDiscoverableChannelsProcedure.returnType>;
+export type ListPublicChannelsArgs = __Infer<typeof ListPublicChannelsProcedure.params>;
+export type ListPublicChannelsResult = __Infer<typeof ListPublicChannelsProcedure.returnType>;
 export type ListThreadMessagesArgs = __Infer<typeof ListThreadMessagesProcedure.params>;
 export type ListThreadMessagesResult = __Infer<typeof ListThreadMessagesProcedure.returnType>;
 export type ListThreadSecretEnvelopesArgs = __Infer<typeof ListThreadSecretEnvelopesProcedure.params>;
@@ -38,6 +42,8 @@ export type ListVisibleThreadsArgs = __Infer<typeof ListVisibleThreadsProcedure.
 export type ListVisibleThreadsResult = __Infer<typeof ListVisibleThreadsProcedure.returnType>;
 export type LookupAgentKeyBundlesArgs = __Infer<typeof LookupAgentKeyBundlesProcedure.params>;
 export type LookupAgentKeyBundlesResult = __Infer<typeof LookupAgentKeyBundlesProcedure.returnType>;
+export type LookupAgentPublicKeysArgs = __Infer<typeof LookupAgentPublicKeysProcedure.params>;
+export type LookupAgentPublicKeysResult = __Infer<typeof LookupAgentPublicKeysProcedure.returnType>;
 export type LookupPublishedAgentBySlugArgs = __Infer<typeof LookupPublishedAgentBySlugProcedure.params>;
 export type LookupPublishedAgentBySlugResult = __Infer<typeof LookupPublishedAgentBySlugProcedure.returnType>;
 export type LookupPublishedAgentSigningKeysArgs = __Infer<typeof LookupPublishedAgentSigningKeysProcedure.params>;

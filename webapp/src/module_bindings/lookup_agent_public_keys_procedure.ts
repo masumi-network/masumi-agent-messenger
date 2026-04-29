@@ -11,15 +11,14 @@ import {
 } from "spacetimedb";
 
 import {
-  SecretEnvelopeAttachment,
+  AgentPublicKeyLookupRequest,
+  AgentPublicKeyLookupRow,
 } from "./types";
 
-export default {
+export const params = {
   agentDbId: __t.u64(),
-  threadId: __t.u64(),
-  membershipVersion: __t.u64(),
-  secretVersion: __t.string(),
-  get attachedSecretEnvelopes() {
-    return __t.array(SecretEnvelopeAttachment);
+  get requests() {
+    return __t.array(AgentPublicKeyLookupRequest);
   },
 };
+export const returnType = __t.array(AgentPublicKeyLookupRow)

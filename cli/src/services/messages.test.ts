@@ -101,7 +101,6 @@ describe('selectUnreadIncomingMessages', () => {
             updatedAt: timestamp(1n),
           }),
         ],
-        bundles: [],
         participants: [
           {
             id: 1n,
@@ -315,7 +314,6 @@ describe('selectUnreadIncomingMessages', () => {
             updatedAt: timestamp(1n),
           }),
         ],
-        bundles: [],
         participants: [
           {
             id: 1n,
@@ -573,7 +571,7 @@ describe('decryptVisibleMessage trust handling', () => {
           [ownActor.id, ownActor],
           [rotatedSender.id, rotatedSender],
         ]),
-        bundlesByActorId: new Map(),
+        publicKeysByActorId: new Map(),
         ownActorIds: new Set([ownActor.id]),
         secretEnvelopes: [],
         recipientKeyPair: null,

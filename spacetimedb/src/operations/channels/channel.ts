@@ -7,6 +7,9 @@ import * as model from '../../model';
 const {
   MAX_VISIBLE_DISCOVERABLE_CHANNELS,
   MAX_DISCOVERABLE_CHANNEL_PAGE_SIZE,
+  MAX_PUBLIC_CHANNEL_PAGE_SIZE,
+  PublicChannelMirrorRow,
+  PublicChannelPageRow,
   VisibleChannelRow,
   normalizeChannelSlug,
   normalizeOptionalChannelTitle,
@@ -15,6 +18,7 @@ const {
   enforceChannelAdminRateLimit,
   normalizeChannelAccessMode,
   normalizePublicChannelJoinPermission,
+  buildPublicChannelSortKeyFromCursor,
   getReadableInbox,
   getOwnedActor,
   getOwnedActorForRead,
@@ -44,21 +48,70 @@ function toVisibleChannelRow(channel: model.ChannelRow, exposeActivity: boolean)
   };
 }
 
-function getChannelSortKey(channel: model.ChannelRow) {
-  return channel.discoverableSortKey === 'pending'
-    ? buildChannelDiscoverableSortKey(channel)
-    : channel.discoverableSortKey;
+function toPublicChannelPageRow(channel: model.PublicChannelTableRow) {
+  return {
+    id: channel.id,
+    channelId: channel.channelId,
+    slug: channel.slug,
+    title: channel.title,
+    description: channel.description,
+    accessMode: channel.accessMode,
+    discoverable: channel.discoverable,
+    lastMessageSeq: channel.lastMessageSeq,
+    createdAt: channel.createdAt,
+    updatedAt: channel.updatedAt,
+    lastMessageAt: channel.lastMessageAt,
+    publicJoinPermission: channel.publicJoinPermission,
+  };
 }
 
-function compareDiscoverableChannels(left: model.ChannelRow, right: model.ChannelRow) {
-  const leftSortKey = getChannelSortKey(left);
-  const rightSortKey = getChannelSortKey(right);
-  if (leftSortKey < rightSortKey) return -1;
-  if (leftSortKey > rightSortKey) return 1;
-  if (left.id < right.id) return -1;
-  if (left.id > right.id) return 1;
-  return 0;
-}
+export const publicChannels = spacetimedb.anonymousView(
+  { public: true },
+  t.array(PublicChannelMirrorRow),
+  ctx => ctx.from.publicChannel.build()
+);
+
+export const listPublicChannels = spacetimedb.procedure(
+  {
+    beforeLastMessageAtMicros: t.u64().optional(),
+    beforeChannelId: t.u64().optional(),
+    limit: t.u64(),
+  },
+  t.array(PublicChannelPageRow),
+  (ctx, { beforeLastMessageAtMicros, beforeChannelId, limit }) => {
+    return ctx.withTx(tx => {
+      if (limit === 0n) {
+        throw new SenderError('limit is required and must be greater than zero');
+      }
+      const pageSize =
+        limit > BigInt(MAX_PUBLIC_CHANNEL_PAGE_SIZE)
+          ? MAX_PUBLIC_CHANNEL_PAGE_SIZE
+          : Number(limit);
+
+      const cursorSortKey =
+        beforeLastMessageAtMicros === undefined
+          ? undefined
+          : buildPublicChannelSortKeyFromCursor(
+              beforeLastMessageAtMicros,
+              beforeChannelId
+            );
+      const publicChannelPrefixRange = [true] as unknown as Parameters<
+        typeof tx.db.publicChannel.public_channel_discoverable_sort_key.filter
+      >[0];
+      const publicChannels =
+        tx.db.publicChannel.public_channel_discoverable_sort_key.filter(publicChannelPrefixRange);
+      const page: model.PublicChannelTableRow[] = [];
+      for (const channel of publicChannels) {
+        if (cursorSortKey !== undefined && channel.sortKey <= cursorSortKey) {
+          continue;
+        }
+        page.push(channel);
+        if (page.length >= pageSize) break;
+      }
+      return page.map(toPublicChannelPageRow);
+    });
+  }
+);
 
 export const visibleChannels = spacetimedb.view(
   { public: true },
@@ -84,9 +137,10 @@ export const visibleChannels = spacetimedb.view(
     }
 
     let discoverableCount = 0;
-    const discoverableChannels = Array.from(ctx.db.channel.channel_discoverable.filter(true))
-      .sort(compareDiscoverableChannels);
-    for (const channel of discoverableChannels) {
+    const discoverablePrefixRange = [true] as unknown as Parameters<
+      typeof ctx.db.channel.channel_discoverable_sort_key.filter
+    >[0];
+    for (const channel of ctx.db.channel.channel_discoverable_sort_key.filter(discoverablePrefixRange)) {
       visibleChannelIds.add(channel.id);
       discoverableCount += 1;
       if (discoverableCount >= MAX_VISIBLE_DISCOVERABLE_CHANNELS) {
@@ -139,14 +193,16 @@ export const listDiscoverableChannels = spacetimedb.procedure(
               beforeLastMessageAtMicros,
               beforeChannelId
             );
+      const discoverablePrefixRange = [true] as unknown as Parameters<
+        typeof tx.db.channel.channel_discoverable_sort_key.filter
+      >[0];
+      const discoverableChannels =
+        tx.db.channel.channel_discoverable_sort_key.filter(discoverablePrefixRange);
       const page: model.ChannelRow[] = [];
-      const discoverableChannels = Array.from(tx.db.channel.channel_discoverable.filter(true))
-        .filter(
-          channel =>
-            cursorSortKey === undefined || getChannelSortKey(channel) > cursorSortKey
-        )
-        .sort(compareDiscoverableChannels);
       for (const channel of discoverableChannels) {
+        if (cursorSortKey !== undefined && channel.discoverableSortKey <= cursorSortKey) {
+          continue;
+        }
         page.push(channel);
         if (page.length >= pageSize) break;
       }
@@ -270,4 +326,3 @@ export const updateChannelSettings = spacetimedb.reducer(
     }
   }
 );
-

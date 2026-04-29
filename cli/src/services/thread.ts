@@ -13,7 +13,6 @@ import { timestampToISOString } from '../../../shared/spacetime-time';
 import type { DbConnection } from '../../../webapp/src/module_bindings';
 import type {
   VisibleAgentRow,
-  VisibleAgentKeyBundleRow,
   VisibleThreadMessagePage,
   VisibleThreadParticipantRow,
   VisibleThreadReadStateRow,
@@ -27,7 +26,11 @@ import { getStoredActorKeyPair } from './actor-keys';
 import type { TaskReporter } from './command-runtime';
 import { connectivityError, isCliError, userError } from './errors';
 import { createSecretStore } from './secret-store';
-import { decryptVisibleMessage } from './messages';
+import {
+  buildPublicKeysByActorId,
+  decryptVisibleMessage,
+  lookupMessagePublicKeys,
+} from './messages';
 import { resolvePublishedActorLookup } from './published-actor-lookup';
 import {
   connectAuthenticated,
@@ -233,7 +236,6 @@ function parseThreadId(value: string): bigint {
 function emptyVisibleThreadPage(): VisibleThreadPage {
   return {
     actors: [],
-    bundles: [],
     participants: [],
     readStates: [],
     threads: [],
@@ -866,12 +868,6 @@ export async function readThreadHistory(params: {
         page.participants.filter(participant => participant.active)
       );
       const actorsById = new Map(mergedActors.map(row => [row.id, row] as const));
-      const bundlesByActorId = new Map<bigint, VisibleAgentKeyBundleRow[]>();
-      for (const bundle of mergeRowsById(snapshot.bundles, page.bundles)) {
-        const list = bundlesByActorId.get(bundle.agentDbId) ?? [];
-        list.push(bundle);
-        bundlesByActorId.set(bundle.agentDbId, list);
-      }
 
       const requestedPage = normalizePage(params.page);
       const pageSize = normalizePageSize(params.pageSize);
@@ -905,6 +901,15 @@ export async function readThreadHistory(params: {
         snapshot.secretEnvelopes,
         historyRows.secretEnvelopes
       );
+      const publicKeysByActorId = buildPublicKeysByActorId(
+        await lookupMessagePublicKeys({
+          conn,
+          agentDbId: actor.id,
+          messages: historyRows.messages,
+          secretEnvelopes,
+          actorsById,
+        })
+      );
 
       const messages = await Promise.all(
         historyRows.messages
@@ -916,7 +921,7 @@ export async function readThreadHistory(params: {
               message,
               defaultActor: actor,
               actorsById,
-              bundlesByActorId,
+              publicKeysByActorId,
               ownActorIds,
               secretEnvelopes,
               recipientKeyPair,

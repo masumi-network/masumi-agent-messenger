@@ -89,6 +89,7 @@ export function registerChannelCommands(program: Command): void {
   channel
     .command('list')
     .description('List public channels without signing in')
+    .option('--limit <count>', 'Maximum public channels to return, capped by the server')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as ChannelOptions;
       await runCommandAction({
@@ -97,6 +98,7 @@ export function registerChannelCommands(program: Command): void {
         run: ({ reporter }) =>
           listPublicChannels({
             profileName: options.profile,
+            limit: options.limit,
             reporter,
           }),
         toHuman: result => ({

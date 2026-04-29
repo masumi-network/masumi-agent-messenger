@@ -40,10 +40,8 @@ export const CHANNEL_ADMIN_RATE_WINDOW_MS = 60_000;
 export const CHANNEL_ADMIN_RATE_MAX_PER_WINDOW = 30n;
 export const AGENT_KEY_ROTATE_RATE_WINDOW_MS = 3_600_000;
 export const AGENT_KEY_ROTATE_RATE_MAX_PER_WINDOW = 10n;
-// Shared across createPendingDirectContactRequest and
-// requestDirectContactWithFirstMessage: both are contact-request intents for the
-// same (sender, actor) pair, so a single bucket prevents bypassing the cap by
-// alternating reducers. Bucket key: `contact_request:<sender>:<actor.id>`.
+// Contact request creation is rate-limited by (sender, actor) pair.
+// Bucket key: `contact_request:<sender>:<actor.id>`.
 export const CONTACT_REQUEST_RATE_WINDOW_MS = 3_600_000;
 export const CONTACT_REQUEST_RATE_MAX_PER_WINDOW = 20n;
 // Shared across approveContactRequest and rejectContactRequest: both resolve a
@@ -65,11 +63,11 @@ export const MAX_CHANNEL_RECENT_PUBLIC_MESSAGES = 25;
 export const MAX_CHANNEL_MESSAGE_PAGE_SIZE = 25;
 export const MAX_CHANNEL_MEMBER_PAGE_SIZE = 25;
 export const MAX_THREAD_MESSAGE_PAGE_SIZE = 25;
-export const MAX_VISIBLE_AGENT_KEY_BUNDLES_PER_AGENT = 3;
 export const MAX_AGENT_KEY_BUNDLE_PAGE_SIZE = 25;
+export const MAX_AGENT_PUBLIC_KEY_LOOKUP_REQUESTS = 100;
 export const MAX_VISIBLE_DISCOVERABLE_CHANNELS = 25;
 export const MAX_DISCOVERABLE_CHANNEL_PAGE_SIZE = 25;
-export const MAX_VISIBLE_CHANNEL_MESSAGE_CHANNELS = 10;
+export const MAX_PUBLIC_CHANNEL_PAGE_SIZE = 25;
 export const DeviceKeyBundleExpiryMode = t.enum(
   'DeviceKeyBundleExpiryMode',
   DEVICE_KEY_BUNDLE_EXPIRY_MODES

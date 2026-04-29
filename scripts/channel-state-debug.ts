@@ -13,20 +13,33 @@ async function main() {
   try {
     const visibleChannelsQuery = tables.visibleChannels.where(() => true);
     const membersQuery = tables.visibleChannelMemberships.where(() => true);
-    const publicRecentQuery = tables.publicRecentChannelMessage.where(() => true);
-    const publicChannelQuery = tables.publicChannel.where(() => true);
+    const publicChannelQuery = tables.publicChannels.where(row => row.slug.eq('public-discussion'));
     const actorsQuery = tables.visibleAgents.where(() => true);
     await new Promise<void>((resolve, reject) => {
       const subscription = conn
         .subscriptionBuilder()
         .onApplied(() => resolve())
         .onError(reject)
-        .subscribe([publicChannelQuery, publicRecentQuery, visibleChannelsQuery, membersQuery, actorsQuery]);
+        .subscribe([publicChannelQuery, visibleChannelsQuery, membersQuery, actorsQuery]);
       void subscription;
     });
 
     const actor = Array.from((conn.db.visibleAgents as any).iter()).find((a:any)=>a.slug==='test-test-test');
-    const channel = Array.from((conn.db.publicChannel as any).iter()).find((c: any) => c.slug === 'public-discussion');
+    const channel = Array.from((conn.db.publicChannels as any).iter()).find((c: any) => c.slug === 'public-discussion');
+    if (!channel) {
+      throw new Error('public-discussion channel was not found');
+    }
+    const publicRecentQuery = tables.publicRecentChannelMessages.where(row =>
+      row.channelId.eq(channel.channelId)
+    );
+    await new Promise<void>((resolve, reject) => {
+      const subscription = conn
+        .subscriptionBuilder()
+        .onApplied(() => resolve())
+        .onError(reject)
+        .subscribe([publicRecentQuery]);
+      void subscription;
+    });
     console.log('actor', actor && actor.id?.toString?.(), 'actor key version', actor?.currentSigningKeyVersion);
     console.log('public channel', channel && {
       id: channel.channelId?.toString(),
@@ -36,7 +49,7 @@ async function main() {
       row: channel,
     });
 
-    const recentRows = Array.from((conn.db.publicRecentChannelMessage as any).iter()) as any[];
+    const recentRows = Array.from((conn.db.publicRecentChannelMessages as any).iter()) as any[];
     console.log('publicRecent total', recentRows.length);
     console.log('publicRecent ids', recentRows.map((r:any) => r.id.toString()).sort((a:string,b:string)=>Number(BigInt(a)-BigInt(b))));
     const chanRecent = recentRows.filter((r:any) => r.channelId === channel.channelId).sort((a,b)=> Number(a.channelSeq-b.channelSeq));
