@@ -8,8 +8,10 @@ const {
   MAX_VISIBLE_DISCOVERABLE_CHANNELS,
   MAX_DISCOVERABLE_CHANNEL_PAGE_SIZE,
   MAX_PUBLIC_CHANNEL_PAGE_SIZE,
+  MAX_CHANNEL_JOIN_REQUEST_PAGE_SIZE,
   PublicChannelMirrorRow,
   PublicChannelPageRow,
+  VisibleChannelState,
   VisibleChannelRow,
   normalizeChannelSlug,
   normalizeOptionalChannelTitle,
@@ -19,9 +21,15 @@ const {
   normalizeChannelAccessMode,
   normalizePublicChannelJoinPermission,
   buildPublicChannelSortKeyFromCursor,
+  buildChannelJoinRequestKey,
+  buildChannelMemberKey,
+  dedupeRowsById,
   getReadableInbox,
   getOwnedActor,
   getOwnedActorForRead,
+  getOwnActorIdsForInbox,
+  getRequiredActorByDbId,
+  toSanitizedVisibleAgentRow,
   requireAdminChannelMember,
   resolveRequiredChannel,
   ensureChannelMember,
@@ -65,10 +73,101 @@ function toPublicChannelPageRow(channel: model.PublicChannelTableRow) {
   };
 }
 
-export const publicChannels = spacetimedb.anonymousView(
-  { public: true },
+function toPublicChannelMirrorRow(channel: model.PublicChannelTableRow) {
+  return {
+    ...toPublicChannelPageRow(channel),
+    sortKey: channel.sortKey,
+  };
+}
+
+function toVisibleChannelMembershipRow(member: model.ChannelMemberRow) {
+  return {
+    id: member.id,
+    channelId: member.channelId,
+    agentDbId: member.agentDbId,
+    permission: member.permission,
+    active: member.active,
+    lastSentSeq: member.lastSentSeq,
+    joinedAt: member.joinedAt,
+    updatedAt: member.updatedAt,
+  };
+}
+
+function toVisibleChannelJoinRequestRow(
+  ctx: model.ReadDbCtx,
+  ownActorIds: ReadonlySet<bigint>,
+  request: model.ChannelJoinRequestRow
+) {
+  const channel = ctx.db.channel.id.find(request.channelId);
+  if (!channel) {
+    throw new SenderError('Channel not found');
+  }
+  const requester = getRequiredActorByDbId(ctx, request.requesterAgentDbId);
+  return {
+    id: request.id,
+    channelId: request.channelId,
+    channelSlug: channel.slug,
+    channelTitle: channel.title,
+    requesterAgentDbId: request.requesterAgentDbId,
+    requesterPublicIdentity: requester.publicIdentity,
+    requesterSlug: requester.slug,
+    requesterDisplayName: requester.displayName,
+    requesterCurrentEncryptionPublicKey: requester.currentEncryptionPublicKey,
+    requesterCurrentEncryptionKeyVersion: requester.currentEncryptionKeyVersion,
+    permission: request.permission,
+    status: request.status,
+    direction: ownActorIds.has(request.requesterAgentDbId) ? 'outgoing' : 'incoming',
+    createdAt: request.createdAt,
+    updatedAt: request.updatedAt,
+    resolvedAt: request.resolvedAt,
+    resolvedByAgentDbId: request.resolvedByAgentDbId,
+  };
+}
+
+function findChannelForRead(
+  ctx: model.ReadDbCtx,
+  params: {
+    channelId?: bigint;
+    channelSlug?: string;
+  }
+) {
+  if (params.channelId !== undefined) {
+    return ctx.db.channel.id.find(params.channelId) ?? null;
+  }
+  if (params.channelSlug !== undefined) {
+    return ctx.db.channel.slug.find(normalizeChannelSlug(params.channelSlug)) ?? null;
+  }
+  return null;
+}
+
+function findPublicChannelForRead(
+  ctx: model.ReadDbCtx,
+  params: {
+    channelId?: bigint;
+    channelSlug?: string;
+  }
+) {
+  if (params.channelId !== undefined) {
+    return ctx.db.publicChannel.channelId.find(params.channelId) ?? null;
+  }
+  if (params.channelSlug !== undefined) {
+    return ctx.db.publicChannel.slug.find(normalizeChannelSlug(params.channelSlug)) ?? null;
+  }
+  return null;
+}
+
+export const readPublicChannel = spacetimedb.procedure(
+  {
+    channelId: t.u64().optional(),
+    channelSlug: t.string().optional(),
+  },
   t.array(PublicChannelMirrorRow),
-  ctx => ctx.from.publicChannel.build()
+  (ctx, { channelId, channelSlug }) => {
+    return ctx.withTx(tx => {
+      const channel = findPublicChannelForRead(tx, { channelId, channelSlug });
+      return channel ? [toPublicChannelMirrorRow(channel)] : [];
+    });
+  }
 );
 
 export const listPublicChannels = spacetimedb.procedure(
@@ -98,10 +197,10 @@ export const listPublicChannels = spacetimedb.procedure(
       const publicChannelPrefixRange = [true] as unknown as Parameters<
         typeof tx.db.publicChannel.public_channel_discoverable_sort_key.filter
       >[0];
-      const publicChannels =
+      const publicChannelRows =
         tx.db.publicChannel.public_channel_discoverable_sort_key.filter(publicChannelPrefixRange);
       const page: model.PublicChannelTableRow[] = [];
-      for (const channel of publicChannels) {
+      for (const channel of publicChannelRows) {
         if (cursorSortKey !== undefined && channel.sortKey <= cursorSortKey) {
           continue;
         }
@@ -157,6 +256,117 @@ export const visibleChannels = spacetimedb.view(
           channel.accessMode === 'public' || activeMemberChannelIds.has(channel.id)
         )
       );
+  }
+);
+
+export const readVisibleChannelState = spacetimedb.procedure(
+  {
+    agentDbId: t.u64(),
+    channelId: t.u64().optional(),
+    channelSlug: t.string().optional(),
+    requestId: t.u64().optional(),
+  },
+  VisibleChannelState,
+  (ctx, { agentDbId, channelId, channelSlug, requestId }) => {
+    return ctx.withTx(tx => {
+      const actor = getOwnedActorForRead(tx, agentDbId);
+      const ownActorIds = getOwnActorIdsForInbox(tx, actor.inboxId);
+      const requestById =
+        requestId === undefined ? null : tx.db.channelJoinRequest.id.find(requestId) ?? null;
+      const channel =
+        findChannelForRead(tx, { channelId, channelSlug }) ??
+        (requestById ? tx.db.channel.id.find(requestById.channelId) ?? null : null);
+      const emptyState = {
+        actors: [toSanitizedVisibleAgentRow(tx, actor.inboxId, actor)],
+        channels: [],
+        memberships: [],
+        requests: [],
+      };
+      if (!channel) {
+        return emptyState;
+      }
+
+      const memberships = Array.from(ownActorIds)
+        .map(ownActorId =>
+          tx.db.channelMember.uniqueKey.find(buildChannelMemberKey(channel.id, ownActorId))
+        )
+        .filter((member): member is NonNullable<typeof member> => Boolean(member));
+      const activeMemberships = memberships.filter(member => member.active);
+      const hasActiveMembership = activeMemberships.length > 0;
+      const hasAdminMembership = activeMemberships.some(member => member.permission === 'admin');
+      const ownRequests = Array.from(ownActorIds)
+        .map(ownActorId =>
+          tx.db.channelJoinRequest.uniqueKey.find(
+            buildChannelJoinRequestKey(channel.id, ownActorId)
+          )
+        )
+        .filter((request): request is NonNullable<typeof request> => Boolean(request));
+      const hasPendingOwnRequest = ownRequests.some(request => request.status === 'pending');
+      if (
+        requestById !== null &&
+        !ownActorIds.has(requestById.requesterAgentDbId) &&
+        !hasAdminMembership
+      ) {
+        return emptyState;
+      }
+      const channelIsVisible =
+        channel.accessMode === 'public' ||
+        channel.discoverable ||
+        hasActiveMembership ||
+        hasPendingOwnRequest;
+      if (!channelIsVisible) {
+        return emptyState;
+      }
+
+      const adminRequests: model.ChannelJoinRequestRow[] = [];
+      if (hasAdminMembership) {
+        for (const request of tx.db.channelJoinRequest.channel_join_request_channel_id.filter(
+          channel.id
+        )) {
+          adminRequests.push(request);
+          if (adminRequests.length >= MAX_CHANNEL_JOIN_REQUEST_PAGE_SIZE) {
+            break;
+          }
+        }
+      }
+      const channelRequests =
+        requestById !== null
+          ? [requestById]
+          : dedupeRowsById([...ownRequests, ...adminRequests]);
+      const visibleRequests = channelRequests.filter(
+        request =>
+          request.channelId === channel.id &&
+          (ownActorIds.has(request.requesterAgentDbId) || hasAdminMembership)
+      );
+      const visibleActorIds = new Set<bigint>([actor.id]);
+      for (const member of memberships) {
+        visibleActorIds.add(member.agentDbId);
+      }
+      for (const request of visibleRequests) {
+        if (ownActorIds.has(request.requesterAgentDbId)) {
+          visibleActorIds.add(request.requesterAgentDbId);
+        }
+      }
+
+      return {
+        actors: Array.from(visibleActorIds)
+          .map(visibleActorId => tx.db.agent.id.find(visibleActorId))
+          .filter((visibleActor): visibleActor is NonNullable<typeof visibleActor> =>
+            Boolean(visibleActor)
+          )
+          .map(visibleActor => toSanitizedVisibleAgentRow(tx, actor.inboxId, visibleActor)),
+        channels: [
+          toVisibleChannelRow(
+            channel,
+            channel.accessMode === 'public' || hasActiveMembership
+          ),
+        ],
+        memberships: memberships.map(toVisibleChannelMembershipRow),
+        requests: visibleRequests.map(request =>
+          toVisibleChannelJoinRequestRow(tx, ownActorIds, request)
+        ),
+      };
+    });
   }
 );
 

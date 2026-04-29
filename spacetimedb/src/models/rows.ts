@@ -341,6 +341,13 @@ export const VisibleChannelJoinRequestRow = t.object('VisibleChannelJoinRequestR
   resolvedByAgentDbId: t.u64().optional(),
 });
 
+export const VisibleChannelState = t.object('VisibleChannelState', {
+  actors: t.array(VisibleAgentRow),
+  channels: t.array(VisibleChannelRow),
+  memberships: t.array(VisibleChannelMembershipRow),
+  requests: t.array(VisibleChannelJoinRequestRow),
+});
+
 export const VisibleThreadInviteRow = t.object('VisibleThreadInviteRow', {
   id: t.u64(),
   threadId: t.u64(),
@@ -395,17 +402,6 @@ export const VisibleContactAllowlistEntryRow = t.object('VisibleContactAllowlist
   displayEmail: t.string().optional(),
   createdByAgentDbId: t.u64(),
   createdAt: t.timestamp(),
-});
-
-export const VisibleMessageSnapshot = t.object('VisibleMessageSnapshot', {
-  actors: t.array(VisibleAgentRow),
-  participants: t.array(VisibleThreadParticipantRow),
-  readStates: t.array(VisibleThreadReadStateRow),
-  secretEnvelopes: t.array(VisibleThreadSecretEnvelopeRow),
-  threads: t.array(VisibleThreadRow),
-  contactRequests: t.array(VisibleContactRequestRow),
-  threadInvites: t.array(VisibleThreadInviteRow),
-  messages: t.array(VisibleMessageRow),
 });
 
 export const VisibleThreadMessagePage = t.object('VisibleThreadMessagePage', {

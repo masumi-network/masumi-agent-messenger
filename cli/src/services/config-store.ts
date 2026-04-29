@@ -67,6 +67,7 @@ const StoredProfileSchema = z.object({
   redirectUri: z.string().optional(),
   oidcScope: z.string(),
   activeAgentSlug: z.string().optional(),
+  completedMigrations: z.record(z.string(), z.string()).optional(),
   lastAuthenticatedAt: z.string().optional(),
   lastBootstrapAt: z.string().optional(),
   bootstrapSnapshot: BootstrapSnapshotSchema.optional(),
@@ -390,6 +391,29 @@ export async function saveActiveAgentSlug(
   return mutateProfile(profileName, profile => ({
     ...profile,
     activeAgentSlug: activeAgentSlug?.trim() || undefined,
+  }));
+}
+
+export async function hasCompletedProfileMigration(
+  profileName: string | undefined,
+  migrationKey: string
+): Promise<boolean> {
+  const normalizedProfileName = normalizeProfileName(profileName);
+  const config = await readStoredConfig();
+  const profile = mergeProfile(config.profiles[normalizedProfileName]);
+  return Boolean(profile.completedMigrations?.[migrationKey]);
+}
+
+export async function markProfileMigrationComplete(
+  profileName: string | undefined,
+  migrationKey: string
+): Promise<ResolvedProfile> {
+  return mutateProfile(profileName, profile => ({
+    ...profile,
+    completedMigrations: {
+      ...(profile.completedMigrations ?? {}),
+      [migrationKey]: new Date().toISOString(),
+    },
   }));
 }
 

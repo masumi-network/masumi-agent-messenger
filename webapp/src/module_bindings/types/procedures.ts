@@ -10,6 +10,7 @@ import * as ClaimDeviceKeyBundleProcedure from "../claim_device_key_bundle_proce
 import * as ListChannelMembersProcedure from "../list_channel_members_procedure";
 import * as ListChannelMessagesProcedure from "../list_channel_messages_procedure";
 import * as ListDiscoverableChannelsProcedure from "../list_discoverable_channels_procedure";
+import * as ListPublicChannelMessagesProcedure from "../list_public_channel_messages_procedure";
 import * as ListPublicChannelsProcedure from "../list_public_channels_procedure";
 import * as ListThreadMessagesProcedure from "../list_thread_messages_procedure";
 import * as ListThreadSecretEnvelopesProcedure from "../list_thread_secret_envelopes_procedure";
@@ -20,7 +21,9 @@ import * as LookupPublishedAgentBySlugProcedure from "../lookup_published_agent_
 import * as LookupPublishedAgentSigningKeysProcedure from "../lookup_published_agent_signing_keys_procedure";
 import * as LookupPublishedAgentsByEmailProcedure from "../lookup_published_agents_by_email_procedure";
 import * as LookupPublishedPublicRouteBySlugProcedure from "../lookup_published_public_route_by_slug_procedure";
-import * as ReadVisibleMessageSnapshotProcedure from "../read_visible_message_snapshot_procedure";
+import * as ReadOwnedAgentProcedure from "../read_owned_agent_procedure";
+import * as ReadPublicChannelProcedure from "../read_public_channel_procedure";
+import * as ReadVisibleChannelStateProcedure from "../read_visible_channel_state_procedure";
 import * as ReadVisibleThreadProcedure from "../read_visible_thread_procedure";
 import * as ResolveDeviceShareRequestByCodeProcedure from "../resolve_device_share_request_by_code_procedure";
 
@@ -32,6 +35,8 @@ export type ListChannelMessagesArgs = __Infer<typeof ListChannelMessagesProcedur
 export type ListChannelMessagesResult = __Infer<typeof ListChannelMessagesProcedure.returnType>;
 export type ListDiscoverableChannelsArgs = __Infer<typeof ListDiscoverableChannelsProcedure.params>;
 export type ListDiscoverableChannelsResult = __Infer<typeof ListDiscoverableChannelsProcedure.returnType>;
+export type ListPublicChannelMessagesArgs = __Infer<typeof ListPublicChannelMessagesProcedure.params>;
+export type ListPublicChannelMessagesResult = __Infer<typeof ListPublicChannelMessagesProcedure.returnType>;
 export type ListPublicChannelsArgs = __Infer<typeof ListPublicChannelsProcedure.params>;
 export type ListPublicChannelsResult = __Infer<typeof ListPublicChannelsProcedure.returnType>;
 export type ListThreadMessagesArgs = __Infer<typeof ListThreadMessagesProcedure.params>;
@@ -52,8 +57,12 @@ export type LookupPublishedAgentsByEmailArgs = __Infer<typeof LookupPublishedAge
 export type LookupPublishedAgentsByEmailResult = __Infer<typeof LookupPublishedAgentsByEmailProcedure.returnType>;
 export type LookupPublishedPublicRouteBySlugArgs = __Infer<typeof LookupPublishedPublicRouteBySlugProcedure.params>;
 export type LookupPublishedPublicRouteBySlugResult = __Infer<typeof LookupPublishedPublicRouteBySlugProcedure.returnType>;
-export type ReadVisibleMessageSnapshotArgs = __Infer<typeof ReadVisibleMessageSnapshotProcedure.params>;
-export type ReadVisibleMessageSnapshotResult = __Infer<typeof ReadVisibleMessageSnapshotProcedure.returnType>;
+export type ReadOwnedAgentArgs = __Infer<typeof ReadOwnedAgentProcedure.params>;
+export type ReadOwnedAgentResult = __Infer<typeof ReadOwnedAgentProcedure.returnType>;
+export type ReadPublicChannelArgs = __Infer<typeof ReadPublicChannelProcedure.params>;
+export type ReadPublicChannelResult = __Infer<typeof ReadPublicChannelProcedure.returnType>;
+export type ReadVisibleChannelStateArgs = __Infer<typeof ReadVisibleChannelStateProcedure.params>;
+export type ReadVisibleChannelStateResult = __Infer<typeof ReadVisibleChannelStateProcedure.returnType>;
 export type ReadVisibleThreadArgs = __Infer<typeof ReadVisibleThreadProcedure.params>;
 export type ReadVisibleThreadResult = __Infer<typeof ReadVisibleThreadProcedure.returnType>;
 export type ResolveDeviceShareRequestByCodeArgs = __Infer<typeof ResolveDeviceShareRequestByCodeProcedure.params>;

@@ -241,6 +241,25 @@ describe('generated and source security contracts', () => {
     expect(archiveReducer).not.toContain('requireActiveThreadParticipant(ctx, threadId, actor.id);');
   });
 
+  it('keeps visible-thread read procedures side-effect free', () => {
+    const threadSource = readBackendFile('operations/threads/thread.ts');
+    const listVisibleThreadsProcedure = sourceBetween(
+      threadSource,
+      'export const listVisibleThreads',
+      'export const readVisibleThread'
+    );
+    const readVisibleThreadProcedure = sourceBetween(
+      threadSource,
+      'export const readVisibleThread',
+      'export const createDirectThread'
+    );
+
+    expect(listVisibleThreadsProcedure).not.toContain('threadReadState.insert');
+    expect(listVisibleThreadsProcedure).not.toContain('threadReadState.id.update');
+    expect(readVisibleThreadProcedure).not.toContain('threadReadState.insert');
+    expect(readVisibleThreadProcedure).not.toContain('threadReadState.id.update');
+  });
+
   it('removes the extra public actor resolve route from the generated route tree', () => {
     const routeTree = readRelativeFile('src/routeTree.gen.ts');
 
@@ -383,6 +402,9 @@ describe('generated and source security contracts', () => {
 
     expect(backend).toContain("scheduled: (): any => getScheduledReducer('expireInboxAuthLease')");
     expect(backend).toContain('expireInboxAuthLease,');
+    expect(backend).toContain('function requireScheduledReducerCall');
+    expect(backend).toContain('ctx.connectionId !== null');
+    expect(backend).not.toContain('ctx.senderAuth.isInternal');
     expect(backend).not.toContain('Timestamp.now()');
     expect(backend).toContain('!isTimestampExpired(lease.expiresAt, ctx.timestamp)');
     expect(backend).toContain('function isExpectedInboxAuthLeaseRefreshError');
@@ -456,6 +478,103 @@ describe('generated and source security contracts', () => {
     expect(removeMemberReducer).toContain('enforceChannelAdminRateLimit(ctx, channelId);');
     expect(approveJoinReducer).toContain('enforceChannelAdminRateLimit(ctx, channel.id);');
     expect(rejectJoinReducer).toContain('enforceChannelAdminRateLimit(ctx, request.channelId);');
+  });
+
+  it('limits live SpacetimeDB subscriptions and paginated server procedures', () => {
+    const subscriptionLimits = readFileSync(
+      resolve(WEBAPP_ROOT, '../shared/spacetime-subscription-limits.ts'),
+      'utf8'
+    );
+    const liveTable = readRelativeFile('src/lib/spacetime-live-table.ts');
+    const serverHelpers = readRelativeFile('src/lib/spacetimedb-server.ts');
+    const cliSpacetime = readFileSync(
+      resolve(WEBAPP_ROOT, '../cli/src/services/spacetimedb.ts'),
+      'utf8'
+    );
+    const cliChannels = readFileSync(
+      resolve(WEBAPP_ROOT, '../cli/src/services/channel.ts'),
+      'utf8'
+    );
+    const channelRoute = readRelativeFile('src/routes/channels_.$slug.tsx');
+    const rootRoute = readRelativeFile('src/routes/index.tsx');
+    const backend = readBackendSource();
+    const publicChannelProcedure = sourceBetween(
+      backend,
+      'export const listPublicChannels',
+      'export const visibleChannels'
+    );
+    const discoverableChannelProcedure = sourceBetween(
+      backend,
+      'export const listDiscoverableChannels',
+      'export const createChannel'
+    );
+    const channelMessageProcedure = sourceBetween(
+      backend,
+      'export const listChannelMessages',
+      'export const sendChannelMessage'
+    );
+    const publicChannelMessageProcedure = sourceBetween(
+      backend,
+      'export const listPublicChannelMessages',
+      'export const listChannelMessages'
+    );
+    const channelMemberProcedure = sourceBetween(
+      backend,
+      'export const listChannelMembers',
+      'export const joinPublicChannel'
+    );
+    const visibleThreadProcedure = sourceBetween(
+      backend,
+      'export const listVisibleThreads',
+      'export const createDirectThread'
+    );
+    const threadMessageProcedure = sourceBetween(
+      backend,
+      'export const listThreadMessages',
+      'export const requestDirectContactWithFirstMessage'
+    );
+
+    expect(subscriptionLimits).toContain('SPACETIME_SUBSCRIPTION_LIMITS');
+    expect(subscriptionLimits).toContain('SpacetimeDB 2.1 rejects `LIMIT` in live subscription SQL');
+    expect(subscriptionLimits).toContain('void spacetimeSubscriptionLimitFor(tableName);');
+    expect(subscriptionLimits).toContain('return sql;');
+    expect(liveTable).toContain('limitSpacetimeSubscriptionQuery(');
+    expect(serverHelpers).toContain("limitSpacetimeSubscriptionQuery(tables.visibleInboxes, 'visibleInboxes')");
+    expect(cliSpacetime).toContain("limitSubscription(tables.visibleThreads, 'visibleThreads')");
+    expect(cliSpacetime).toContain("limitSubscription(tables.visibleThreadSecretEnvelopes, 'visibleThreadSecretEnvelopes')");
+    expect(cliChannels).toContain('conn.procedures.listPublicChannelMessages({');
+    expect(cliChannels).toContain('conn.procedures.readOwnedAgent({');
+    expect(cliChannels).toContain('conn.procedures.readPublicChannel({');
+    expect(cliChannels).toContain('conn.procedures.readVisibleChannelState({');
+    expect(cliSpacetime).toContain('readOwnedAgentRows');
+    expect(cliSpacetime).toContain('repairOwnSenderReadStatesOnce');
+    expect(channelRoute).toContain('usePublicChannelLookup({');
+    expect(channelRoute).toContain('usePublicChannelMessagesLookup({');
+    expect(rootRoute).toContain('usePublicChannelLookup({ channelId })');
+    expect(rootRoute).toContain('usePublicChannelMessagesLookup({');
+    expect(backend).toContain('export const readOwnedAgent');
+    expect(backend).toContain('export const readPublicChannel');
+    expect(backend).toContain('export const listPublicChannelMessages');
+    expect(backend).toContain('export const readVisibleChannelState');
+    expect(backend).toContain('MAX_PUBLIC_RECENT_CHANNEL_MESSAGE_VIEW_ROWS = 25');
+    expect(backend).toContain('public_recent_channel_message_visible_sort_key.filter');
+    expect(backend).toContain('public_recent_channel_message_channel_id_seq.filter');
+    expect(backend).not.toContain('ctx.db.publicRecentChannelMessage.iter()');
+    expect(backend).not.toContain('export const publicChannels = spacetimedb.anonymousView');
+
+    expect(publicChannelProcedure).toContain('limit > BigInt(MAX_PUBLIC_CHANNEL_PAGE_SIZE)');
+    expect(publicChannelMessageProcedure).toContain('limit > BigInt(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)');
+    expect(discoverableChannelProcedure).toContain('limit > BigInt(MAX_DISCOVERABLE_CHANNEL_PAGE_SIZE)');
+    expect(channelMessageProcedure).toContain('limit > BigInt(MAX_CHANNEL_MESSAGE_PAGE_SIZE)');
+    expect(channelMemberProcedure).toContain('limit > BigInt(MAX_CHANNEL_MEMBER_PAGE_SIZE)');
+    expect(visibleThreadProcedure).toContain('normalizeThreadPageLimit(limit)');
+    expect(threadMessageProcedure).toContain('normalizeThreadMessagePageSize(limit)');
+
+    expect(backend).not.toContain('MAX_VISIBLE_AGENT_ROWS');
+    expect(backend).not.toContain('MAX_VISIBLE_THREAD_PARTICIPANT_ROWS');
+    expect(backend).not.toContain('MAX_VISIBLE_THREAD_SECRET_ENVELOPE_ROWS');
+    expect(backend).not.toContain('MAX_VISIBLE_CHANNEL_MEMBERSHIP_ROWS');
+    expect(backend).not.toContain('MAX_VISIBLE_CHANNEL_JOIN_REQUEST_ROWS');
   });
 
   it('uses thread invites and shared fanout caps for group membership', () => {

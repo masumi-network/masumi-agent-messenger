@@ -29,6 +29,7 @@ import {
   parseDecryptedMessagePlaintext,
 } from '../../../../shared/message-format';
 import { generateClientThreadId } from '../../../../shared/inbox-state';
+import { limitSpacetimeSubscriptionQuery } from '../../../../shared/spacetime-subscription-limits';
 
 if (!globalThis.crypto) {
   globalThis.crypto = webcrypto as Crypto;
@@ -66,15 +67,14 @@ type ProvisionedClient = {
 };
 
 const VISIBLE_QUERIES = [
-  tables.visibleInboxes,
-  tables.visibleAgents,
-  tables.visibleThreads,
-  tables.visibleThreadParticipants,
-  tables.visibleThreadReadStates,
-  tables.visibleThreadSecretEnvelopes,
-  tables.visibleContactRequests,
-  tables.visibleContactAllowlistEntries,
-  tables.visibleMessages,
+  limitSpacetimeSubscriptionQuery(tables.visibleInboxes, 'visibleInboxes'),
+  limitSpacetimeSubscriptionQuery(tables.visibleAgents, 'visibleAgents'),
+  limitSpacetimeSubscriptionQuery(tables.visibleThreads, 'visibleThreads'),
+  limitSpacetimeSubscriptionQuery(tables.visibleThreadParticipants, 'visibleThreadParticipants'),
+  limitSpacetimeSubscriptionQuery(tables.visibleThreadReadStates, 'visibleThreadReadStates'),
+  limitSpacetimeSubscriptionQuery(tables.visibleThreadSecretEnvelopes, 'visibleThreadSecretEnvelopes'),
+  limitSpacetimeSubscriptionQuery(tables.visibleContactRequests, 'visibleContactRequests'),
+  limitSpacetimeSubscriptionQuery(tables.visibleContactAllowlistEntries, 'visibleContactAllowlistEntries'),
 ] as const;
 
 function decodeJwtPayload(token: string): Record<string, unknown> {
@@ -115,10 +115,6 @@ function listVisibleThreads(conn: DbConnection): VisibleThreadRow[] {
 
 function listVisibleParticipants(conn: DbConnection): VisibleThreadParticipantRow[] {
   return Array.from(conn.db.visibleThreadParticipants.iter());
-}
-
-function listVisibleMessages(conn: DbConnection): VisibleMessageRow[] {
-  return Array.from(conn.db.visibleMessages.iter());
 }
 
 function listVisibleSecretEnvelopes(conn: DbConnection): VisibleThreadSecretEnvelopeRow[] {
@@ -179,6 +175,19 @@ async function waitFor(check: () => boolean, label: string, timeoutMs = 15_000):
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function listThreadMessagesFor(
+  client: ProvisionedClient,
+  threadId: bigint
+): Promise<VisibleMessageRow[]> {
+  const page = await client.conn.procedures.listThreadMessages({
+    agentDbId: client.actor.id,
+    threadId,
+    beforeThreadSeq: undefined,
+    limit: 25n,
+  });
+  return page.messages;
 }
 
 async function connectVisibleClient(token?: string): Promise<ConnectedState> {
@@ -540,11 +549,17 @@ describe.skipIf(!liveEnvReady)('live spacetime security', () => {
     );
 
     await waitFor(
-      () => listVisibleMessages(bob.conn).some(message => message.threadId === thread.id),
-      'bob inbound message visibility'
+      () =>
+        listVisibleThreads(bob.conn).some(
+          visibleThread =>
+            visibleThread.id === thread.id && visibleThread.lastMessageSeq >= 1n
+        ),
+      'bob inbound thread signal'
     );
 
-    const bobMessage = listVisibleMessages(bob.conn).find(message => message.threadId === thread.id);
+    const bobMessage = (await listThreadMessagesFor(bob, thread.id)).find(
+      message => message.threadId === thread.id
+    );
     if (!bobMessage) {
       throw new Error('Bob never received Alice message');
     }
@@ -565,7 +580,6 @@ describe.skipIf(!liveEnvReady)('live spacetime security', () => {
       expect(listVisibleThreads(anonymous.conn)).toHaveLength(0);
       expect(listVisibleParticipants(anonymous.conn)).toHaveLength(0);
       expect(listVisibleSecretEnvelopes(anonymous.conn)).toHaveLength(0);
-      expect(listVisibleMessages(anonymous.conn)).toHaveLength(0);
     } finally {
       anonymous.conn.disconnect();
     }
@@ -575,9 +589,13 @@ describe.skipIf(!liveEnvReady)('live spacetime security', () => {
     const bobPlaintext = await decryptLatestMessage(bob, sentMessage);
 
     expect(bobPlaintext).toBe('hello from alice security test');
-    expect(listVisibleMessages(alice.conn).some(message => message.threadId === thread.id)).toBe(true);
-    expect(listVisibleMessages(bob.conn).some(message => message.threadId === thread.id)).toBe(true);
-    expect(listVisibleMessages(mallory.conn).some(message => message.threadId === thread.id)).toBe(false);
+    await expect(listThreadMessagesFor(alice, thread.id)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ threadId: thread.id })])
+    );
+    await expect(listThreadMessagesFor(bob, thread.id)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ threadId: thread.id })])
+    );
+    await expect(listThreadMessagesFor(mallory, thread.id)).rejects.toThrow();
     expect(listVisibleSecretEnvelopes(mallory.conn).some(envelope => envelope.threadId === thread.id)).toBe(false);
     expect(listVisibleThreads(mallory.conn).some(candidate => candidate.id === thread.id)).toBe(false);
   });
@@ -662,7 +680,7 @@ describe.skipIf(!liveEnvReady)('live spacetime security', () => {
 
     expect(listVisibleThreads(bob.conn).some(candidate => candidate.id === thread.id)).toBe(true);
 
-    const historicalMessage = listVisibleMessages(bob.conn).find(
+    const historicalMessage = (await listThreadMessagesFor(bob, thread.id)).find(
       message => message.id === sentMessage.id
     );
     if (!historicalMessage) {

@@ -1,4 +1,12 @@
 import { tables, type DbConnection, type SubscriptionHandle } from '../../../webapp/src/module_bindings';
+import {
+  buildOwnActorIds,
+  buildParticipantsByThreadId,
+  findDefaultActorByEmail,
+  resolveDirectCounterparty,
+} from '../../../shared/inbox-state';
+import { normalizeInboxSlug } from '../../../shared/inbox-slug';
+import { limitSpacetimeSubscriptionQuery } from '../../../shared/spacetime-subscription-limits';
 import type {
   VisibleAgentRow,
   VisibleThreadParticipantRow,
@@ -18,7 +26,12 @@ import type {
   VisibleChannelRow,
 } from '../../../webapp/src/module_bindings/types';
 import { DbConnection as GeneratedDbConnection } from '../../../webapp/src/module_bindings';
-import { connectivityError } from './errors';
+import { connectivityError, userError } from './errors';
+import { mergeRowsById } from './row-utils';
+import {
+  hasCompletedProfileMigration,
+  markProfileMigrationComplete,
+} from './config-store';
 
 type ConnectionResult = {
   conn: DbConnection;
@@ -38,7 +51,7 @@ export type ShellRows = {
   devices: VisibleDeviceRow[];
   deviceRequests: VisibleDeviceShareRequestRow[];
   deviceBundles: VisibleDeviceKeyBundleRow[];
-  messages: VisibleMessageRow[];
+  threadSignals: VisibleThreadRow[];
   channels: VisibleChannelRow[];
   channelMemberships: VisibleChannelMembershipRow[];
   channelJoinRequests: VisibleChannelJoinRequestRow[];
@@ -54,23 +67,36 @@ type TableLike<Row> = {
   removeOnUpdate?(callback: (ctx: unknown, oldRow: Row, newRow: Row) => void): void;
 };
 
+const messageTableSubscriptions = new WeakMap<DbConnection, Promise<SubscriptionHandle>>();
+const limitSubscription = limitSpacetimeSubscriptionQuery;
+const REPAIR_OWN_SENDER_READ_STATES_MIGRATION = 'repair-own-sender-read-states-v1';
+
+function normalizeSpacetimeWebSocketUri(host: string): URL {
+  const uri = new URL(host);
+  if (uri.protocol === 'https:') {
+    uri.protocol = 'wss:';
+  } else if (uri.protocol === 'http:') {
+    uri.protocol = 'ws:';
+  }
+  return uri;
+}
+
 const SHELL_VISIBLE_QUERIES = [
-  tables.visibleInboxes,
-  tables.visibleAgents,
-  tables.visibleThreadParticipants,
-  tables.visibleThreadReadStates,
-  tables.visibleThreadSecretEnvelopes,
-  tables.visibleThreads,
-  tables.visibleContactRequests,
-  tables.visibleThreadInvites,
-  tables.visibleContactAllowlistEntries,
-  tables.visibleDevices,
-  tables.visibleDeviceShareRequests,
-  tables.visibleDeviceKeyBundles,
-  tables.visibleMessages,
-  tables.visibleChannels,
-  tables.visibleChannelMemberships,
-  tables.visibleChannelJoinRequests,
+  limitSubscription(tables.visibleInboxes, 'visibleInboxes'),
+  limitSubscription(tables.visibleAgents, 'visibleAgents'),
+  limitSubscription(tables.visibleThreadParticipants, 'visibleThreadParticipants'),
+  limitSubscription(tables.visibleThreadReadStates, 'visibleThreadReadStates'),
+  limitSubscription(tables.visibleThreadSecretEnvelopes, 'visibleThreadSecretEnvelopes'),
+  limitSubscription(tables.visibleThreads, 'visibleThreads'),
+  limitSubscription(tables.visibleContactRequests, 'visibleContactRequests'),
+  limitSubscription(tables.visibleThreadInvites, 'visibleThreadInvites'),
+  limitSubscription(tables.visibleContactAllowlistEntries, 'visibleContactAllowlistEntries'),
+  limitSubscription(tables.visibleDevices, 'visibleDevices'),
+  limitSubscription(tables.visibleDeviceShareRequests, 'visibleDeviceShareRequests'),
+  limitSubscription(tables.visibleDeviceKeyBundles, 'visibleDeviceKeyBundles'),
+  limitSubscription(tables.visibleChannels, 'visibleChannels'),
+  limitSubscription(tables.visibleChannelMemberships, 'visibleChannelMemberships'),
+  limitSubscription(tables.visibleChannelJoinRequests, 'visibleChannelJoinRequests'),
 ] as const;
 
 const SHELL_TABLE_ACCESSORS = [
@@ -86,7 +112,6 @@ const SHELL_TABLE_ACCESSORS = [
   'visibleDevices',
   'visibleDeviceShareRequests',
   'visibleDeviceKeyBundles',
-  'visibleMessages',
   'visibleChannels',
   'visibleChannelMemberships',
   'visibleChannelJoinRequests',
@@ -183,7 +208,7 @@ function formatConnectionTarget(params: { host: string; databaseName: string }):
   return `${params.host.replace(/\/+$/, '')}/${params.databaseName}`;
 }
 
-async function refreshInboxAuthLeaseIfBound(conn: DbConnection): Promise<void> {
+export async function refreshInboxAuthLeaseIfBound(conn: DbConnection): Promise<void> {
   try {
     await conn.reducers.refreshInboxAuthLease({});
   } catch (error) {
@@ -198,6 +223,7 @@ export async function connectAuthenticated(params: {
   host: string;
   databaseName: string;
   sessionToken: string;
+  onDisconnect?: (error: Error | undefined) => void;
 }): Promise<ConnectionResult> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -225,7 +251,7 @@ export async function connectAuthenticated(params: {
       );
     }, 10000);
 
-    const uri = new URL(params.host);
+    const uri = normalizeSpacetimeWebSocketUri(params.host);
     uri.searchParams.set('__session', fingerprintSessionToken(params.sessionToken));
 
     GeneratedDbConnection.builder()
@@ -261,6 +287,23 @@ export async function connectAuthenticated(params: {
           )
         );
       })
+      .onDisconnect((_ctx, error) => {
+        if (!settled) {
+          settleReject(
+            connectivityError(
+              `Disconnected from SpacetimeDB at ${formatConnectionTarget(params)}: ${
+                error ? connectionErrorDetail(error) : 'connection closed'
+              }`,
+              {
+                code: 'SPACETIMEDB_DISCONNECTED',
+                cause: error,
+              }
+            )
+          );
+          return;
+        }
+        params.onDisconnect?.(error);
+      })
       .build();
   });
 }
@@ -279,7 +322,7 @@ export async function connectAnonymous(params: {
     }, 10000);
 
     GeneratedDbConnection.builder()
-      .withUri(params.host)
+      .withUri(normalizeSpacetimeWebSocketUri(params.host).toString())
       .withDatabaseName(params.databaseName)
       .onConnect((conn, identity) => {
         clearTimeout(timeoutId);
@@ -319,7 +362,11 @@ export async function subscribeInboxTables(conn: DbConnection): Promise<Subscrip
           })
         );
       })
-      .subscribe([tables.visibleInboxes, tables.visibleAgents, tables.visibleDevices]);
+      .subscribe([
+        limitSubscription(tables.visibleInboxes, 'visibleInboxes'),
+        limitSubscription(tables.visibleAgents, 'visibleAgents'),
+        limitSubscription(tables.visibleDevices, 'visibleDevices'),
+      ]);
   });
 }
 
@@ -339,16 +386,39 @@ export async function subscribeMessageTables(conn: DbConnection): Promise<Subscr
         );
       })
       .subscribe([
-        tables.visibleAgents,
-        tables.visibleThreadParticipants,
-        tables.visibleThreadReadStates,
-        tables.visibleThreadSecretEnvelopes,
-        tables.visibleThreads,
-        tables.visibleContactRequests,
-        tables.visibleThreadInvites,
-        tables.visibleMessages,
+        limitSubscription(tables.visibleAgents, 'visibleAgents'),
+        limitSubscription(tables.visibleThreadParticipants, 'visibleThreadParticipants'),
+        limitSubscription(tables.visibleThreadReadStates, 'visibleThreadReadStates'),
+        limitSubscription(tables.visibleThreadSecretEnvelopes, 'visibleThreadSecretEnvelopes'),
+        limitSubscription(tables.visibleThreads, 'visibleThreads'),
+        limitSubscription(tables.visibleContactRequests, 'visibleContactRequests'),
+        limitSubscription(tables.visibleThreadInvites, 'visibleThreadInvites'),
       ]);
   });
+}
+
+async function ensureMessageTablesSubscribed(conn: DbConnection): Promise<void> {
+  let subscription = messageTableSubscriptions.get(conn);
+  if (!subscription) {
+    subscription = subscribeMessageTables(conn);
+    messageTableSubscriptions.set(conn, subscription);
+  }
+  await subscription;
+}
+
+function releaseMessageTablesSubscription(conn: DbConnection): void {
+  const subscription = messageTableSubscriptions.get(conn);
+  if (!subscription) {
+    return;
+  }
+  messageTableSubscriptions.delete(conn);
+  void subscription
+    .then(handle => {
+      handle.unsubscribe();
+    })
+    .catch(() => {
+      // The connection is already being torn down; failed cleanup is non-fatal.
+    });
 }
 
 export async function subscribeContactTables(conn: DbConnection): Promise<SubscriptionHandle> {
@@ -367,10 +437,10 @@ export async function subscribeContactTables(conn: DbConnection): Promise<Subscr
         );
       })
       .subscribe([
-        tables.visibleAgents,
-        tables.visibleContactRequests,
-        tables.visibleThreadInvites,
-        tables.visibleContactAllowlistEntries,
+        limitSubscription(tables.visibleAgents, 'visibleAgents'),
+        limitSubscription(tables.visibleContactRequests, 'visibleContactRequests'),
+        limitSubscription(tables.visibleThreadInvites, 'visibleThreadInvites'),
+        limitSubscription(tables.visibleContactAllowlistEntries, 'visibleContactAllowlistEntries'),
       ]);
   });
 }
@@ -391,10 +461,10 @@ export async function subscribeDeviceTables(conn: DbConnection): Promise<Subscri
         );
       })
       .subscribe([
-        tables.visibleAgents,
-        tables.visibleDevices,
-        tables.visibleDeviceShareRequests,
-        tables.visibleDeviceKeyBundles,
+        limitSubscription(tables.visibleAgents, 'visibleAgents'),
+        limitSubscription(tables.visibleDevices, 'visibleDevices'),
+        limitSubscription(tables.visibleDeviceShareRequests, 'visibleDeviceShareRequests'),
+        limitSubscription(tables.visibleDeviceKeyBundles, 'visibleDeviceKeyBundles'),
       ]);
   });
 }
@@ -477,14 +547,230 @@ export function readMessageRows(conn: DbConnection): {
     threadInvites: Array.from(
       conn.db.visibleThreadInvites.iter()
     ) as VisibleThreadInviteRow[],
-    messages: Array.from(conn.db.visibleMessages.iter()) as VisibleMessageRow[],
+    messages: [],
+  };
+}
+
+export async function readOwnedAgentRows(
+  conn: DbConnection,
+  params?: {
+    normalizedEmail?: string;
+    actorSlug?: string;
+  }
+): Promise<VisibleAgentRow[]> {
+  const normalizedSlug =
+    params?.actorSlug === undefined ? undefined : normalizeInboxSlug(params.actorSlug);
+  if (params?.actorSlug !== undefined && !normalizedSlug) {
+    throw userError('Agent slug is invalid.', {
+      code: 'INVALID_SLUG',
+    });
+  }
+
+  const requestedActors = await conn.procedures.readOwnedAgent({
+    agentSlug: normalizedSlug,
+  });
+  const defaultActors =
+    normalizedSlug === undefined
+      ? []
+      : await conn.procedures.readOwnedAgent({
+          agentSlug: undefined,
+        });
+  const actors = mergeRowsById(requestedActors, defaultActors);
+  if (!params?.normalizedEmail) {
+    return actors;
+  }
+  return actors.filter(actor => actor.normalizedEmail === params.normalizedEmail);
+}
+
+export async function readOwnedAgentRow(
+  conn: DbConnection,
+  params?: {
+    normalizedEmail?: string;
+    actorSlug?: string;
+  }
+): Promise<VisibleAgentRow | null> {
+  const normalizedSlug =
+    params?.actorSlug === undefined ? undefined : normalizeInboxSlug(params.actorSlug);
+  if (params?.actorSlug !== undefined && !normalizedSlug) {
+    throw userError('Agent slug is invalid.', {
+      code: 'INVALID_SLUG',
+    });
+  }
+
+  const actors = await conn.procedures.readOwnedAgent({
+    agentSlug: normalizedSlug,
+  });
+  const filteredActors = params?.normalizedEmail
+    ? actors.filter(actor => actor.normalizedEmail === params.normalizedEmail)
+    : actors;
+  return filteredActors[0] ?? null;
+}
+
+async function readMessageRowsWithExactOwnedActor(
+  conn: DbConnection,
+  params?: {
+    normalizedEmail?: string;
+    actorSlug?: string;
+  }
+): Promise<ReturnType<typeof readMessageRows>> {
+  const rows = readMessageRows(conn);
+  const exactActors = await readOwnedAgentRows(conn, params);
+  if (exactActors.length === 0) {
+    return rows;
+  }
+  return {
+    ...rows,
+    actors: mergeRowsById(rows.actors, exactActors),
+  };
+}
+
+export async function repairOwnSenderReadStatesOnce(
+  conn: DbConnection,
+  params: {
+    profileName: string;
+    actorId: bigint;
+  }
+): Promise<boolean> {
+  const migrationKey = `${REPAIR_OWN_SENDER_READ_STATES_MIGRATION}:${params.actorId.toString()}`;
+  if (await hasCompletedProfileMigration(params.profileName, migrationKey)) {
+    return false;
+  }
+
+  await conn.reducers.repairOwnSenderReadStates({
+    agentDbId: params.actorId,
+  });
+  await markProfileMigrationComplete(params.profileName, migrationKey);
+  return true;
+}
+
+export async function readSubscribedMessageRows(
+  conn: DbConnection,
+  params?: {
+    normalizedEmail?: string;
+    actorSlug?: string;
+    threadId?: bigint | null;
+    counterpartySlug?: string | null;
+    messagePageSize?: bigint;
+  }
+): Promise<ReturnType<typeof readMessageRows>> {
+  const rows = await readMessageRowsWithExactOwnedActor(conn, params);
+  const defaultActor = params?.normalizedEmail
+    ? findDefaultActorByEmail(rows.actors, params.normalizedEmail)
+    : rows.actors.find(actor => actor.isDefault) ?? rows.actors[0];
+  if (!defaultActor) {
+    return rows;
+  }
+
+  const requestedSlug = params?.actorSlug ? normalizeInboxSlug(params.actorSlug) : null;
+  if (params?.actorSlug && !requestedSlug) {
+    throw userError('Agent slug is invalid.', {
+      code: 'INVALID_SLUG',
+    });
+  }
+  const actor =
+    requestedSlug === null
+      ? defaultActor
+      : rows.actors.find(row => row.inboxId === defaultActor.inboxId && row.slug === requestedSlug);
+  if (!actor) {
+    throw userError(`No owned agent found for slug \`${requestedSlug ?? ''}\`.`, {
+      code: 'OWNED_ACTOR_NOT_FOUND',
+    });
+  }
+  const requestedCounterpartySlug = params?.counterpartySlug
+    ? normalizeInboxSlug(params.counterpartySlug)
+    : null;
+  if (params?.counterpartySlug && !requestedCounterpartySlug) {
+    throw userError('Counterparty slug is invalid.', {
+      code: 'INVALID_SLUG',
+    });
+  }
+  let scopedRows = rows;
+  if (
+    params?.threadId !== undefined &&
+    params.threadId !== null &&
+    !rows.threads.some(row => row.id === params.threadId)
+  ) {
+    const threadPage = await conn.procedures.readVisibleThread({
+      agentDbId: actor.id,
+      threadId: params.threadId,
+    });
+    scopedRows = {
+      ...rows,
+      actors: mergeRowsById(rows.actors, threadPage.actors),
+      participants: mergeRowsById(rows.participants, threadPage.participants),
+      readStates: mergeRowsById(rows.readStates, threadPage.readStates),
+      threads: mergeRowsById(rows.threads, threadPage.threads),
+    };
+  }
+  const actorsById = new Map(scopedRows.actors.map(row => [row.id, row] as const));
+  const threadsById = new Map(scopedRows.threads.map(row => [row.id, row] as const));
+  const activeParticipants = scopedRows.participants.filter(row => row.active);
+  const activeParticipantsByThreadId = buildParticipantsByThreadId(activeParticipants);
+  const ownActorIds = buildOwnActorIds(scopedRows.actors, actor.inboxId);
+  const pagedMessages: VisibleMessageRow[] = [];
+  let visibleSecretEnvelopes = scopedRows.secretEnvelopes;
+
+  for (const thread of threadsById.values()) {
+    if (params?.threadId !== undefined && params.threadId !== null && thread.id !== params.threadId) {
+      continue;
+    }
+    const threadParticipants = activeParticipantsByThreadId.get(thread.id) ?? [];
+    const actorParticipant = threadParticipants.find(row => row.agentDbId === actor.id);
+    if (!actorParticipant) {
+      continue;
+    }
+    if (requestedCounterpartySlug) {
+      const counterparty = resolveDirectCounterparty({
+        thread,
+        participantsByThreadId: activeParticipantsByThreadId,
+        actorsById,
+        ownActorIds,
+      });
+      if (counterparty?.slug !== requestedCounterpartySlug) {
+        continue;
+      }
+    }
+
+    const page = await conn.procedures.listThreadMessages({
+      agentDbId: actor.id,
+      threadId: thread.id,
+      beforeThreadSeq: undefined,
+      limit: params?.messagePageSize ?? 5n,
+    });
+    pagedMessages.push(...page.messages);
+    visibleSecretEnvelopes = mergeRowsById(visibleSecretEnvelopes, page.secretEnvelopes);
+  }
+
+  return {
+    ...scopedRows,
+    secretEnvelopes: visibleSecretEnvelopes,
+    messages: pagedMessages,
   };
 }
 
 export async function readLatestMessageRows(
-  conn: DbConnection
+  conn: DbConnection,
+  params?: {
+    normalizedEmail?: string;
+    actorSlug?: string;
+    threadId?: bigint | null;
+    counterpartySlug?: string | null;
+    messagePageSize?: bigint;
+  }
 ): Promise<ReturnType<typeof readMessageRows>> {
-  return conn.procedures.readVisibleMessageSnapshot({});
+  await ensureMessageTablesSubscribed(conn);
+  return await readSubscribedMessageRows(conn, params);
+}
+
+export async function readLatestMetadataRows(
+  conn: DbConnection,
+  params?: {
+    normalizedEmail?: string;
+    actorSlug?: string;
+  }
+): Promise<ReturnType<typeof readMessageRows>> {
+  await ensureMessageTablesSubscribed(conn);
+  return await readMessageRowsWithExactOwnedActor(conn, params);
 }
 
 export function readContactRows(conn: DbConnection): {
@@ -527,24 +813,27 @@ export function readDeviceRows(conn: DbConnection): {
 
 export function readShellRows(conn: DbConnection): ShellRows {
   const inbox = readInboxRows(conn);
-  const message = readMessageRows(conn);
   const contact = readContactRows(conn);
   const device = readDeviceRows(conn);
 
   return {
     inboxes: inbox.inboxes,
     actors: inbox.actors,
-    participants: message.participants,
-    readStates: message.readStates,
-    secretEnvelopes: message.secretEnvelopes,
-    threads: message.threads,
-    contactRequests: message.contactRequests,
-    threadInvites: message.threadInvites,
+    participants: Array.from(
+      conn.db.visibleThreadParticipants.iter()
+    ) as VisibleThreadParticipantRow[],
+    readStates: Array.from(conn.db.visibleThreadReadStates.iter()) as VisibleThreadReadStateRow[],
+    secretEnvelopes: Array.from(
+      conn.db.visibleThreadSecretEnvelopes.iter()
+    ) as VisibleThreadSecretEnvelopeRow[],
+    threads: [],
+    threadSignals: Array.from(conn.db.visibleThreads.iter()) as VisibleThreadRow[],
+    contactRequests: contact.contactRequests,
+    threadInvites: contact.threadInvites,
     allowlistEntries: contact.allowlistEntries,
     devices: device.devices,
     deviceRequests: device.requests,
     deviceBundles: device.bundles,
-    messages: message.messages,
     channels: Array.from(conn.db.visibleChannels.iter()) as VisibleChannelRow[],
     channelMemberships: Array.from(
       conn.db.visibleChannelMemberships.iter()
@@ -605,5 +894,6 @@ export async function waitForBootstrapRows(params: {
 }
 
 export function disconnectConnection(conn: DbConnection): void {
+  releaseMessageTablesSubscription(conn);
   conn.disconnect();
 }

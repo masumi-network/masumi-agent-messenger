@@ -11,7 +11,6 @@ import type {
   VisibleContactAllowlistEntryRow,
   VisibleDeviceRow,
   VisibleDeviceShareRequestRow,
-  VisibleMessageRow,
   VisibleChannelJoinRequestRow,
   VisibleChannelMembershipRow,
   VisibleChannelRow,
@@ -80,17 +79,6 @@ function makeReadState(
     archived: false,
     ...overrides,
   } as VisibleThreadReadStateRow;
-}
-
-function makeMessage(overrides: Partial<VisibleMessageRow>): VisibleMessageRow {
-  return {
-    id: 0n,
-    threadId: 0n,
-    threadSeq: 0n,
-    senderAgentDbId: 0n,
-    createdAt: ts('2026-04-15T10:00:00.000Z'),
-    ...overrides,
-  } as VisibleMessageRow;
 }
 
 function makeContactRequest(
@@ -228,12 +216,12 @@ function makeRows(overrides: Partial<ShellRows> = {}): ShellRows {
     secretEnvelopes: [],
     threads: [],
     contactRequests: [],
-threadInvites: [],
-allowlistEntries: [],
+    threadInvites: [],
+    allowlistEntries: [],
     devices: [],
     deviceRequests: [],
     deviceBundles: [],
-    messages: [],
+    threadSignals: [],
     channels: [],
     channelMemberships: [],
     channelJoinRequests: [],
@@ -282,6 +270,36 @@ describe('buildRootShellViewModel', () => {
         targetTab: 'agents',
       }),
     ]);
+  });
+
+  it('does not flag a normal initial connect as reconnecting', () => {
+    const rows = makeRows({
+      actors: [
+        makeActor({
+          id: 1n,
+          inboxId: 10n,
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          publicIdentity: 'agent-public',
+          isDefault: true,
+        }),
+      ],
+    });
+
+    const model = buildRootShellViewModel({
+      rows,
+      normalizedEmail: 'agent@example.com',
+      securityState: {
+        status: 'healthy',
+        title: 'Private keys are ready',
+        description: 'Local keys match the published inbox keys.',
+      },
+      connectionHealth: 'connecting',
+    });
+
+    expect(model?.dashboard.attentionItems.map(item => item.id)).not.toContain(
+      'connection:reconnecting'
+    );
   });
 
   it('derives live dashboard state for the selected inbox slug', () => {
@@ -340,31 +358,15 @@ describe('buildRootShellViewModel', () => {
           lastReadThreadSeq: 1n,
         }),
       ],
-      messages: [
-        makeMessage({
-          id: 1000n,
-          threadId: 100n,
-          threadSeq: 1n,
-          senderAgentDbId: supportActor.id,
-          createdAt: ts('2026-04-15T10:00:00.000Z'),
-        }),
-        makeMessage({
-          id: 1001n,
-          threadId: 100n,
-          threadSeq: 2n,
-          senderAgentDbId: externalActor.id,
-          createdAt: ts('2026-04-15T10:05:00.000Z'),
-        }),
-      ],
       contactRequests: [
         makeContactRequest({
           id: 500n,
           threadId: 100n,
-          requesterAgentDbId: supportActor.id,
-          targetAgentDbId: externalActor.id,
-          direction: 'outgoing',
-          requesterSlug: 'support',
-          targetSlug: 'friend',
+          requesterAgentDbId: externalActor.id,
+          targetAgentDbId: supportActor.id,
+          direction: 'incoming',
+          requesterSlug: 'friend',
+          targetSlug: 'support',
         }),
         makeContactRequest({
           id: 501n,
@@ -453,6 +455,56 @@ describe('buildRootShellViewModel', () => {
     expect(model?.account.securityState).toMatchObject({
       status: 'missing',
     });
+  });
+
+  it('omits the pending-approval attention item when only outgoing requests are pending', () => {
+    const supportActor = makeActor({
+      id: 2n,
+      inboxId: 10n,
+      normalizedEmail: 'agent@example.com',
+      slug: 'support',
+      publicIdentity: 'support-public',
+      isDefault: true,
+    });
+    const externalActor = makeActor({
+      id: 3n,
+      inboxId: 20n,
+      normalizedEmail: 'friend@example.com',
+      slug: 'friend',
+      publicIdentity: 'friend-public',
+    });
+
+    const rows = makeRows({
+      actors: [supportActor, externalActor],
+      contactRequests: [
+        makeContactRequest({
+          id: 500n,
+          threadId: 100n,
+          requesterAgentDbId: supportActor.id,
+          targetAgentDbId: externalActor.id,
+          direction: 'outgoing',
+          requesterSlug: 'support',
+          targetSlug: 'friend',
+        }),
+      ],
+    });
+
+    const model = buildRootShellViewModel({
+      rows,
+      normalizedEmail: 'agent@example.com',
+      activeInboxSlug: 'support',
+      securityState: {
+        status: 'healthy',
+        title: '',
+        description: '',
+      },
+      connectionHealth: 'live',
+    });
+
+    expect(model?.inboxes.requests.map(request => request.id)).toEqual(['500']);
+    expect(
+      model?.dashboard.attentionItems.some(item => item.id === 'requests:pending')
+    ).toBe(false);
   });
 
   it('derives selectable channels and admin approval rows', () => {

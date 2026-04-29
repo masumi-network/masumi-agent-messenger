@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Timestamp } from 'spacetimedb';
 import type {
   Agent,
-  PublicChannel,
+  PublicChannelMirrorRow,
   VisibleChannelMembershipRow,
   VisibleChannelRow,
 } from '../../../webapp/src/module_bindings/types';
@@ -12,6 +12,10 @@ const mocks = vi.hoisted(() => ({
   updateChannelSettings: vi.fn(),
   joinPublicChannel: vi.fn(),
   listChannelMessages: vi.fn(),
+  listPublicChannelMessages: vi.fn(),
+  readOwnedAgent: vi.fn(),
+  readPublicChannel: vi.fn(),
+  readVisibleChannelState: vi.fn(),
   disconnectConnection: vi.fn(),
   ensureAuthenticatedSession: vi.fn(),
   iterVisibleAgents: vi.fn(),
@@ -91,8 +95,8 @@ function channel(row: Partial<VisibleChannelRow> & Pick<VisibleChannelRow, 'id' 
 }
 
 function publicChannel(
-  row: Partial<PublicChannel> & Pick<PublicChannel, 'channelId' | 'slug'>
-): PublicChannel {
+  row: Partial<PublicChannelMirrorRow> & Pick<PublicChannelMirrorRow, 'channelId' | 'slug'>
+): PublicChannelMirrorRow {
   return {
     id: row.id ?? row.channelId,
     channelId: row.channelId,
@@ -135,13 +139,14 @@ function makeConnection() {
     },
     procedures: {
       listChannelMessages: mocks.listChannelMessages,
+      listPublicChannelMessages: mocks.listPublicChannelMessages,
+      readOwnedAgent: mocks.readOwnedAgent,
+      readPublicChannel: mocks.readPublicChannel,
+      readVisibleChannelState: mocks.readVisibleChannelState,
     },
     db: {
       visibleAgents: {
         iter: mocks.iterVisibleAgents,
-      },
-      publicChannels: {
-        iter: mocks.iterPublicChannels,
       },
       visibleChannels: {
         iter: mocks.iterVisibleChannels,
@@ -181,6 +186,10 @@ describe('channel mutations', () => {
     mocks.updateChannelSettings.mockReset();
     mocks.joinPublicChannel.mockReset();
     mocks.listChannelMessages.mockReset();
+    mocks.listPublicChannelMessages.mockReset();
+    mocks.readOwnedAgent.mockReset();
+    mocks.readPublicChannel.mockReset();
+    mocks.readVisibleChannelState.mockReset();
     mocks.disconnectConnection.mockReset();
     mocks.ensureAuthenticatedSession.mockReset();
     mocks.iterVisibleAgents.mockReset();
@@ -215,6 +224,32 @@ describe('channel mutations', () => {
     mocks.iterPublicChannels.mockReturnValue([]);
     mocks.iterVisibleChannelMemberships.mockReturnValue([]);
     mocks.listChannelMessages.mockResolvedValue([]);
+    mocks.listPublicChannelMessages.mockResolvedValue([]);
+    mocks.readOwnedAgent.mockImplementation(async ({ agentSlug }: { agentSlug?: string }) =>
+      (Array.from(mocks.iterVisibleAgents()) as Agent[]).filter(actor =>
+        agentSlug === undefined ? actor.isDefault : actor.slug === agentSlug
+      )
+    );
+    mocks.readPublicChannel.mockImplementation(async ({ channelSlug }: { channelSlug?: string }) =>
+      (Array.from(mocks.iterPublicChannels()) as PublicChannelMirrorRow[]).filter(
+        row => channelSlug === undefined || row.slug === channelSlug
+      )
+    );
+    mocks.readVisibleChannelState.mockImplementation(
+      async ({ channelSlug }: { channelSlug?: string }) => {
+        const channels = (Array.from(mocks.iterVisibleChannels()) as VisibleChannelRow[]).filter(
+          row => channelSlug === undefined || row.slug === channelSlug
+        );
+        return {
+          actors: Array.from(mocks.iterVisibleAgents()) as Agent[],
+          channels,
+          memberships: Array.from(
+            mocks.iterVisibleChannelMemberships()
+          ) as VisibleChannelMembershipRow[],
+          requests: [],
+        };
+      }
+    );
   });
 
   it('refuses channel mutations from a default agent with pending deregistration', async () => {

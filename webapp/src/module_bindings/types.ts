@@ -394,6 +394,7 @@ export const InboxThread = __t.object("InboxThread", {
   lastMessageAt: __t.timestamp(),
   lastMessageSeq: __t.u64(),
   updatedAt: __t.timestamp(),
+  updatedAtSortKey: __t.string(),
 });
 export type InboxThread = __Infer<typeof InboxThread>;
 
@@ -476,9 +477,6 @@ export const PublicChannelPageRow = __t.object("PublicChannelPageRow", {
 });
 export type PublicChannelPageRow = __Infer<typeof PublicChannelPageRow>;
 
-export const PublicChannels = __t.object("PublicChannels", {});
-export type PublicChannels = __Infer<typeof PublicChannels>;
-
 export const PublicRecentChannelMessage = __t.object("PublicRecentChannelMessage", {
   id: __t.u64(),
   channelId: __t.u64(),
@@ -493,6 +491,8 @@ export const PublicRecentChannelMessage = __t.object("PublicRecentChannelMessage
   replyToMessageId: __t.option(__t.u64()),
   createdAt: __t.timestamp(),
   senderSigningPublicKey: __t.string(),
+  visible: __t.bool(),
+  sortKey: __t.string(),
 });
 export type PublicRecentChannelMessage = __Infer<typeof PublicRecentChannelMessage>;
 
@@ -838,6 +838,22 @@ export const VisibleChannelRow = __t.object("VisibleChannelRow", {
 });
 export type VisibleChannelRow = __Infer<typeof VisibleChannelRow>;
 
+export const VisibleChannelState = __t.object("VisibleChannelState", {
+  get actors() {
+    return __t.array(VisibleAgentRow);
+  },
+  get channels() {
+    return __t.array(VisibleChannelRow);
+  },
+  get memberships() {
+    return __t.array(VisibleChannelMembershipRow);
+  },
+  get requests() {
+    return __t.array(VisibleChannelJoinRequestRow);
+  },
+});
+export type VisibleChannelState = __Infer<typeof VisibleChannelState>;
+
 export const VisibleChannels = __t.object("VisibleChannels", {});
 export type VisibleChannels = __Infer<typeof VisibleChannels>;
 
@@ -982,37 +998,6 @@ export const VisibleMessageRow = __t.object("VisibleMessageRow", {
   createdAt: __t.timestamp(),
 });
 export type VisibleMessageRow = __Infer<typeof VisibleMessageRow>;
-
-export const VisibleMessageSnapshot = __t.object("VisibleMessageSnapshot", {
-  get actors() {
-    return __t.array(VisibleAgentRow);
-  },
-  get participants() {
-    return __t.array(VisibleThreadParticipantRow);
-  },
-  get readStates() {
-    return __t.array(VisibleThreadReadStateRow);
-  },
-  get secretEnvelopes() {
-    return __t.array(VisibleThreadSecretEnvelopeRow);
-  },
-  get threads() {
-    return __t.array(VisibleThreadRow);
-  },
-  get contactRequests() {
-    return __t.array(VisibleContactRequestRow);
-  },
-  get threadInvites() {
-    return __t.array(VisibleThreadInviteRow);
-  },
-  get messages() {
-    return __t.array(VisibleMessageRow);
-  },
-});
-export type VisibleMessageSnapshot = __Infer<typeof VisibleMessageSnapshot>;
-
-export const VisibleMessages = __t.object("VisibleMessages", {});
-export type VisibleMessages = __Infer<typeof VisibleMessages>;
 
 export const VisibleThreadInviteRow = __t.object("VisibleThreadInviteRow", {
   id: __t.u64(),

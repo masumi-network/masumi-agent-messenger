@@ -10,10 +10,6 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-import {
-  VisibleMessageSnapshot,
-} from "./types";
-
-export const params = {
+export default {
+  agentDbId: __t.u64(),
 };
-export const returnType = VisibleMessageSnapshot

@@ -13,8 +13,12 @@ import {
   ensureInboxAuthLease,
 } from './inbox-auth-lease';
 import { deferEffectStateUpdate } from './effect-state';
+import {
+  limitSpacetimeSubscriptionQuery,
+  type SpacetimeSubscriptionTableName,
+} from '../../../shared/spacetime-subscription-limits';
 
-type LiveTableName = keyof typeof tables;
+type LiveTableName = Extract<keyof typeof tables, SpacetimeSubscriptionTableName>;
 type LiveTableQuery = Query<TypedTableDef>;
 
 type TableLike<Row> = {
@@ -204,7 +208,12 @@ function startSharedSubscription<Row>(params: {
           };
           notifySharedSubscription(shared);
         })
-        .subscribe([tableQuery]);
+        .subscribe([
+          limitSpacetimeSubscriptionQuery(
+            toSql(tableQuery),
+            accessorName
+          ),
+        ]);
     })
     .catch(error => {
       if (shared.stopped) {

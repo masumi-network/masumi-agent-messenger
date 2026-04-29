@@ -31,12 +31,14 @@ import type {
 import type {
   VisibleAgentRow,
   VisibleThreadParticipantRow,
+  VisibleThreadReadStateRow,
   VisibleThreadRow,
   VisibleContactRequestRow,
   VisibleMessageRow,
   VisibleThreadSecretEnvelopeRow,
-  VisibleMessageSnapshot,
+  VisibleThreadInviteRow,
 } from '../../../webapp/src/module_bindings/types';
+import type { DbConnection } from '../../../webapp/src/module_bindings';
 import { ensureAuthenticatedSession } from './auth';
 import type { TaskReporter } from './command-runtime';
 import { connectivityError, userError } from './errors';
@@ -53,11 +55,23 @@ import { createSecretStore } from './secret-store';
 import {
   connectAuthenticated,
   disconnectConnection,
-  readLatestMessageRows,
+  readLatestMetadataRows,
+  readOwnedAgentRow,
 } from './spacetimedb';
 import { lookupMasumiInboxAgentBySlug } from './masumi-inbox-agent';
+import { mergeRowsById } from './row-utils';
 
-type MessageSnapshot = VisibleMessageSnapshot;
+type MessageSnapshot = {
+  actors: VisibleAgentRow[];
+  participants: VisibleThreadParticipantRow[];
+  readStates: VisibleThreadReadStateRow[];
+  secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
+  threads: VisibleThreadRow[];
+  contactRequests: VisibleContactRequestRow[];
+  threadInvites: VisibleThreadInviteRow[];
+  messages: VisibleMessageRow[];
+};
+type AuthenticatedProfile = Awaited<ReturnType<typeof ensureAuthenticatedSession>>['profile'];
 
 type SendTargetSummary = {
   slug: string;
@@ -81,6 +95,20 @@ export type SendMessageToThreadResult = {
   label: string;
   messageId: string;
   threadSeq: string;
+};
+
+type SendMessageToThreadCoreParams = {
+  profile: AuthenticatedProfile;
+  normalizedEmail: string;
+  conn: DbConnection;
+  snapshot: MessageSnapshot;
+  requestedThreadId: bigint;
+  actorSlug?: string;
+  message: string;
+  contentType?: string;
+  headerLines: string[];
+  waitForSync: boolean;
+  reporter: TaskReporter;
 };
 
 export type SendMessageResult =
@@ -609,8 +637,9 @@ async function waitForDirectThread(params: {
   });
 }
 
-async function waitForSentMessage(params: {
-  read: () => Promise<MessageSnapshot>;
+async function waitForSentThreadMessage(params: {
+  conn: DbConnection;
+  actorId: bigint;
   threadId: bigint;
   senderActorId: bigint;
   senderSeq: bigint;
@@ -619,8 +648,13 @@ async function waitForSentMessage(params: {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   while (Date.now() < timeoutAt) {
-    const snapshot = await params.read();
-    const message = snapshot.messages.find(row => {
+    const page = await params.conn.procedures.listThreadMessages({
+      agentDbId: params.actorId,
+      threadId: params.threadId,
+      beforeThreadSeq: undefined,
+      limit: 25n,
+    });
+    const message = page.messages.find(row => {
       return (
         row.threadId === params.threadId &&
         row.senderAgentDbId === params.senderActorId &&
@@ -640,6 +674,238 @@ async function waitForSentMessage(params: {
   throw connectivityError('Timed out waiting for sent message to sync.', {
     code: 'SPACETIMEDB_MESSAGE_TIMEOUT',
   });
+}
+
+async function sendMessageToThreadCore(
+  params: SendMessageToThreadCoreParams
+): Promise<SendMessageToThreadResult> {
+  const {
+    profile,
+    normalizedEmail,
+    conn,
+    snapshot,
+    requestedThreadId,
+    actorSlug,
+    message,
+    contentType,
+    headerLines,
+    waitForSync,
+    reporter,
+  } = params;
+  const ownActor = requireOwnedActor({
+    actors: snapshot.actors,
+    normalizedEmail,
+    actorSlug,
+  });
+  const thread = requireVisibleThread(snapshot.threads, requestedThreadId);
+  const senderParticipant = findParticipant(snapshot.participants, requestedThreadId, ownActor.id);
+  if (!senderParticipant?.active) {
+    throw userError(`Actor is not an active participant in thread ${requestedThreadId.toString()}.`, {
+      code: 'THREAD_PARTICIPANT_REQUIRED',
+    });
+  }
+
+  const keyPair = await requireLocalActorKeyPairForSending({
+    profile,
+    ownActor,
+  });
+
+  const payload = buildEncryptedPayload({
+    message,
+    contentType,
+    headerLines,
+  });
+  const recipientActors = snapshot.participants
+    .filter(participant => participant.threadId === requestedThreadId && participant.active)
+    .map(participant => snapshot.actors.find(actor => actor.id === participant.agentDbId))
+    .filter((actor): actor is VisibleAgentRow => Boolean(actor));
+  if (recipientActors.length === 0) {
+    throw connectivityError('No active participants are visible for this thread.', {
+      code: 'THREAD_PARTICIPANTS_NOT_VISIBLE',
+    });
+  }
+  const ownActorIdsForReply = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+  for (const recipient of recipientActors) {
+    if (recipient.id === ownActor.id) continue;
+    await requirePeerKeyTrust({
+      publicIdentity: recipient.publicIdentity,
+      displayLabel: recipient.slug,
+      observed: tupleFromVisibleActor(recipient),
+      allowFirstContactTrust: ownActorIdsForReply.has(recipient.id),
+    });
+  }
+  const recipients = recipientActors.map(toActorPublicKeys);
+
+  const latestSenderMessage = [...snapshot.messages]
+    .filter(row => row.threadId === requestedThreadId && row.senderAgentDbId === ownActor.id)
+    .sort((left, right) => compareBigIntDesc(left.senderSeq, right.senderSeq))[0];
+  const latestSenderState = resolveSenderState(latestSenderMessage, senderParticipant);
+
+  const existingSecret = latestSenderState
+    ? getCachedSenderSecret(
+        requestedThreadId,
+        ownActor.publicIdentity,
+        latestSenderState.secretVersion
+      )
+    : null;
+  const requiresSecretRotation = senderSecretRotationRequired({
+    senderActor: ownActor,
+    thread,
+    latestSenderState,
+    participants: snapshot.participants,
+    actors: snapshot.actors,
+    envelopes: snapshot.secretEnvelopes,
+  });
+
+  const senderSeq = senderParticipant.lastSentSeq + 1n;
+  const expectedThreadSeq = thread.lastMessageSeq + 1n;
+
+  reporter.verbose?.(`Encrypting message for thread ${requestedThreadId.toString()}`);
+  const prepared = await prepareEncryptedMessage({
+    threadId: requestedThreadId,
+    senderActorId: ownActor.id,
+    senderPublicIdentity: ownActor.publicIdentity,
+    senderSeq,
+    payload,
+    keyPair,
+    recipients,
+    existingSecret,
+    latestKnownSecretVersion: latestSenderState?.secretVersion ?? null,
+    rotateSecret: requiresSecretRotation,
+  });
+
+  reporter.verbose?.(`Sending encrypted message to thread ${requestedThreadId.toString()}`);
+  await conn.reducers.sendEncryptedMessage({
+    agentDbId: ownActor.id,
+    threadId: requestedThreadId,
+    secretVersion: prepared.secretVersion,
+    signingKeyVersion: prepared.signingKeyVersion,
+    senderSeq,
+    ciphertext: prepared.ciphertext,
+    iv: prepared.iv,
+    cipherAlgorithm: prepared.cipherAlgorithm,
+    signature: prepared.signature,
+    replyToMessageId: undefined,
+    attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
+  });
+
+  cacheSenderSecret(
+    requestedThreadId,
+    ownActor.publicIdentity,
+    prepared.senderSecret.secretVersion,
+    prepared.senderSecret.secretHex
+  );
+
+  const sentMessage = waitForSync
+    ? await waitForSentThreadMessage({
+        conn,
+        actorId: ownActor.id,
+        threadId: requestedThreadId,
+        senderActorId: ownActor.id,
+        senderSeq,
+      })
+    : null;
+
+  const activeParticipantsByThreadId = buildParticipantsByThreadId(
+    snapshot.participants.filter(participant => participant.active)
+  );
+  const actorsById = new Map(snapshot.actors.map(actor => [actor.id, actor] as const));
+  const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+  const label = summarizeThread(
+    thread,
+    activeParticipantsByThreadId.get(thread.id) ?? [],
+    actorsById,
+    ownActorIds
+  );
+
+  reporter.success(`Encrypted message sent to thread ${requestedThreadId.toString()}`);
+
+  return {
+    sent: true,
+    profile: profile.name,
+    actorSlug: ownActor.slug,
+    threadId: requestedThreadId.toString(),
+    threadKind: thread.kind,
+    label,
+    messageId: sentMessage?.id.toString() ?? `optimistic:${requestedThreadId.toString()}:${senderSeq.toString()}`,
+    threadSeq: (sentMessage?.threadSeq ?? expectedThreadSeq).toString(),
+  };
+}
+
+async function readThreadSendSnapshot(params: {
+  conn: DbConnection;
+  normalizedEmail: string;
+  actorSlug?: string;
+  threadId: bigint;
+}): Promise<MessageSnapshot> {
+  const ownActor = await readOwnedAgentRow(params.conn, {
+    normalizedEmail: params.normalizedEmail,
+    actorSlug: params.actorSlug,
+  });
+  if (!ownActor) {
+    const normalizedSlug =
+      params.actorSlug === undefined ? undefined : normalizeInboxSlug(params.actorSlug);
+    throw userError(
+      normalizedSlug
+        ? `No owned inbox actor found for slug \`${normalizedSlug}\`.`
+        : 'No default agent found. Run `masumi-agent-messenger account sync` first.',
+      {
+        code: normalizedSlug ? 'OWNED_ACTOR_NOT_FOUND' : 'INBOX_BOOTSTRAP_REQUIRED',
+      }
+    );
+  }
+  if (isDeregisteringOrDeregisteredInboxAgentState(ownActor.masumiRegistrationState)) {
+    throw userError(
+      `Agent \`${ownActor.slug}\` is deregistering or deregistered and cannot send chats.`,
+      {
+        code: 'AGENT_DEREGISTERED',
+      }
+    );
+  }
+
+  const threadPage = await params.conn.procedures.readVisibleThread({
+    agentDbId: ownActor.id,
+    threadId: params.threadId,
+  });
+  const messagePage = await params.conn.procedures.listThreadMessages({
+    agentDbId: ownActor.id,
+    threadId: params.threadId,
+    beforeThreadSeq: undefined,
+    limit: 25n,
+  });
+  const thread = threadPage.threads.find(row => row.id === params.threadId);
+  const senderParticipant = threadPage.participants.find(participant => {
+    return participant.threadId === params.threadId && participant.agentDbId === ownActor.id;
+  });
+  const latestSenderState =
+    senderParticipant?.lastSentMembershipVersion !== undefined &&
+    senderParticipant.lastSentSecretVersion !== undefined
+      ? {
+          membershipVersion: senderParticipant.lastSentMembershipVersion,
+          secretVersion: senderParticipant.lastSentSecretVersion,
+        }
+      : undefined;
+  const currentSecretEnvelopes =
+    thread && latestSenderState
+      ? await params.conn.procedures.listThreadSecretEnvelopes({
+          agentDbId: ownActor.id,
+          threadId: params.threadId,
+          membershipVersion: latestSenderState.membershipVersion,
+          senderAgentDbId: ownActor.id,
+          secretVersion: latestSenderState.secretVersion,
+        })
+      : [];
+
+  return {
+    actors: mergeRowsById([ownActor], threadPage.actors),
+    participants: threadPage.participants,
+    readStates: threadPage.readStates,
+    secretEnvelopes: mergeRowsById(messagePage.secretEnvelopes, currentSecretEnvelopes),
+    threads: threadPage.threads,
+    contactRequests: [],
+    threadInvites: [],
+    messages: messagePage.messages,
+  };
 }
 
 async function waitForContactRequest(params: {
@@ -739,7 +1005,11 @@ export async function sendMessageToSlug(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const read = () => readLatestMessageRows(conn);
+    const read = () =>
+      readLatestMetadataRows(conn, {
+        normalizedEmail,
+        actorSlug: params.actorSlug,
+      });
     let snapshot = await read();
     const ownActor = requireOwnedActor({
       actors: snapshot.actors,
@@ -1135,7 +1405,12 @@ export async function sendMessageToSlug(params: {
       });
     }
 
-    snapshot = await read();
+    snapshot = await readThreadSendSnapshot({
+      conn,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+      threadId: thread.id,
+    });
     const senderParticipant = findParticipant(snapshot.participants, thread.id, ownActor.id);
     if (!senderParticipant) {
       throw connectivityError('Current actor is not visible as a participant in the direct thread.', {
@@ -1212,8 +1487,9 @@ export async function sendMessageToSlug(params: {
       prepared.senderSecret.secretHex
     );
 
-    const sentMessage = await waitForSentMessage({
-      read,
+    const sentMessage = await waitForSentThreadMessage({
+      conn,
+      actorId: ownActor.id,
       threadId: thread.id,
       senderActorId: ownActor.id,
       senderSeq: senderParticipant.lastSentSeq + 1n,
@@ -1281,141 +1557,67 @@ export async function sendMessageToThread(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const read = () => readLatestMessageRows(conn);
-    const snapshot = await read();
-    const ownActor = requireOwnedActor({
-      actors: snapshot.actors,
+    const snapshot = await readThreadSendSnapshot({
+      conn,
       normalizedEmail,
       actorSlug: params.actorSlug,
+      threadId: requestedThreadId,
     });
-    const thread = requireVisibleThread(snapshot.threads, requestedThreadId);
-    const senderParticipant = findParticipant(snapshot.participants, requestedThreadId, ownActor.id);
-    if (!senderParticipant?.active) {
-      throw userError(`Actor is not an active participant in thread ${requestedThreadId.toString()}.`, {
-        code: 'THREAD_PARTICIPANT_REQUIRED',
-      });
-    }
-
-    const keyPair = await requireLocalActorKeyPairForSending({
+    return await sendMessageToThreadCore({
       profile,
-      ownActor,
-    });
-
-    const payload = buildEncryptedPayload({
+      normalizedEmail,
+      conn,
+      snapshot,
+      requestedThreadId,
+      actorSlug: params.actorSlug,
       message: params.message,
       contentType: params.contentType,
       headerLines: params.headerLines,
+      waitForSync: true,
+      reporter: params.reporter,
     });
-    const recipientActors = snapshot.participants
-      .filter(participant => participant.threadId === requestedThreadId && participant.active)
-      .map(participant => snapshot.actors.find(actor => actor.id === participant.agentDbId))
-      .filter((actor): actor is VisibleAgentRow => Boolean(actor));
-    if (recipientActors.length === 0) {
-      throw connectivityError('No active participants are visible for this thread.', {
-        code: 'THREAD_PARTICIPANTS_NOT_VISIBLE',
-      });
-    }
-    const ownActorIdsForReply = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
-    for (const recipient of recipientActors) {
-      if (recipient.id === ownActor.id) continue;
-      await requirePeerKeyTrust({
-        publicIdentity: recipient.publicIdentity,
-        displayLabel: recipient.slug,
-        observed: tupleFromVisibleActor(recipient),
-        allowFirstContactTrust: ownActorIdsForReply.has(recipient.id),
-      });
-    }
-    const recipients = recipientActors.map(toActorPublicKeys);
-
-    const latestSenderMessage = [...snapshot.messages]
-      .filter(message => message.threadId === requestedThreadId && message.senderAgentDbId === ownActor.id)
-      .sort((left, right) => compareBigIntDesc(left.senderSeq, right.senderSeq))[0];
-    const latestSenderState = resolveSenderState(latestSenderMessage, senderParticipant);
-
-    const existingSecret = latestSenderState
-      ? getCachedSenderSecret(
-          requestedThreadId,
-          ownActor.publicIdentity,
-          latestSenderState.secretVersion
-        )
-      : null;
-    const requiresSecretRotation = senderSecretRotationRequired({
-      senderActor: ownActor,
-      thread,
-      latestSenderState,
-      participants: snapshot.participants,
-      actors: snapshot.actors,
-      envelopes: snapshot.secretEnvelopes,
-    });
-
-    params.reporter.verbose?.(`Encrypting message for thread ${requestedThreadId.toString()}`);
-    const prepared = await prepareEncryptedMessage({
-      threadId: requestedThreadId,
-      senderActorId: ownActor.id,
-      senderPublicIdentity: ownActor.publicIdentity,
-      senderSeq: senderParticipant.lastSentSeq + 1n,
-      payload,
-      keyPair,
-      recipients,
-      existingSecret,
-      latestKnownSecretVersion: latestSenderState?.secretVersion ?? null,
-      rotateSecret: requiresSecretRotation,
-    });
-
-    params.reporter.verbose?.(`Sending encrypted message to thread ${requestedThreadId.toString()}`);
-    await conn.reducers.sendEncryptedMessage({
-      agentDbId: ownActor.id,
-      threadId: requestedThreadId,
-      secretVersion: prepared.secretVersion,
-      signingKeyVersion: prepared.signingKeyVersion,
-      senderSeq: senderParticipant.lastSentSeq + 1n,
-      ciphertext: prepared.ciphertext,
-      iv: prepared.iv,
-      cipherAlgorithm: prepared.cipherAlgorithm,
-      signature: prepared.signature,
-      replyToMessageId: undefined,
-      attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
-    });
-
-    cacheSenderSecret(
-      requestedThreadId,
-      ownActor.publicIdentity,
-      prepared.senderSecret.secretVersion,
-      prepared.senderSecret.secretHex
-    );
-
-    const sentMessage = await waitForSentMessage({
-      read,
-      threadId: requestedThreadId,
-      senderActorId: ownActor.id,
-      senderSeq: senderParticipant.lastSentSeq + 1n,
-    });
-
-    const activeParticipantsByThreadId = buildParticipantsByThreadId(
-      snapshot.participants.filter(participant => participant.active)
-    );
-    const actorsById = new Map(snapshot.actors.map(actor => [actor.id, actor] as const));
-    const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
-    const label = summarizeThread(
-      thread,
-      activeParticipantsByThreadId.get(thread.id) ?? [],
-      actorsById,
-      ownActorIds
-    );
-
-    params.reporter.success(`Encrypted message sent to thread ${requestedThreadId.toString()}`);
-
-    return {
-      sent: true,
-      profile: profile.name,
-      actorSlug: ownActor.slug,
-      threadId: requestedThreadId.toString(),
-      threadKind: thread.kind,
-      label,
-      messageId: sentMessage.id.toString(),
-      threadSeq: sentMessage.threadSeq.toString(),
-    };
   } finally {
     disconnectConnection(conn);
   }
+}
+
+export async function sendMessageToThreadFromLiveSnapshot(params: {
+  profileName: string;
+  actorSlug?: string;
+  conn: DbConnection;
+  snapshot: MessageSnapshot;
+  threadId: string;
+  message: string;
+  contentType?: string;
+  headerLines: string[];
+  reporter: TaskReporter;
+}): Promise<SendMessageToThreadResult> {
+  const requestedThreadId = parseRequestedThreadId(params.threadId);
+  if (!requestedThreadId) {
+    throw userError('Thread id is required.', {
+      code: 'INVALID_THREAD_ID',
+    });
+  }
+
+  const { profile, claims } = await ensureAuthenticatedSession(params);
+  const normalizedEmail = normalizeEmail(claims.email ?? '');
+  if (!normalizedEmail) {
+    throw userError('Current OIDC session is missing an email claim.', {
+      code: 'OIDC_EMAIL_MISSING',
+    });
+  }
+
+  return await sendMessageToThreadCore({
+    profile,
+    normalizedEmail,
+    conn: params.conn,
+    snapshot: params.snapshot,
+    requestedThreadId,
+    actorSlug: params.actorSlug,
+    message: params.message,
+    contentType: params.contentType,
+    headerLines: params.headerLines,
+    waitForSync: false,
+    reporter: params.reporter,
+  });
 }

@@ -70,7 +70,7 @@ function AuthenticatedChannelsPage() {
   );
 }
 
-const PUBLIC_CHANNEL_PAGE_SIZE = 25;
+const PUBLIC_CHANNEL_PAGE_SIZE = 10;
 
 type PublicChannelCursor = {
   beforeLastMessageAtMicros?: bigint;

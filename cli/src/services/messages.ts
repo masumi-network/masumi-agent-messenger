@@ -43,6 +43,7 @@ import {
   disconnectConnection,
   readLatestMessageRows,
   readMessageRows,
+  readSubscribedMessageRows,
   subscribeMessageTables,
 } from './spacetimedb';
 
@@ -710,6 +711,7 @@ export async function readNewMessages(params: {
   threadId?: string;
   readUnsupported?: boolean;
   readMode?: 'latest' | 'subscription';
+  pageSize?: number;
 }): Promise<NewMessageFeed> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
   const normalizedEmail = normalizeEmail(claims.email ?? '');
@@ -724,6 +726,7 @@ export async function readNewMessages(params: {
     slug: params.slug,
     threadId: params.threadId,
   });
+  const messagePageSize = BigInt(normalizePageSize(params.pageSize));
 
   params.reporter.verbose?.('Connecting to SpacetimeDB');
   const { conn } = await connectAuthenticated({
@@ -739,14 +742,26 @@ export async function readNewMessages(params: {
     let snapshot: ReturnType<typeof readMessageRows>;
     if (readMode === 'latest') {
       params.reporter.verbose?.('Reading latest message state');
-      snapshot = await readLatestMessageRows(conn);
+      snapshot = await readLatestMessageRows(conn, {
+        normalizedEmail,
+        actorSlug: params.actorSlug,
+        threadId: scope.threadId,
+        counterpartySlug: scope.slug,
+        messagePageSize,
+      });
     } else {
       params.reporter.verbose?.('Subscribing to message state');
       const subscription = await subscribeMessageTables(conn);
       unsubscribe = () => {
         subscription.unsubscribe();
       };
-      snapshot = readMessageRows(conn);
+      snapshot = await readSubscribedMessageRows(conn, {
+        normalizedEmail,
+        actorSlug: params.actorSlug,
+        threadId: scope.threadId,
+        counterpartySlug: scope.slug,
+        messagePageSize,
+      });
     }
 
     try {

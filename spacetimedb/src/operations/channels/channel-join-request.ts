@@ -5,12 +5,12 @@ import spacetimedb from '../../schema';
 import * as model from '../../model';
 
 const {
+  MAX_CHANNEL_JOIN_REQUEST_VIEW_ROWS,
   VisibleChannelJoinRequestRow,
   enforceRateLimit,
   enforceChannelAdminRateLimit,
   normalizeChannelPermission,
   normalizeChannelJoinRequestStatus,
-  dedupeRowsById,
   buildChannelJoinRequestKey,
   getOwnActorIdsForInbox,
   getRequiredActorByDbId,
@@ -39,14 +39,35 @@ export const visibleChannelJoinRequests = spacetimedb.view(
         .filter(member => member.active && member.permission === 'admin')
         .map(member => member.channelId)
     );
-    const requests = dedupeRowsById([
-      ...Array.from(ctx.db.channelJoinRequest.channel_join_request_requester_inbox_id.filter(inbox.id)),
-      ...Array.from(adminChannelIds).flatMap(channelId =>
-        Array.from(
-          ctx.db.channelJoinRequest.channel_join_request_channel_id.filter(channelId)
-        )
-      ),
-    ]);
+    const requestsById = new Map<string, model.ChannelJoinRequestRow>();
+    const addRequest = (request: model.ChannelJoinRequestRow) => {
+      const key = request.id.toString();
+      if (!requestsById.has(key) && requestsById.size >= MAX_CHANNEL_JOIN_REQUEST_VIEW_ROWS) {
+        return false;
+      }
+      requestsById.set(key, request);
+      return requestsById.size < MAX_CHANNEL_JOIN_REQUEST_VIEW_ROWS;
+    };
+
+    for (const request of ctx.db.channelJoinRequest.channel_join_request_requester_inbox_id.filter(
+      inbox.id
+    )) {
+      if (!addRequest(request)) {
+        break;
+      }
+    }
+
+    adminRequests: for (const channelId of adminChannelIds) {
+      for (const request of ctx.db.channelJoinRequest.channel_join_request_channel_id.filter(
+        channelId
+      )) {
+        if (!addRequest(request)) {
+          break adminRequests;
+        }
+      }
+    }
+
+    const requests = Array.from(requestsById.values());
 
     return requests.map(request => {
       const channel = getRequiredChannelById(ctx, request.channelId);

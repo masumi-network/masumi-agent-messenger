@@ -22,6 +22,7 @@ const {
   getInboxByNormalizedEmail,
   getInboxByOwnerIdentity,
   buildInboxAuthIdentityKey,
+  requireScheduledReducerCall,
   deactivateSenderInboxAuthLease,
   isExpectedInboxAuthLeaseRefreshError,
   upsertInboxAuthLease,
@@ -48,9 +49,7 @@ export const visibleInboxes = spacetimedb.view(
 export const expireInboxAuthLease = spacetimedb.reducer(
   { arg: inboxAuthLeaseExpiryTable.rowType },
   (ctx, { arg }) => {
-    if (!ctx.senderAuth.isInternal) {
-      throw new SenderError('This reducer can only be called by the scheduler');
-    }
+    requireScheduledReducerCall(ctx);
 
     const lease = ctx.db.inboxAuthLease.id.find(arg.leaseId);
     ctx.db.inboxAuthLeaseExpiry.delete(arg);

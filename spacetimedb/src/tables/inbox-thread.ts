@@ -30,5 +30,7 @@ export const inboxThreadTable = table(
       lastMessageAt: t.timestamp(),
       lastMessageSeq: t.u64(),
       updatedAt: t.timestamp(),
+      // Legacy live column retained for non-reset publishes; current reads use sortKey.
+      updatedAtSortKey: t.string().default('pending'),
     }
 );

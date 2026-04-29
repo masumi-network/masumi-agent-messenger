@@ -16,6 +16,7 @@ const {
   getOwnedDevice,
   isNeverExpiringDeviceKeyBundle,
   isClaimableDeviceKeyBundle,
+  requireScheduledReducerCall,
 } = model;
 export const visibleDeviceKeyBundles = spacetimedb.view(
   { public: true },
@@ -50,9 +51,7 @@ export const visibleDeviceKeyBundles = spacetimedb.view(
 export const expireDeviceKeyBundle = spacetimedb.reducer(
   { arg: deviceKeyBundleExpiryTable.rowType },
   (ctx, { arg }) => {
-    if (!ctx.senderAuth.isInternal) {
-      throw new SenderError('This reducer can only be called by the scheduler');
-    }
+    requireScheduledReducerCall(ctx);
 
     const bundle = ctx.db.deviceKeyBundle.id.find(arg.bundleId);
     ctx.db.deviceKeyBundleExpiry.delete(arg);

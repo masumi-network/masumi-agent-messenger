@@ -10,6 +10,8 @@ import * as model from '../../model';
 
 const {
   MAX_CHANNEL_MESSAGE_PAGE_SIZE,
+  MAX_CHANNEL_RECENT_PUBLIC_MESSAGES,
+  MAX_PUBLIC_RECENT_CHANNEL_MESSAGE_VIEW_ROWS,
   ChannelMessageRow,
   PublicRecentChannelMessageRow,
   requireNonEmpty,
@@ -31,15 +33,111 @@ const {
   buildChannelDiscoverableSortKey,
 } = model;
 
+function toPublicRecentChannelMessageRow(message: model.PublicRecentChannelMessageRecordRow) {
+  return {
+    id: message.id,
+    channelId: message.channelId,
+    channelSeq: message.channelSeq,
+    channelSeqKey: message.channelSeqKey,
+    senderAgentDbId: message.senderAgentDbId,
+    senderPublicIdentity: message.senderPublicIdentity,
+    senderSeq: message.senderSeq,
+    senderSigningKeyVersion: message.senderSigningKeyVersion,
+    plaintext: message.plaintext,
+    signature: message.signature,
+    replyToMessageId: message.replyToMessageId,
+    createdAt: message.createdAt,
+    senderSigningPublicKey: message.senderSigningPublicKey,
+  };
+}
+
 export const publicRecentChannelMessages = spacetimedb.anonymousView(
   { public: true },
   t.array(PublicRecentChannelMessageRow),
-  ctx =>
-    ctx.from.publicRecentChannelMessage
-      .leftSemijoin(ctx.from.publicChannel, (message, channel) =>
-        message.channelId.eq(channel.channelId)
+  ctx => {
+    const visiblePrefixRange = [true] as unknown as Parameters<
+      typeof ctx.db.publicRecentChannelMessage.public_recent_channel_message_visible_sort_key.filter
+    >[0];
+    const rows: model.PublicRecentChannelMessageRecordRow[] = [];
+    for (const message of ctx.db.publicRecentChannelMessage.public_recent_channel_message_visible_sort_key.filter(
+      visiblePrefixRange
+    )) {
+      if (!ctx.db.publicChannel.channelId.find(message.channelId)) {
+        continue;
+      }
+      rows.push(message);
+      if (rows.length >= MAX_PUBLIC_RECENT_CHANNEL_MESSAGE_VIEW_ROWS) {
+        break;
+      }
+    }
+    return rows.map(toPublicRecentChannelMessageRow);
+  }
+);
+
+function resolvePublicChannelForRead(
+  ctx: model.ReadDbCtx,
+  params: {
+    channelId?: bigint;
+    channelSlug?: string;
+  }
+) {
+  if (params.channelId !== undefined) {
+    return ctx.db.publicChannel.channelId.find(params.channelId) ?? null;
+  }
+  if (params.channelSlug !== undefined) {
+    const channel = ctx.db.channel.slug.find(model.normalizeChannelSlug(params.channelSlug));
+    if (!channel) {
+      return null;
+    }
+    return ctx.db.publicChannel.channelId.find(channel.id) ?? null;
+  }
+  return null;
+}
+
+export const listPublicChannelMessages = spacetimedb.procedure(
+  {
+    channelId: t.u64().optional(),
+    channelSlug: t.string().optional(),
+    beforeChannelSeq: t.u64().optional(),
+    limit: t.u64(),
+  },
+  t.array(PublicRecentChannelMessageRow),
+  (ctx, { channelId, channelSlug, beforeChannelSeq, limit }) => {
+    return ctx.withTx(tx => {
+      if (limit === 0n) {
+        throw new SenderError('limit is required and must be greater than zero');
+      }
+      const pageSize =
+        limit > BigInt(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)
+          ? MAX_CHANNEL_RECENT_PUBLIC_MESSAGES
+          : Number(limit);
+      const channel = resolvePublicChannelForRead(tx, { channelId, channelSlug });
+      if (!channel) {
+        return [];
+      }
+
+      const channelSeqPrefixRange = [channel.channelId] as unknown as Parameters<
+        typeof tx.db.publicRecentChannelMessage.public_recent_channel_message_channel_id_seq.filter
+      >[0];
+      const rows = Array.from(
+        tx.db.publicRecentChannelMessage.public_recent_channel_message_channel_id_seq.filter(
+          channelSeqPrefixRange
+        )
       )
-      .build()
+        .filter(message =>
+          beforeChannelSeq === undefined ? true : message.channelSeq < beforeChannelSeq
+        )
+        .sort((left, right) => {
+          if (left.channelSeq < right.channelSeq) return 1;
+          if (left.channelSeq > right.channelSeq) return -1;
+          if (left.id < right.id) return 1;
+          if (left.id > right.id) return -1;
+          return 0;
+        })
+        .slice(0, pageSize);
+      return rows.reverse().map(toPublicRecentChannelMessageRow);
+    });
+  }
 );
 
 export const listChannelMessages = spacetimedb.procedure(

@@ -1,6 +1,12 @@
 import { connectAuthenticated, disconnectConnection } from '../cli/src/services/spacetimedb';
 import { ensureAuthenticatedSession } from '../cli/src/services/auth';
 import { tables } from '../webapp/src/module_bindings';
+import type {
+  PublicRecentChannelMessageRow,
+  VisibleAgentRow,
+  VisibleChannelMembershipRow,
+} from '../webapp/src/module_bindings/types';
+import { limitSpacetimeSubscriptionQuery } from '../shared/spacetime-subscription-limits';
 
 async function main() {
   const { profile, session } = await ensureAuthenticatedSession({ profileName: 'default' });
@@ -11,76 +17,116 @@ async function main() {
   });
 
   try {
-    const visibleChannelsQuery = tables.visibleChannels.where(() => true);
-    const membersQuery = tables.visibleChannelMemberships.where(() => true);
-    const publicChannelQuery = tables.publicChannels.where(row => row.slug.eq('public-discussion'));
-    const actorsQuery = tables.visibleAgents.where(() => true);
-    await new Promise<void>((resolve, reject) => {
-      const subscription = conn
-        .subscriptionBuilder()
-        .onApplied(() => resolve())
-        .onError(reject)
-        .subscribe([publicChannelQuery, visibleChannelsQuery, membersQuery, actorsQuery]);
-      void subscription;
+    const [channel] = await conn.procedures.readPublicChannel({
+      channelId: undefined,
+      channelSlug: 'public-discussion',
     });
-
-    const actor = Array.from((conn.db.visibleAgents as any).iter()).find((a:any)=>a.slug==='test-test-test');
-    const channel = Array.from((conn.db.publicChannels as any).iter()).find((c: any) => c.slug === 'public-discussion');
     if (!channel) {
       throw new Error('public-discussion channel was not found');
     }
-    const publicRecentQuery = tables.publicRecentChannelMessages.where(row =>
-      row.channelId.eq(channel.channelId)
+
+    const visibleChannelsQuery = limitSpacetimeSubscriptionQuery(
+      tables.visibleChannels.where(row => row.slug.eq('public-discussion')),
+      'visibleChannels'
+    );
+    const membersQuery = limitSpacetimeSubscriptionQuery(
+      tables.visibleChannelMemberships.where(row => row.channelId.eq(channel.channelId)),
+      'visibleChannelMemberships'
+    );
+    const actorsQuery = limitSpacetimeSubscriptionQuery(
+      tables.visibleAgents.where(row => row.slug.eq('test-test-test')),
+      'visibleAgents'
     );
     await new Promise<void>((resolve, reject) => {
       const subscription = conn
         .subscriptionBuilder()
         .onApplied(() => resolve())
         .onError(reject)
-        .subscribe([publicRecentQuery]);
+        .subscribe([visibleChannelsQuery, membersQuery, actorsQuery]);
       void subscription;
     });
-    console.log('actor', actor && actor.id?.toString?.(), 'actor key version', actor?.currentSigningKeyVersion);
-    console.log('public channel', channel && {
-      id: channel.channelId?.toString(),
-      last: channel.lastMessageSeq?.toString(),
-      accessMode: channel.accessMode,
-      discoverable: channel.discoverable,
-      row: channel,
-    });
 
-    const recentRows = Array.from((conn.db.publicRecentChannelMessages as any).iter()) as any[];
-    console.log('publicRecent total', recentRows.length);
-    console.log('publicRecent ids', recentRows.map((r:any) => r.id.toString()).sort((a:string,b:string)=>Number(BigInt(a)-BigInt(b))));
-    const chanRecent = recentRows.filter((r:any) => r.channelId === channel.channelId).sort((a,b)=> Number(a.channelSeq-b.channelSeq));
-    console.log('chan recent seq', chanRecent.map(r => r.channelSeq.toString()));
-    console.log('chan recent rows', chanRecent.map(r => ({ id: r.id.toString(), seq: r.channelSeq.toString(), key: r.channelSeqKey })));
-
-    const mems = Array.from((conn.db.visibleChannelMemberships as any).iter());
-    const mem = mems.find((m:any) => m.channelId === channel.channelId && m.agentDbId === actor.id);
-    console.log('membership', mem && {
-      id: mem.id?.toString?.(),
-      active: mem.active,
-      perm: mem.permission,
-      lastSentSeq: mem.lastSentSeq?.toString?.(),
-    });
-
-    const rows = await conn.procedures.listChannelMessages({
-      agentDbId: actor.id,
+    const actor =
+      (Array.from(conn.db.visibleAgents.iter()) as VisibleAgentRow[]).find(
+        row => row.slug === 'test-test-test'
+      ) ?? null;
+    const recentRows = await conn.procedures.listPublicChannelMessages({
       channelId: channel.channelId,
       channelSlug: undefined,
       beforeChannelSeq: undefined,
       limit: 25n,
     });
-    console.log('listChannelMessages count', rows.length);
-    console.log('list seqs', rows.map((r:any)=>r.channelSeq.toString()).slice(-10));
 
+    console.log(
+      'actor',
+      actor?.id.toString() ?? null,
+      'actor key version',
+      actor?.currentSigningKeyVersion ?? null
+    );
+    console.log('public channel', {
+      id: channel.channelId.toString(),
+      last: channel.lastMessageSeq.toString(),
+      accessMode: channel.accessMode,
+      discoverable: channel.discoverable,
+      row: channel,
+    });
+
+    console.log('publicRecent total', recentRows.length);
+    console.log(
+      'publicRecent ids',
+      recentRows
+        .map((row: PublicRecentChannelMessageRow) => row.id.toString())
+        .sort((left, right) => Number(BigInt(left) - BigInt(right)))
+    );
+    console.log(
+      'chan recent seq',
+      recentRows.map((row: PublicRecentChannelMessageRow) => row.channelSeq.toString())
+    );
+    console.log(
+      'chan recent rows',
+      recentRows.map((row: PublicRecentChannelMessageRow) => ({
+        id: row.id.toString(),
+        seq: row.channelSeq.toString(),
+        key: row.channelSeqKey,
+      }))
+    );
+
+    const memberships = Array.from(
+      conn.db.visibleChannelMemberships.iter()
+    ) as VisibleChannelMembershipRow[];
+    const membership =
+      actor === null
+        ? null
+        : memberships.find(
+            row => row.channelId === channel.channelId && row.agentDbId === actor.id
+          ) ?? null;
+    console.log(
+      'membership',
+      membership && {
+        id: membership.id.toString(),
+        active: membership.active,
+        perm: membership.permission,
+        lastSentSeq: membership.lastSentSeq.toString(),
+      }
+    );
+
+    if (actor) {
+      const rows = await conn.procedures.listChannelMessages({
+        agentDbId: actor.id,
+        channelId: channel.channelId,
+        channelSlug: undefined,
+        beforeChannelSeq: undefined,
+        limit: 25n,
+      });
+      console.log('listChannelMessages count', rows.length);
+      console.log('list seqs', rows.map(row => row.channelSeq.toString()).slice(-10));
+    }
   } finally {
     await disconnectConnection(conn);
   }
 }
 
-main().catch(e => {
-  console.error(e);
+main().catch((error: unknown) => {
+  console.error(error);
   process.exit(1);
 });

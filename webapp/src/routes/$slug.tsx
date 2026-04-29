@@ -189,8 +189,8 @@ import {
 } from '@/features/workspace/actor-settings';
 import { useWorkspaceWriteAccess } from '@/features/workspace/use-write-access';
 
-const THREAD_LIST_PAGE_SIZE = 25;
-const THREAD_TIMELINE_PAGE_SIZE = 25;
+const THREAD_LIST_PAGE_SIZE = 10;
+const THREAD_TIMELINE_PAGE_SIZE = 10;
 const THREAD_LIST_SCROLL_LOAD_THRESHOLD_PX = 64;
 
 type Message = VisibleMessageRow;
@@ -1260,6 +1260,7 @@ function AuthenticatedInboxPage() {
   const [threadPageAfterSortKey, setThreadPageAfterSortKey] = useState<string | undefined>();
   const [threadPagesExhausted, setThreadPagesExhausted] = useState(false);
   const [threadPageLoading, setThreadPageLoading] = useState(false);
+  const [threadPageError, setThreadPageError] = useState<string | null>(null);
   const [threadHistoryExhausted, setThreadHistoryExhausted] = useState(false);
   const [threadHistoryLoading, setThreadHistoryLoading] = useState(false);
   const [composeLookupSlug, setComposeLookupSlug] = useState('');
@@ -1401,16 +1402,10 @@ function AuthenticatedInboxPage() {
   const setThreadParticipantAdminReducer = useReducer(reducers.setThreadParticipantAdmin);
   const sendEncryptedMessageReducer = useReducer(reducers.sendEncryptedMessage);
   const markThreadReadReducer = useReducer(reducers.markThreadRead);
+  const repairOwnSenderReadStatesReducer = useReducer(reducers.repairOwnSenderReadStates);
   const setThreadArchivedReducer = useReducer(reducers.setThreadArchived);
   const deleteThreadReducer = useReducer(reducers.deleteThread);
 
-  const selectedThreadMessagesQuery = useMemo(
-    () =>
-      tables.visibleMessages.where(row =>
-        row.threadId.eq(selectedThreadId ?? 0n)
-      ),
-    [selectedThreadId]
-  );
   const selectedThreadSecretEnvelopesQuery = useMemo(
     () =>
       tables.visibleThreadSecretEnvelopes.where(row =>
@@ -1439,7 +1434,10 @@ function AuthenticatedInboxPage() {
     tables.visibleDeviceKeyBundles,
     'visibleDeviceKeyBundles'
   );
-  const [liveThreads, threadsReady, threadsError] = useLiveTable<Thread>(tables.visibleThreads, 'visibleThreads');
+  const [liveThreadSignals, threadSignalsReady, threadSignalsError] = useLiveTable<Thread>(
+    tables.visibleThreads,
+    'visibleThreads'
+  );
   const [threadSecretEnvelopes, threadSecretEnvelopesReady, threadSecretEnvelopesError] = useLiveTable<VisibleThreadSecretEnvelopeRow>(
     selectedThreadSecretEnvelopesQuery,
     'visibleThreadSecretEnvelopes',
@@ -1469,20 +1467,11 @@ function AuthenticatedInboxPage() {
     tables.visibleContactAllowlistEntries,
     'visibleContactAllowlistEntries'
   );
-  const [messages, messagesReady, messagesError] = useLiveTable<Message>(
-    selectedThreadMessagesQuery,
-    'visibleMessages',
-    { enabled: selectedThreadId !== null }
-  );
-
   const actors = useMemo(
     () => mergeRowsById(liveActors, pagedThreadActors),
     [liveActors, pagedThreadActors]
   );
-  const threads = useMemo(
-    () => mergeRowsById(liveThreads, pagedThreads),
-    [liveThreads, pagedThreads]
-  );
+  const threads = pagedThreads;
   const threadParticipants = pagedThreadParticipants;
   const threadReadStates = pagedThreadReadStates;
   const visibleStateRef = useRef<{
@@ -1575,10 +1564,12 @@ function AuthenticatedInboxPage() {
     [activeActor, allowlistEntries]
   );
 
+  const threadsReady = !threadPageLoading;
+  const threadsError = threadPageError;
   const selectedThreadRealtimeReady =
-    selectedThreadId === null ? threadsReady : threadSecretEnvelopesReady && messagesReady;
+    selectedThreadId === null ? threadsReady : threadSecretEnvelopesReady && threadSignalsReady;
   const selectedThreadRealtimeError =
-    selectedThreadId === null ? null : threadSecretEnvelopesError || messagesError;
+    selectedThreadId === null ? null : threadSecretEnvelopesError || threadSignalsError;
   const coreLoading = !actorsReady || (!activeActor && slugPresence === 'checking');
   const secondaryLoading =
     !inboxesReady ||
@@ -1586,6 +1577,7 @@ function AuthenticatedInboxPage() {
     !deviceShareRequestsReady ||
     !deviceShareBundlesReady ||
     !threadsReady ||
+    !threadSignalsReady ||
     !contactRequestsReady ||
     !threadInvitesReady ||
     !allowlistEntriesReady ||
@@ -1732,6 +1724,32 @@ function AuthenticatedInboxPage() {
   });
   const canWriteToActiveInbox = writeAccess.canWrite && !activeActorDeregistered;
   useEffect(() => {
+    if (!activeActorId || !canWriteToActiveInbox) {
+      return;
+    }
+
+    const repairKey = `masumi.threadReadStateRepair.v1:${activeActorId.toString()}`;
+    try {
+      if (window.localStorage.getItem(repairKey) === 'done') {
+        return;
+      }
+    } catch {
+      // Private browsing can deny localStorage; the reducer itself remains idempotent.
+    }
+
+    void Promise.resolve(repairOwnSenderReadStatesReducer({ agentDbId: activeActorId }))
+      .then(() => {
+        try {
+          window.localStorage.setItem(repairKey, 'done');
+        } catch {
+          // Best effort marker only; a later retry is harmless.
+        }
+      })
+      .catch(() => {
+        // Retry on the next page load instead of surfacing a migration-only error.
+      });
+  }, [activeActorId, canWriteToActiveInbox, repairOwnSenderReadStatesReducer]);
+  useEffect(() => {
     if (!displayInbox || !activeActor) {
       return;
     }
@@ -1831,15 +1849,11 @@ function AuthenticatedInboxPage() {
         current.actors,
         Array.from(liveConnection.db.visibleAgents.iter()) as Agent[]
       ),
-      threads: mergeRowsById(
-        current.threads,
-        Array.from(liveConnection.db.visibleThreads.iter()) as Thread[]
-      ),
+      threads: current.threads,
       participants: mergeRowsById(
         current.participants,
         Array.from(liveConnection.db.visibleThreadParticipants.iter()) as ThreadParticipant[]
       ),
-      messages: Array.from(liveConnection.db.visibleMessages.iter()) as Message[],
       contactRequests: Array.from(liveConnection.db.visibleContactRequests.iter()) as VisibleContactRequestRow[],
       threadInvites: Array.from(liveConnection.db.visibleThreadInvites.iter()) as VisibleThreadInviteRow[],
     };
@@ -1867,6 +1881,34 @@ function AuthenticatedInboxPage() {
     }
   }, []);
 
+  async function readCurrentVisibleStateWithFreshThreadPage(
+    agentDbId: bigint
+  ): Promise<ReturnType<typeof readCurrentVisibleState>> {
+    const current = readCurrentVisibleState();
+    if (!liveConnection) {
+      return current;
+    }
+
+    try {
+      const page = await liveConnection.procedures.listVisibleThreads({
+        agentDbId,
+        afterSortKey: undefined,
+        filter: 'all',
+        query: undefined,
+        limit: BigInt(THREAD_LIST_PAGE_SIZE),
+      });
+      mergeVisibleThreadPage(page, false, false);
+      return {
+        ...current,
+        actors: mergeRowsById(current.actors, page.actors),
+        threads: mergeRowsById(current.threads, page.threads),
+        participants: mergeRowsById(current.participants, page.participants),
+      };
+    } catch {
+      return current;
+    }
+  }
+
   const refreshFirstVisibleThreadPage = useCallback(() => {
     if (!liveConnection || !activeActorId) return;
     void liveConnection.procedures
@@ -1877,7 +1919,10 @@ function AuthenticatedInboxPage() {
         query: threadSearchQuery,
         limit: BigInt(THREAD_LIST_PAGE_SIZE),
       })
-      .then(page => mergeVisibleThreadPage(page, false, false))
+      .then(page => {
+        mergeVisibleThreadPage(page, false, false);
+        setThreadPageError(null);
+      })
       .catch(() => {
         // Best-effort reconciliation; surface errors only for user-triggered loads.
       });
@@ -1901,6 +1946,7 @@ function AuthenticatedInboxPage() {
     }
 
     setThreadPageLoading(true);
+    setThreadPageError(null);
     setActorActionError(null);
     try {
       const page = await liveConnection.procedures.listVisibleThreads({
@@ -1912,9 +1958,9 @@ function AuthenticatedInboxPage() {
       });
       mergeVisibleThreadPage(page);
     } catch (error) {
-      setActorActionError(
-        error instanceof Error ? error.message : 'Unable to load older threads'
-      );
+      const message = error instanceof Error ? error.message : 'Unable to load older threads';
+      setThreadPageError(message);
+      setActorActionError(message);
     } finally {
       setThreadPageLoading(false);
     }
@@ -1941,6 +1987,7 @@ function AuthenticatedInboxPage() {
         setThreadPageAfterSortKey(undefined);
         setThreadPagesExhausted(false);
         setThreadPageLoading(false);
+        setThreadPageError(null);
       });
     }
 
@@ -1948,6 +1995,7 @@ function AuthenticatedInboxPage() {
     const cancelLoadingStart = deferEffectStateUpdate(() => {
       if (!cancelled) {
         setThreadPageLoading(true);
+        setThreadPageError(null);
       }
     });
     void liveConnection.procedures
@@ -1961,12 +2009,13 @@ function AuthenticatedInboxPage() {
       .then(page => {
         if (cancelled) return;
         mergeVisibleThreadPage(page, true);
+        setThreadPageError(null);
       })
       .catch(error => {
         if (cancelled) return;
-        setActorActionError(
-          error instanceof Error ? error.message : 'Unable to load thread page'
-        );
+        const message = error instanceof Error ? error.message : 'Unable to load thread page';
+        setThreadPageError(message);
+        setActorActionError(message);
       })
       .finally(() => {
         if (!cancelled) {
@@ -1986,16 +2035,16 @@ function AuthenticatedInboxPage() {
     threadSearchQuery,
   ]);
 
-  const liveThreadSignature = useMemo(
+  const threadSignalSignature = useMemo(
     () =>
-      liveThreads
+      liveThreadSignals
         .map(
           thread =>
-            `${thread.id}:${thread.updatedAt.microsSinceUnixEpoch}:${thread.membershipVersion}:${thread.lastMessageSeq}`
+            `${thread.id}:${thread.updatedAt.microsSinceUnixEpoch}:${thread.lastMessageSeq}:${thread.membershipVersion}`
         )
         .sort()
         .join('|'),
-    [liveThreads]
+    [liveThreadSignals]
   );
   const liveActorSignature = useMemo(
     () =>
@@ -2011,7 +2060,7 @@ function AuthenticatedInboxPage() {
 
   useEffect(() => {
     if (!liveConnection || !activeActorId) return;
-    if (liveThreadSignature === '' && liveActorSignature === '') return;
+    if (threadSignalSignature === '' && liveActorSignature === '') return;
     let cancelled = false;
     const timer = setTimeout(() => {
       if (cancelled) return;
@@ -2039,8 +2088,8 @@ function AuthenticatedInboxPage() {
     activeActorId,
     liveActorSignature,
     liveConnection,
-    liveThreadSignature,
     mergeVisibleThreadPage,
+    threadSignalSignature,
     threadRailFilter,
     threadSearchQuery,
   ]);
@@ -2054,7 +2103,7 @@ function AuthenticatedInboxPage() {
     const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
     while (Date.now() < timeoutAt) {
-      const snapshot = readCurrentVisibleState();
+      const snapshot = await readCurrentVisibleStateWithFreshThreadPage(params.ownActor.id);
       const nextThread =
         findDirectThreads(snapshot.threads, params.ownActor, params.otherPublicIdentity).find(thread => {
           return !params.existingThreadIds.has(thread.id.toString());
@@ -2077,7 +2126,9 @@ function AuthenticatedInboxPage() {
     const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
     while (Date.now() < timeoutAt) {
-      const snapshot = readCurrentVisibleState();
+      const snapshot = activeActor
+        ? await readCurrentVisibleStateWithFreshThreadPage(activeActor.id)
+        : readCurrentVisibleState();
       const nextThread = snapshot.threads.find(thread => {
         return !params.existingThreadIds.has(thread.id.toString());
       });
@@ -3324,6 +3375,10 @@ function AuthenticatedInboxPage() {
     () => visibleThreads.find(thread => thread.id === selectedThreadId),
     [selectedThreadId, visibleThreads]
   );
+  const selectedThreadSignal = useMemo(
+    () => liveThreadSignals.find(thread => thread.id === selectedThreadId),
+    [selectedThreadId, liveThreadSignals]
+  );
   useEffect(() => {
     shouldAutoScrollTimelineRef.current = true;
   }, [selectedThread?.id]);
@@ -3381,7 +3436,13 @@ function AuthenticatedInboxPage() {
       cancelled = true;
       cancelLoadingStart();
     };
-  }, [activeActor, liveConnection, selectedThread]);
+  }, [
+    activeActor,
+    liveConnection,
+    selectedThread,
+    selectedThreadSignal?.lastMessageSeq,
+    selectedThreadSignal?.updatedAt.microsSinceUnixEpoch,
+  ]);
   useEffect(() => {
     if (!selectedThread) {
       return deferEffectStateUpdate(() => {
@@ -3419,12 +3480,11 @@ function AuthenticatedInboxPage() {
       if (!selectedThread) {
         return [];
       }
-      return mergeRowsById(
-        messages.filter(message => message.threadId === selectedThread.id),
-        pagedThreadMessages.filter(message => message.threadId === selectedThread.id)
-      ).sort((left, right) => Number(left.threadSeq - right.threadSeq));
+      return pagedThreadMessages
+        .filter(message => message.threadId === selectedThread.id)
+        .sort((left, right) => Number(left.threadSeq - right.threadSeq));
     },
-    [messages, pagedThreadMessages, selectedThread]
+    [pagedThreadMessages, selectedThread]
   );
 
   useEffect(() => {
@@ -4879,11 +4939,12 @@ function AuthenticatedInboxPage() {
             'Current actor is not visible as a participant in the direct thread.'
           );
         }
-        const latestThreadSenderMessage = currentState.messages
-          .filter(message => {
-            return message.threadId === directThread.id && message.senderAgentDbId === activeActor.id;
-          })
-          .sort((left, right) => Number(right.senderSeq - left.senderSeq))[0];
+        const latestThreadSenderMessage =
+          selectedThread?.id === directThread.id
+            ? [...selectedThreadMessages]
+                .filter(message => message.senderAgentDbId === activeActor.id)
+                .sort((left, right) => Number(right.senderSeq - left.senderSeq))[0]
+            : undefined;
         const latestThreadSenderState =
           latestThreadSenderMessage ??
           (senderParticipant.lastSentMembershipVersion !== undefined &&

@@ -10,6 +10,16 @@ export const publicRecentChannelMessageTable = table(
           algorithm: 'btree',
           columns: ['channelId'],
         },
+        {
+          accessor: 'public_recent_channel_message_channel_id_seq',
+          algorithm: 'btree',
+          columns: ['channelId', 'channelSeq'],
+        },
+        {
+          accessor: 'public_recent_channel_message_visible_sort_key',
+          algorithm: 'btree',
+          columns: ['visible', 'sortKey'],
+        },
       ],
     },
     {
@@ -26,5 +36,9 @@ export const publicRecentChannelMessageTable = table(
       replyToMessageId: t.u64().optional(),
       createdAt: t.timestamp(),
       senderSigningPublicKey: t.string().default(LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY),
+      // Keep additive fields at the end so existing maincloud rows do not require
+      // a manual reordering migration during publish.
+      visible: t.bool().default(true),
+      sortKey: t.string().default('pending'),
     }
 );

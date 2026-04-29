@@ -23,7 +23,9 @@ const {
   getPublicActorsByNormalizedEmail,
   toPublishedAgentLookupRow,
   toPublishedPublicRouteRow,
+  getActorsByInboxId,
   getReadableInbox,
+  getOwnedInbox,
   getOwnedActor,
   buildLatestVisibleAgentIdsForInbox,
   toSanitizedVisibleAgentRow,
@@ -41,6 +43,26 @@ export const visibleAgents = spacetimedb.view(
       .map(agentDbId => ctx.db.agent.id.find(agentDbId))
       .filter((actor): actor is NonNullable<typeof actor> => Boolean(actor))
       .map(actor => toSanitizedVisibleAgentRow(ctx, inbox.id, actor));
+  }
+);
+
+export const readOwnedAgent = spacetimedb.procedure(
+  {
+    agentSlug: t.string().optional(),
+  },
+  t.array(VisibleAgentRow),
+  (ctx, { agentSlug }) => {
+    return ctx.withTx(tx => {
+      const inbox = getOwnedInbox(tx);
+      const actor =
+        agentSlug === undefined
+          ? getActorsByInboxId(tx, inbox.id).find(row => row.isDefault) ?? null
+          : getActorBySlug(tx, normalizeInboxSlug(agentSlug));
+      if (!actor || actor.inboxId !== inbox.id) {
+        return [];
+      }
+      return [toSanitizedVisibleAgentRow(tx, inbox.id, actor)];
+    });
   }
 );
 

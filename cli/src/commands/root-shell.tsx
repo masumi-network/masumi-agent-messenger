@@ -39,6 +39,14 @@ async function renderRootShell(params: {
         exitOnCtrlC: true,
       }
     );
+
+    // Ink's `exitOnCtrlC` unmounts the app but does not invoke `onExit`,
+    // leaving the outer promise unsettled. Resolve when ink finishes for any
+    // reason so a ctrl-c never strands a top-level await.
+    instance
+      .waitUntilExit()
+      .then(() => settle({ kind: 'exit' }, instance))
+      .catch(() => settle({ kind: 'exit' }, instance));
   });
 }
 

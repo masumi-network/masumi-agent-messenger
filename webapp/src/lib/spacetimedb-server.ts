@@ -7,6 +7,7 @@ import { resolveWorkspaceSnapshot } from './app-shell';
 import { ensureWorkspaceEnvLoaded } from './workspace-env.server';
 import type { AuthenticatedRequestBrowserSession } from './oidc-auth.server';
 import { setGlobalLogLevel } from 'spacetimedb';
+import { limitSpacetimeSubscriptionQuery } from '../../../shared/spacetime-subscription-limits';
 
 ensureWorkspaceEnvLoaded();
 setGlobalLogLevel('warn');
@@ -289,7 +290,10 @@ export async function resolveOwnedActorBySlugForSession(params: {
         .onError(error => {
           reject(withErrorContext('SpacetimeDB subscription failed', error));
         })
-        .subscribe([tables.visibleInboxes, tables.visibleAgents]);
+        .subscribe([
+          limitSpacetimeSubscriptionQuery(tables.visibleInboxes, 'visibleInboxes'),
+          limitSpacetimeSubscriptionQuery(tables.visibleAgents, 'visibleAgents'),
+        ]);
     },
   });
 }

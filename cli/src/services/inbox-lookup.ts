@@ -11,7 +11,7 @@ import { resolvePublishedActorLookup } from './published-actor-lookup';
 import {
   connectAuthenticated,
   disconnectConnection,
-  readLatestMessageRows,
+  readLatestMetadataRows,
   readMessageRows,
 } from './spacetimedb';
 
@@ -181,7 +181,7 @@ export async function lookupInboxes(params: {
   try {
     params.reporter.verbose?.('Reading latest inbox message state');
     params.reporter.verbose?.('Collecting inboxes');
-    const snapshot = await readLatestMessageRows(conn);
+    const snapshot = await readLatestMetadataRows(conn, { normalizedEmail });
     const result = buildInboxLookupEntries({
       snapshot,
       normalizedEmail,

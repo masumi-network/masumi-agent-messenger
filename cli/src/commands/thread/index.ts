@@ -76,6 +76,35 @@ function parseOptionalInteger(value: string | undefined): number | undefined {
   return Number.parseInt(value, 10);
 }
 
+function normalizeCommandPage(value: number | undefined): number {
+  if (value === undefined) return 1;
+  if (!Number.isInteger(value) || value < 1) {
+    throw userError('Page must be a positive integer.', {
+      code: 'INVALID_PAGE',
+    });
+  }
+  return value;
+}
+
+function normalizeCommandPageSize(value: number | undefined): number {
+  if (value === undefined) return 25;
+  if (!Number.isInteger(value) || value < 1 || value > 25) {
+    throw userError('Page size must be an integer between 1 and 25.', {
+      code: 'INVALID_PAGE_SIZE',
+    });
+  }
+  return value;
+}
+
+function unreadFetchPageSize(params: {
+  page: number | undefined;
+  pageSize: number | undefined;
+}): number {
+  const page = normalizeCommandPage(params.page);
+  const pageSize = normalizeCommandPageSize(params.pageSize);
+  return Math.min(25, page * pageSize);
+}
+
 function parseThreadApprovalId(value: string): { kind: 'contact' | 'invite'; id: string } {
   if (value.startsWith('invite:')) {
     return { kind: 'invite', id: value.slice('invite:'.length) };
@@ -426,7 +455,7 @@ export function registerThreadCommands(program: Command): void {
     .option('--agent <slug>', 'Owned agent slug to use for unread state')
     .option('--thread-id <id>', 'Only unread messages for this thread id')
     .option('--page <number>', 'Page number')
-    .option('--page-size <number>', 'Messages per page', '5')
+    .option('--page-size <number>', 'Messages per page', '25')
     .option('--watch', 'Tail new unread messages as they arrive')
     .option('--interval <ms>', 'Watch polling interval in milliseconds', '5000')
     .option('--filter <text>', 'Initial watch filter substring (matches decrypted body)')
@@ -449,6 +478,8 @@ export function registerThreadCommands(program: Command): void {
         preferPlainReporter: Boolean(options.watch),
         run: async ({ reporter }) => {
           if (!options.watch) {
+            const page = parseOptionalInteger(options.page);
+            const pageSize = parseOptionalInteger(options.pageSize);
             return paginateNewMessages(
               await readNewMessages({
                 profileName: options.profile,
@@ -457,16 +488,17 @@ export function registerThreadCommands(program: Command): void {
                 threadId: options.threadId,
                 readUnsupported: options.readUnsupported,
                 readMode: 'latest',
+                pageSize: unreadFetchPageSize({ page, pageSize }),
               }),
               {
-                page: parseOptionalInteger(options.page),
-                pageSize: parseOptionalInteger(options.pageSize),
+                page,
+                pageSize,
               }
             );
           }
 
           const intervalMs = Number.parseInt(options.interval ?? '5000', 10);
-          const pageSize = parseOptionalInteger(options.pageSize) ?? 5;
+          const pageSize = parseOptionalInteger(options.pageSize) ?? 25;
           const threadId = options.threadId;
 
           let filterText =
@@ -553,6 +585,7 @@ export function registerThreadCommands(program: Command): void {
                 threadId,
                 readUnsupported: options.readUnsupported,
                 readMode: 'latest',
+                pageSize,
               });
 
               lastFeed = paginateNewMessages(feed, { page: 1, pageSize });

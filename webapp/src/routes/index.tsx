@@ -52,6 +52,10 @@ import {
 } from '@/lib/agent-session';
 import { resolveWorkspaceSnapshot } from '@/lib/app-shell';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
+import {
+  usePublicChannelLookup,
+  usePublicChannelMessagesLookup,
+} from '@/lib/public-channel';
 import { buildRouteHead } from '@/lib/seo';
 import {
   buildLoginHref,
@@ -66,7 +70,6 @@ import type { DbConnection } from '@/module_bindings';
 import type {
   Agent,
   Inbox as InboxRow,
-  PublicChannelMirrorRow,
   PublicRecentChannelMessage,
 } from '@/module_bindings/types';
 import {
@@ -954,30 +957,28 @@ function SignedOutHome() {
 function PublicRootChannel({ channelId }: { channelId: bigint }) {
   const connectionState = useSpacetimeDB();
   const connection = connectionState.getConnection?.() as DbConnection | null;
-  const channelQuery = useMemo(
-    () => tables.publicChannels.where(row => row.channelId.eq(channelId)),
-    [channelId]
-  );
   const messageQuery = useMemo(
     () => tables.publicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
-  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannelMirrorRow>(
-    channelQuery,
-    'publicChannels'
-  );
-  const channel = useMemo(
-    () => channels.find(row => row.channelId === channelId) ?? null,
-    [channelId, channels]
-  );
-  const [messages, messagesReady, messagesError] = usePublicLiveTable<PublicRecentChannelMessage>(
+  const [channel, channelsReady, channelsError] = usePublicChannelLookup({ channelId });
+  const [liveMessages, liveMessagesReady] = usePublicLiveTable<PublicRecentChannelMessage>(
     messageQuery,
     'publicRecentChannelMessages',
     { enabled: channel !== null }
   );
+  const [messages, messagesReady, messagesError, reloadMessages] = usePublicChannelMessagesLookup({
+    channelId,
+    enabled: channel !== null,
+    limit: 25n,
+  });
   const [decryptedByKey, setDecryptedByKey] = useState<
     Record<string, DecryptedPublicChannelMessage>
   >({});
+  const liveMessagesRefreshKey = useMemo(
+    () => liveMessages.map(message => `${message.id.toString()}:${message.channelSeq.toString()}`).join('|'),
+    [liveMessages]
+  );
 
   const sortedMessages = useMemo(
     () =>
@@ -991,6 +992,12 @@ function PublicRootChannel({ channelId }: { channelId: bigint }) {
     [channelId, messages]
   );
   const error = channelsError ?? messagesError;
+
+  useEffect(() => {
+    if (channel && liveMessagesReady) {
+      reloadMessages();
+    }
+  }, [channel, liveMessagesReady, liveMessagesRefreshKey, reloadMessages]);
 
   useEffect(() => {
     let cancelled = false;

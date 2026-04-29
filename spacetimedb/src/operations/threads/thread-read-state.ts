@@ -6,6 +6,7 @@ import * as model from '../../model';
 
 const {
   VisibleThreadReadStateRow,
+  buildThreadParticipantKey,
   buildThreadReadStateKey,
   getOwnActorIdsForInbox,
   getReadableInbox,
@@ -13,6 +14,7 @@ const {
   buildLatestVisibleThreadIdsForInbox,
   requireVisibleThreadParticipant,
   getThreadReadStateForActor,
+  isThreadVisibleInNormalViews,
 } = model;
 export const visibleThreadReadStates = spacetimedb.view(
   { public: true },
@@ -78,6 +80,56 @@ export const markThreadRead = spacetimedb.reducer(
       lastReadThreadSeq: nextLastReadThreadSeq,
       updatedAt: ctx.timestamp,
     });
+  }
+);
+
+export const repairOwnSenderReadStates = spacetimedb.reducer(
+  {
+    agentDbId: t.u64(),
+  },
+  (ctx, { agentDbId }) => {
+    const actor = getOwnedActor(ctx, agentDbId);
+    const latestSentSeqByThreadId = new Map<bigint, bigint>();
+
+    for (const message of ctx.db.message.message_sender_agent_db_id.filter(actor.id)) {
+      const participant = ctx.db.threadParticipant.uniqueKey.find(
+        buildThreadParticipantKey(message.threadId, actor.id)
+      );
+      if (!participant || !isThreadVisibleInNormalViews(ctx, message.threadId)) {
+        continue;
+      }
+      const current = latestSentSeqByThreadId.get(message.threadId) ?? 0n;
+      if (message.threadSeq > current) {
+        latestSentSeqByThreadId.set(message.threadId, message.threadSeq);
+      }
+    }
+
+    for (const [threadId, lastReadThreadSeq] of latestSentSeqByThreadId) {
+      const readState = getThreadReadStateForActor(ctx, threadId, actor.id);
+      if (!readState) {
+        ctx.db.threadReadState.insert({
+          id: 0n,
+          threadId,
+          agentDbId: actor.id,
+          uniqueKey: buildThreadReadStateKey(threadId, actor.id),
+          lastReadThreadSeq,
+          archived: false,
+          updatedAt: ctx.timestamp,
+        });
+        continue;
+      }
+
+      if (
+        readState.lastReadThreadSeq === undefined ||
+        readState.lastReadThreadSeq < lastReadThreadSeq
+      ) {
+        ctx.db.threadReadState.id.update({
+          ...readState,
+          lastReadThreadSeq,
+          updatedAt: ctx.timestamp,
+        });
+      }
+    }
   }
 );
 

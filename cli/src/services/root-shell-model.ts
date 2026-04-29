@@ -15,7 +15,6 @@ import type {
   VisibleAgentRow,
   VisibleThreadParticipantRow,
   VisibleThreadReadStateRow,
-  VisibleMessageRow,
   VisibleChannelJoinRequestRow,
   VisibleChannelMembershipRow,
   VisibleChannelRow,
@@ -219,42 +218,6 @@ function buildReadStateByThreadId(
       .filter(readState => readState.agentDbId === actorId)
       .map(readState => [readState.threadId, readState] as const)
   );
-}
-
-function buildUnreadMessagesForActor(params: {
-  actor: VisibleAgentRow;
-  actors: VisibleAgentRow[];
-  readStates: VisibleThreadReadStateRow[];
-  messages: VisibleMessageRow[];
-}): VisibleMessageRow[] {
-  const ownActorIds = buildOwnActorIds(params.actors, params.actor.inboxId);
-  const archivedThreadIds = new Set(
-    params.readStates
-      .filter(readState => readState.agentDbId === params.actor.id && readState.archived)
-      .map(readState => readState.threadId)
-  );
-  const lastReadByThreadId = new Map<bigint, bigint>();
-  for (const readState of params.readStates) {
-    if (readState.agentDbId !== params.actor.id || readState.archived) {
-      continue;
-    }
-    lastReadByThreadId.set(readState.threadId, readState.lastReadThreadSeq ?? 0n);
-  }
-
-  return params.messages
-    .filter(message => !archivedThreadIds.has(message.threadId))
-    .filter(message => !ownActorIds.has(message.senderAgentDbId))
-    .filter(message => message.threadSeq > (lastReadByThreadId.get(message.threadId) ?? 0n))
-    .sort((left, right) => {
-      const byTime = compareBigIntDesc(
-        left.createdAt.microsSinceUnixEpoch,
-        right.createdAt.microsSinceUnixEpoch
-      );
-      if (byTime !== 0) {
-        return byTime;
-      }
-      return compareBigIntDesc(left.threadSeq, right.threadSeq);
-    });
 }
 
 function toOwnedInboxSummary(actor: VisibleAgentRow): OwnedInboxSummary {
@@ -505,7 +468,7 @@ function buildAttentionItems(params: {
     });
   }
 
-  if (params.connectionHealth === 'reconnecting' || params.connectionHealth === 'connecting') {
+  if (params.connectionHealth === 'reconnecting') {
     items.push({
       id: 'connection:reconnecting',
       title: 'Connection is still syncing',
@@ -527,10 +490,13 @@ function buildAttentionItems(params: {
     });
   }
 
-  if (params.requests.length > 0) {
+  const incomingPendingCount = params.requests.filter(
+    request => request.direction === 'incoming'
+  ).length;
+  if (incomingPendingCount > 0) {
     items.push({
       id: 'requests:pending',
-      title: `${params.requests.length.toString()} pending approval${params.requests.length === 1 ? '' : 's'}`,
+      title: `${incomingPendingCount.toString()} pending approval${incomingPendingCount === 1 ? '' : 's'}`,
       description: 'Open Pending to approve or reject requests.',
       severity: 'warning',
       targetTab: 'inboxes',
@@ -600,20 +566,6 @@ export function buildRootShellViewModel(params: {
   }
 
   const ownActorIds = buildOwnActorIds(params.rows.actors, activeActor.inboxId);
-  const unreadMessages = buildUnreadMessagesForActor({
-    actor: activeActor,
-    actors: params.rows.actors,
-    readStates: params.rows.readStates,
-    messages: params.rows.messages,
-  });
-  const unreadCountByThreadId = new Map<bigint, number>();
-  for (const message of unreadMessages) {
-    unreadCountByThreadId.set(
-      message.threadId,
-      (unreadCountByThreadId.get(message.threadId) ?? 0) + 1
-    );
-  }
-
   const activeParticipantsByThreadId = buildParticipantsByThreadId(
     params.rows.participants.filter(participant => participant.active)
   );
@@ -645,7 +597,17 @@ export function buildRootShellViewModel(params: {
         actorsById,
         ownActorIds
       ),
-      unreadMessages: unreadCountByThreadId.get(thread.id) ?? 0,
+      unreadMessages: (() => {
+        const readState = readStateByThreadId.get(thread.id);
+        if (readState?.archived) {
+          return 0;
+        }
+        const unread = thread.lastMessageSeq - (readState?.lastReadThreadSeq ?? 0n);
+        if (unread <= 0n) {
+          return 0;
+        }
+        return Number(unread > 999n ? 999n : unread);
+      })(),
       archived: readStateByThreadId.get(thread.id)?.archived ?? false,
       locked: thread.membershipLocked,
       participantCount: (activeParticipantsByThreadId.get(thread.id) ?? []).length,
@@ -782,7 +744,7 @@ export function buildRootShellViewModel(params: {
   return {
     activeInbox,
     ownedInboxes: ownedActors.map(toOwnedInboxSummary),
-    unreadCount: unreadMessages.length,
+    unreadCount: threads.reduce((total, thread) => total + thread.unreadMessages, 0),
     pendingRequestCount: requests.length,
     dashboard: {
       attentionItems: buildAttentionItems({

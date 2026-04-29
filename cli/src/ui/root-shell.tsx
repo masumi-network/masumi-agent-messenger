@@ -1,5 +1,5 @@
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TaskBanner } from './task-screen';
 import type { GlobalOptions, TaskReporter } from '../services/command-runtime';
 import {
@@ -21,7 +21,10 @@ import {
 import {
   connectAuthenticated,
   disconnectConnection,
+  readOwnedAgentRow,
   readShellRows,
+  refreshInboxAuthLeaseIfBound,
+  repairOwnSenderReadStatesOnce,
   subscribeShellTables,
   type ShellRows,
 } from '../services/spacetimedb';
@@ -59,7 +62,10 @@ import {
   type ChannelMemberListItem,
   type ChannelMessageItem,
 } from '../services/channel';
-import { sendMessageToThread, sendMessageToSlug } from '../services/send-message';
+import {
+  sendMessageToThreadFromLiveSnapshot,
+  sendMessageToSlug,
+} from '../services/send-message';
 import {
   resolveContactRequest,
   setPublicDescription,
@@ -99,8 +105,15 @@ import {
 } from '../services/messages';
 import { findDefaultActorByEmail } from '../../../shared/inbox-state';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
+import { mergeRowsById } from '../services/row-utils';
 import type { DbConnection } from '../../../webapp/src/module_bindings';
-import type { VisibleAgentRow, VisibleMessageRow } from '../../../webapp/src/module_bindings/types';
+import type {
+  VisibleAgentRow,
+  VisibleMessageRow,
+  VisibleThreadParticipantRow,
+  VisibleThreadReadStateRow,
+  VisibleThreadRow,
+} from '../../../webapp/src/module_bindings/types';
 
 type ShellRoute =
   | { type: 'auth' }
@@ -119,6 +132,16 @@ type ChannelTab = 'messages' | 'members' | 'approvals';
 type AccountFocus = 'security' | 'devices';
 type AgentsFocus = 'owned' | 'discover';
 type ShellFocus = 'sidebar' | 'content';
+
+const THREAD_LIST_PAGE_SIZE = 5n;
+const THREAD_MESSAGE_PAGE_SIZE = 5n;
+const SHELL_RECONNECT_RETRY_DELAY_MS = 1000;
+const SHELL_LEASE_LOST_RECONNECT_DELAY_MS = 250;
+const SHELL_INBOX_AUTH_LEASE_DURATION_MS = 5 * 60_000;
+const SHELL_LEASE_REFRESH_LEAD_MS = 30_000;
+const SHELL_LEASE_REFRESH_MIN_DELAY_MS = 5_000;
+const SHELL_LEASE_REFRESH_FALLBACK_DELAY_MS = 10_000;
+const SHELL_LEASE_LOST_DEBOUNCE_MS = 1500;
 
 const SIDEBAR_NAV_ITEMS = ['inboxes', 'channels', 'agents', 'discover', 'account'] as const;
 type SidebarNavItem = (typeof SIDEBAR_NAV_ITEMS)[number];
@@ -304,6 +327,37 @@ type LiveThreadWindow = {
   canScrollNewer: boolean;
 };
 
+type LiveThreadMessagesPage = {
+  messages: LiveThreadMessage[];
+  nextBeforeThreadSeq: bigint | null;
+};
+
+type ThreadListPageState = {
+  scopeKey: string | null;
+  threads: VisibleThreadRow[];
+  actors: VisibleAgentRow[];
+  participants: VisibleThreadParticipantRow[];
+  readStates: VisibleThreadReadStateRow[];
+  nextAfterSortKey: string | null;
+  loading: boolean;
+  loaded: boolean;
+  exhausted: boolean;
+  error: string | null;
+};
+
+type ThreadListPageLoadResult = {
+  nextItemId: string | null;
+  exhausted: boolean;
+  error: string | null;
+};
+
+type PendingSelectNextInboxItem = {
+  fromId: string;
+  fromIndex: number;
+};
+
+type InboxSectionCountLabels = Record<InboxSectionKey, string | null>;
+
 type ChannelMessagesPageState = {
   channelId: string | null;
   lastMessageSeq: string | null;
@@ -358,8 +412,8 @@ const DEFAULT_SECURITY_STATE: ShellSecurityState = {
 
 const DEFAULT_AGENT_DISCOVERY_TAKE = 10;
 const MAX_TUI_DESCRIPTION_LINES = 4;
-const CHANNEL_MESSAGE_PAGE_SIZE = 8;
-const CHANNEL_MEMBER_PAGE_SIZE = 8;
+const CHANNEL_MESSAGE_PAGE_SIZE = 5;
+const CHANNEL_MEMBER_PAGE_SIZE = 5;
 const TAB_CELL_WIDTH = 18;
 const TAB_CELL_GAP = 2;
 const SIDEBAR_WIDTH = 20;
@@ -433,6 +487,29 @@ function createInitialDiscoverDetailState(): DiscoverDetailState {
   };
 }
 
+function createInitialThreadListPageState(scopeKey: string | null = null): ThreadListPageState {
+  return {
+    scopeKey,
+    threads: [],
+    actors: [],
+    participants: [],
+    readStates: [],
+    nextAfterSortKey: null,
+    loading: false,
+    loaded: false,
+    exhausted: false,
+    error: null,
+  };
+}
+
+function createInitialInboxSectionCountLabels(): InboxSectionCountLabels {
+  return {
+    threads: null,
+    pending: null,
+    archived: null,
+  };
+}
+
 function createInitialChannelMessagesState(): ChannelMessagesPageState {
   return {
     channelId: null,
@@ -474,6 +551,30 @@ function silentReporter(): TaskReporter {
 function clampIndex(index: number, total: number): number {
   if (total <= 0) return 0;
   return Math.min(Math.max(index, 0), total - 1);
+}
+
+function nextListWindowStart(params: {
+  currentStart: number;
+  itemCount: number;
+  maxItems: number;
+  selectedIndex: number;
+}): number {
+  if (params.itemCount <= 0) {
+    return 0;
+  }
+
+  const maxItems = Math.max(1, params.maxItems);
+  const maxStart = Math.max(0, params.itemCount - maxItems);
+  const selectedIndex = clampIndex(params.selectedIndex, params.itemCount);
+  const currentStart = Math.min(Math.max(params.currentStart, 0), maxStart);
+
+  if (selectedIndex < currentStart) {
+    return selectedIndex;
+  }
+  if (selectedIndex >= currentStart + maxItems) {
+    return Math.min(selectedIndex - maxItems + 1, maxStart);
+  }
+  return currentStart;
 }
 
 function clampCursor(index: number, total: number): number {
@@ -1000,18 +1101,134 @@ function useRootShellConnection(profileName: string) {
     error: null,
   });
   const [reconnectToken, setReconnectToken] = useState(0);
+  const hasFailedConnectionAttemptRef = useRef(false);
+
+  useEffect(() => {
+    hasFailedConnectionAttemptRef.current = false;
+  }, [profileName]);
 
   useEffect(() => {
     let cancelled = false;
     let retryTimeout: NodeJS.Timeout | null = null;
+    let leaseRefreshTimeout: NodeJS.Timeout | null = null;
+    let leaseRefreshInFlight = false;
+    let leaseLostDebounceTimeout: NodeJS.Timeout | null = null;
+    let activeIdToken: string | null = null;
     let conn: Awaited<ReturnType<typeof connectAuthenticated>>['conn'] | null = null;
     let unsubscribe: (() => void) | null = null;
+    let hadVisibleActors = false;
+
+    const scheduleReconnect = (delayMs = SHELL_RECONNECT_RETRY_DELAY_MS) => {
+      if (retryTimeout || cancelled) {
+        return;
+      }
+      retryTimeout = setTimeout(() => {
+        retryTimeout = null;
+        setReconnectToken(value => value + 1);
+      }, delayMs);
+    };
+
+    const clearLeaseRefreshTimer = () => {
+      if (leaseRefreshTimeout) {
+        clearTimeout(leaseRefreshTimeout);
+        leaseRefreshTimeout = null;
+      }
+    };
+
+    const scheduleLeaseRefresh = () => {
+      clearLeaseRefreshTimer();
+      if (cancelled) {
+        return;
+      }
+      const delay = Math.max(
+        SHELL_LEASE_REFRESH_MIN_DELAY_MS,
+        SHELL_INBOX_AUTH_LEASE_DURATION_MS - SHELL_LEASE_REFRESH_LEAD_MS
+      );
+      leaseRefreshTimeout = setTimeout(() => {
+        leaseRefreshTimeout = null;
+        void runLeaseRefresh();
+      }, delay);
+    };
+
+    const runLeaseRefresh = async () => {
+      if (cancelled || !conn || leaseRefreshInFlight) {
+        return;
+      }
+      leaseRefreshInFlight = true;
+      try {
+        const refreshed = await ensureAuthenticatedSession({
+          profileName,
+          reporter: silentReporter(),
+        });
+        if (cancelled) {
+          return;
+        }
+        if (activeIdToken && refreshed.session.idToken !== activeIdToken) {
+          // Token rotated — WebSocket handshake is bound to the old token. Reconnect.
+          activeIdToken = refreshed.session.idToken;
+          scheduleReconnect();
+          return;
+        }
+        activeIdToken = refreshed.session.idToken;
+        await refreshInboxAuthLeaseIfBound(conn);
+        if (cancelled) {
+          return;
+        }
+        scheduleLeaseRefresh();
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        const cliError = toCliError(error);
+        if (cliError.code === 'AUTH_REQUIRED') {
+          setState({
+            mode: 'signed_out',
+            connection: 'signed_out',
+            error: cliError.message,
+          });
+          return;
+        }
+        // Transient — try again sooner than the next exp.
+        leaseRefreshTimeout = setTimeout(() => {
+          leaseRefreshTimeout = null;
+          void runLeaseRefresh();
+        }, SHELL_LEASE_REFRESH_FALLBACK_DELAY_MS);
+      } finally {
+        leaseRefreshInFlight = false;
+      }
+    };
+
+    const tryInPlaceLeaseRecovery = async () => {
+      if (cancelled || !conn) {
+        return false;
+      }
+      try {
+        await refreshInboxAuthLeaseIfBound(conn);
+      } catch {
+        return false;
+      }
+      if (cancelled || !conn) {
+        return false;
+      }
+      scheduleLeaseRefresh();
+      const recovered = readShellRows(conn);
+      return recovered.actors.length > 0;
+    };
 
     const connect = async () => {
-      setState({
-        mode: 'loading',
-        connection: reconnectToken === 0 ? 'connecting' : 'reconnecting',
-        error: null,
+      setState(current => {
+        if (current.mode === 'ready') {
+          return {
+            ...current,
+            connection: hasFailedConnectionAttemptRef.current ? 'reconnecting' : 'live',
+            error: null,
+          };
+        }
+        return {
+          mode: 'loading',
+          connection: hasFailedConnectionAttemptRef.current ? 'reconnecting' : 'connecting',
+          error: null,
+        };
       });
 
       try {
@@ -1042,13 +1259,78 @@ function useRootShellConnection(profileName: string) {
           host: auth.profile.spacetimeHost,
           databaseName: auth.profile.spacetimeDbName,
           sessionToken: auth.session.idToken,
+          onDisconnect: error => {
+            if (cancelled) {
+              return;
+            }
+            const message = error?.message?.trim() || 'SpacetimeDB connection closed.';
+            hasFailedConnectionAttemptRef.current = true;
+            clearLeaseRefreshTimer();
+            setState(current => {
+              if (current.mode !== 'ready') {
+                return current;
+              }
+              return {
+                ...current,
+                connection: 'reconnecting',
+                error: message,
+              };
+            });
+            scheduleReconnect();
+          },
         });
         conn = connected.conn;
+        activeIdToken = auth.session.idToken;
+        scheduleLeaseRefresh();
 
         const publishRows = () => {
           if (!conn || cancelled) {
             return;
           }
+
+          const rows = readShellRows(conn);
+          if (rows.actors.length > 0 && leaseLostDebounceTimeout) {
+            clearTimeout(leaseLostDebounceTimeout);
+            leaseLostDebounceTimeout = null;
+          }
+          if (hadVisibleActors && rows.actors.length === 0) {
+            if (!leaseLostDebounceTimeout) {
+              leaseLostDebounceTimeout = setTimeout(() => {
+                leaseLostDebounceTimeout = null;
+                if (cancelled || !conn) {
+                  return;
+                }
+                const recheck = readShellRows(conn);
+                if (recheck.actors.length > 0) {
+                  return;
+                }
+                void (async () => {
+                  const recovered = await tryInPlaceLeaseRecovery();
+                  if (cancelled) {
+                    return;
+                  }
+                  if (recovered) {
+                    return;
+                  }
+                  hasFailedConnectionAttemptRef.current = true;
+                  setState(current => {
+                    if (current.mode !== 'ready') {
+                      return current;
+                    }
+                    return {
+                      ...current,
+                      connection: 'reconnecting',
+                      error: 'Inbox authorization expired; reconnecting.',
+                    };
+                  });
+                  scheduleReconnect(SHELL_LEASE_LOST_RECONNECT_DELAY_MS);
+                })();
+              }, SHELL_LEASE_LOST_DEBOUNCE_MS);
+            }
+            return;
+          }
+          hadVisibleActors = hadVisibleActors || rows.actors.length > 0;
+          hasFailedConnectionAttemptRef.current = false;
 
           setState({
             mode: 'ready',
@@ -1056,7 +1338,7 @@ function useRootShellConnection(profileName: string) {
             error: null,
             auth,
             conn,
-            rows: readShellRows(conn),
+            rows,
           });
         };
 
@@ -1067,6 +1349,7 @@ function useRootShellConnection(profileName: string) {
               return;
             }
 
+            hasFailedConnectionAttemptRef.current = true;
             setState(current => {
               if (current.mode !== 'ready') {
                 return current;
@@ -1079,11 +1362,7 @@ function useRootShellConnection(profileName: string) {
               };
             });
 
-            if (!retryTimeout) {
-              retryTimeout = setTimeout(() => {
-                setReconnectToken(value => value + 1);
-              }, 1000);
-            }
+            scheduleReconnect();
           },
         });
         unsubscribe = () => {
@@ -1105,15 +1384,23 @@ function useRootShellConnection(profileName: string) {
           return;
         }
 
-        setState({
-          mode: 'loading',
-          connection: 'reconnecting',
-          error: cliError.message,
+        hasFailedConnectionAttemptRef.current = true;
+        setState(current => {
+          if (current.mode === 'ready') {
+            return {
+              ...current,
+              connection: 'reconnecting',
+              error: cliError.message,
+            };
+          }
+          return {
+            mode: 'loading',
+            connection: 'reconnecting',
+            error: cliError.message,
+          };
         });
 
-        retryTimeout = setTimeout(() => {
-          setReconnectToken(value => value + 1);
-        }, 1000);
+        scheduleReconnect();
       }
     };
 
@@ -1124,6 +1411,10 @@ function useRootShellConnection(profileName: string) {
       if (retryTimeout) {
         clearTimeout(retryTimeout);
       }
+      if (leaseLostDebounceTimeout) {
+        clearTimeout(leaseLostDebounceTimeout);
+      }
+      clearLeaseRefreshTimer();
       unsubscribe?.();
       if (conn) {
         disconnectConnection(conn);
@@ -1143,10 +1434,53 @@ type LiveSelectedRequest = NonNullable<RootShellViewModel>['inboxes']['requests'
 type LiveChannel = NonNullable<RootShellViewModel>['channels']['channels'][number];
 type LiveChannelApproval = NonNullable<RootShellViewModel>['channels']['approvals'][number];
 
+function threadSummaryMatchesInboxList(params: {
+  thread: LiveSelectedThread;
+  inboxSection: InboxSectionKey;
+  threadFilter: ShellThreadFilter;
+}): boolean {
+  if (params.inboxSection === 'archived') {
+    if (!params.thread.archived) {
+      return false;
+    }
+  } else if (params.thread.archived) {
+    return false;
+  }
+
+  if (params.threadFilter === 'direct' && params.thread.kind !== 'direct') {
+    return false;
+  }
+  if (params.threadFilter === 'unread') {
+    return !params.thread.archived && params.thread.unreadMessages > 0;
+  }
+  return true;
+}
+
+function threadSummaryToInboxItem(
+  thread: LiveSelectedThread,
+  inboxSection: InboxSectionKey
+): LiveInboxSectionItem {
+  return {
+    id: `thread:${thread.id}`,
+    kind: 'thread',
+    label: thread.label,
+    subtitle:
+      inboxSection === 'archived'
+        ? `Archived · ${thread.lastMessageAt}`
+        : `${thread.unreadMessages > 0 ? `${thread.unreadMessages} unread` : 'No unread'} · ${thread.lastMessageAt}`,
+    unreadMessages: thread.unreadMessages,
+    threadId: thread.id,
+    archived: thread.archived,
+  };
+}
+
 function useLiveInboxSelection(params: {
   model: RootShellViewModel | null;
   inboxSection: InboxSectionKey;
   threadFilter: ShellThreadFilter;
+  threadListPageState: ThreadListPageState;
+  threadListScopeKey: string | null;
+  preservePagedSelection: boolean;
   selectedInboxItemId: string | null;
   setSelectedInboxItemId: React.Dispatch<React.SetStateAction<string | null>>;
 }) {
@@ -1166,31 +1500,50 @@ function useLiveInboxSelection(params: {
       return section.items;
     }
 
-    const threadMap = new Map(params.model.inboxes.threads.map(thread => [thread.id, thread] as const));
-    return section.items.filter(item => {
-      if (item.kind !== 'thread' || !item.threadId) {
-        return true;
-      }
+    if (params.threadListPageState.scopeKey !== params.threadListScopeKey) {
+      return [];
+    }
+    if (!params.threadListPageState.loaded) {
+      return [];
+    }
 
-      const thread = threadMap.get(item.threadId);
-      if (!thread) {
-        return false;
-      }
-      if (params.threadFilter === 'unread') {
-        return thread.unreadMessages > 0;
-      }
-      if (params.threadFilter === 'direct') {
-        return thread.kind === 'direct';
-      }
-      return true;
-    });
-  }, [params.threadFilter, params.inboxSection, params.model]);
+    const threadSummaryById = new Map(
+      params.model.inboxes.threads.map(thread => [thread.id, thread] as const)
+    );
+
+    return params.threadListPageState.threads
+      .map(thread => threadSummaryById.get(thread.id.toString()) ?? null)
+      .filter((thread): thread is LiveSelectedThread => Boolean(thread))
+      .filter(thread =>
+        threadSummaryMatchesInboxList({
+          thread,
+          inboxSection: params.inboxSection,
+          threadFilter: params.threadFilter,
+        })
+      )
+      .map(thread => threadSummaryToInboxItem(thread, params.inboxSection))
+      .filter((item): item is LiveInboxSectionItem => Boolean(item));
+  }, [
+    params.threadFilter,
+    params.inboxSection,
+    params.model,
+    params.threadListPageState,
+    params.threadListScopeKey,
+  ]);
 
   useEffect(() => {
+    if (params.preservePagedSelection) {
+      return;
+    }
     if (!inboxSectionItems.some(item => item.id === params.selectedInboxItemId)) {
       params.setSelectedInboxItemId(inboxSectionItems[0]?.id ?? null);
     }
-  }, [inboxSectionItems, params.selectedInboxItemId, params.setSelectedInboxItemId]);
+  }, [
+    inboxSectionItems,
+    params.preservePagedSelection,
+    params.selectedInboxItemId,
+    params.setSelectedInboxItemId,
+  ]);
 
   const selectedInboxItem = useMemo<LiveInboxSectionItem | null>(
     () =>
@@ -1235,6 +1588,215 @@ function useLiveInboxSelection(params: {
   };
 }
 
+function threadListPageScopeKey(params: {
+  actorId: bigint | null;
+  inboxSection: InboxSectionKey;
+  threadFilter: ShellThreadFilter;
+}): string | null {
+  if (params.actorId === null || params.inboxSection === 'pending') {
+    return null;
+  }
+  return [
+    params.actorId.toString(),
+    params.inboxSection,
+    params.threadFilter,
+  ].join(':');
+}
+
+function threadListProcedureFilter(params: {
+  inboxSection: InboxSectionKey;
+  threadFilter: ShellThreadFilter;
+}): 'active' | 'latest' | 'archived' {
+  if (params.inboxSection === 'archived') {
+    return 'archived';
+  }
+  if (params.threadFilter === 'unread') {
+    return 'latest';
+  }
+  return 'active';
+}
+
+function findThreadReadState(params: {
+  readStates: VisibleThreadReadStateRow[];
+  actorId: bigint;
+  threadId: bigint;
+}): VisibleThreadReadStateRow | null {
+  return (
+    params.readStates.find(
+      readState =>
+        readState.agentDbId === params.actorId && readState.threadId === params.threadId
+    ) ?? null
+  );
+}
+
+function threadMatchesRenderedThreadList(params: {
+  thread: VisibleThreadRow;
+  actorId: bigint;
+  readStates: VisibleThreadReadStateRow[];
+  inboxSection: InboxSectionKey;
+  threadFilter: ShellThreadFilter;
+}): boolean {
+  const readState = findThreadReadState({
+    readStates: params.readStates,
+    actorId: params.actorId,
+    threadId: params.thread.id,
+  });
+  const archived = readState?.archived ?? false;
+  if (params.inboxSection === 'archived') {
+    if (!archived) {
+      return false;
+    }
+  } else if (archived) {
+    return false;
+  }
+
+  if (params.threadFilter === 'direct' && params.thread.kind !== 'direct') {
+    return false;
+  }
+  if (params.threadFilter === 'unread') {
+    if (archived) {
+      return false;
+    }
+    return params.thread.lastMessageSeq > (readState?.lastReadThreadSeq ?? 0n);
+  }
+  return true;
+}
+
+function listRenderedThreadItemIds(params: {
+  threads: VisibleThreadRow[];
+  readStates: VisibleThreadReadStateRow[];
+  actorId: bigint;
+  inboxSection: InboxSectionKey;
+  threadFilter: ShellThreadFilter;
+}): string[] {
+  if (params.inboxSection === 'pending') {
+    return [];
+  }
+  return params.threads
+    .filter(thread =>
+      threadMatchesRenderedThreadList({
+        thread,
+        actorId: params.actorId,
+        readStates: params.readStates,
+        inboxSection: params.inboxSection,
+        threadFilter: params.threadFilter,
+      })
+    )
+    .map(thread => `thread:${thread.id.toString()}`);
+}
+
+function findNextRenderedThreadItemId(params: {
+  threads: VisibleThreadRow[];
+  readStates: VisibleThreadReadStateRow[];
+  actorId: bigint;
+  inboxSection: InboxSectionKey;
+  threadFilter: ShellThreadFilter;
+  afterItemId: string | null;
+}): string | null {
+  const itemIds = listRenderedThreadItemIds(params);
+  if (params.afterItemId === null) {
+    return itemIds[0] ?? null;
+  }
+
+  const itemIndex = itemIds.indexOf(params.afterItemId);
+  if (itemIndex < 0) {
+    return itemIds[0] ?? null;
+  }
+  return itemIds[itemIndex + 1] ?? null;
+}
+
+function hasPossiblyMoreThreadListRows(params: {
+  pageState: ThreadListPageState;
+  scopeKey: string | null;
+}): boolean {
+  if (params.pageState.scopeKey !== params.scopeKey || !params.pageState.loaded) {
+    return false;
+  }
+  if (params.pageState.exhausted) {
+    return false;
+  }
+  return params.pageState.nextAfterSortKey !== null;
+}
+
+function resolveThreadListRefreshCursor(params: {
+  current: ThreadListPageState;
+  refreshedNextAfterSortKey: string | null;
+}): Pick<ThreadListPageState, 'exhausted' | 'nextAfterSortKey'> {
+  if (!params.current.loaded) {
+    return {
+      nextAfterSortKey: params.refreshedNextAfterSortKey,
+      exhausted: params.refreshedNextAfterSortKey === null,
+    };
+  }
+
+  if (params.refreshedNextAfterSortKey === null) {
+    return {
+      nextAfterSortKey: null,
+      exhausted: true,
+    };
+  }
+
+  if (params.current.exhausted || params.current.nextAfterSortKey === null) {
+    return {
+      nextAfterSortKey: null,
+      exhausted: true,
+    };
+  }
+
+  return {
+    nextAfterSortKey:
+      params.current.nextAfterSortKey > params.refreshedNextAfterSortKey
+        ? params.current.nextAfterSortKey
+        : params.refreshedNextAfterSortKey,
+    exhausted: false,
+  };
+}
+
+function formatInboxSectionCountLabel(params: {
+  count: number;
+  section: InboxSectionKey;
+  hasMore: boolean;
+}): string {
+  if (params.section !== 'pending' && params.hasMore) {
+    return `${params.count.toString()}+`;
+  }
+  return params.count.toString();
+}
+
+function mergeThreadPageRows(rows: ShellRows, pageState: ThreadListPageState): ShellRows {
+  if (!pageState.loaded && pageState.threads.length === 0) {
+    return rows;
+  }
+
+  return {
+    ...rows,
+    actors: mergeRowsById(rows.actors, pageState.actors),
+    participants: mergeRowsById(rows.participants, pageState.participants),
+    readStates: mergeRowsById(rows.readStates, pageState.readStates),
+    threads: mergeRowsById(rows.threads, pageState.threads),
+  };
+}
+
+function compareVisibleThreadsForList(left: VisibleThreadRow, right: VisibleThreadRow): number {
+  if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch) {
+    return -1;
+  }
+  if (left.lastMessageAt.microsSinceUnixEpoch < right.lastMessageAt.microsSinceUnixEpoch) {
+    return 1;
+  }
+  if (left.id > right.id) {
+    return -1;
+  }
+  if (left.id < right.id) {
+    return 1;
+  }
+  return 0;
+}
+
+function mergeThreadListRows(...rowGroups: VisibleThreadRow[][]): VisibleThreadRow[] {
+  return mergeRowsById(...rowGroups).sort(compareVisibleThreadsForList);
+}
+
 function compareVisibleThreadMessages(left: VisibleMessageRow, right: VisibleMessageRow): number {
   if (left.threadSeq < right.threadSeq) return -1;
   if (left.threadSeq > right.threadSeq) return 1;
@@ -1260,14 +1822,37 @@ function mergeLiveThreadMessages(params: {
   optimisticMessages: LiveThreadMessage[];
 }): LiveThreadMessage[] {
   const byId = new Map(params.liveMessages.map(message => [message.id, message] as const));
+  const syncedThreadSeqs = new Set(params.liveMessages.map(message => message.threadSeq.toString()));
 
   for (const message of params.optimisticMessages) {
+    if (syncedThreadSeqs.has(message.threadSeq.toString())) {
+      continue;
+    }
     if (!byId.has(message.id)) {
       byId.set(message.id, message);
     }
   }
 
   return [...byId.values()].sort(compareLiveThreadMessages);
+}
+
+function resolveThreadMessageRefreshCursor(params: {
+  hadLoadedMessages: boolean;
+  currentNextBeforeThreadSeq: bigint | null;
+  refreshedNextBeforeThreadSeq: bigint | null;
+}): bigint | null {
+  if (!params.hadLoadedMessages) {
+    return params.refreshedNextBeforeThreadSeq;
+  }
+  if (params.currentNextBeforeThreadSeq === null) {
+    return null;
+  }
+  if (params.refreshedNextBeforeThreadSeq === null) {
+    return null;
+  }
+  return params.currentNextBeforeThreadSeq < params.refreshedNextBeforeThreadSeq
+    ? params.currentNextBeforeThreadSeq
+    : params.refreshedNextBeforeThreadSeq;
 }
 
 function buildThreadMessageRenderRows(params: {
@@ -1337,14 +1922,18 @@ async function buildLiveThreadMessages(params: {
   normalizedEmail: string;
   activeInboxSlug: string | null;
   threadId: string;
-}): Promise<LiveThreadMessage[]> {
+  beforeThreadSeq?: bigint;
+}): Promise<LiveThreadMessagesPage> {
   const actor = findOwnedActor({
     rows: params.rows,
     normalizedEmail: params.normalizedEmail,
     slug: params.activeInboxSlug,
   });
   if (!actor) {
-    return [];
+    return {
+      messages: [],
+      nextBeforeThreadSeq: null,
+    };
   }
 
   const requestedThreadId = BigInt(params.threadId);
@@ -1365,20 +1954,24 @@ async function buildLiveThreadMessages(params: {
       .map(row => row.id)
   );
 
-  const threadMessages = params.rows.messages
-    .filter(message => message.threadId === requestedThreadId)
-    .sort(compareVisibleThreadMessages);
+  const page = await params.conn.procedures.listThreadMessages({
+    agentDbId: actor.id,
+    threadId: requestedThreadId,
+    beforeThreadSeq: params.beforeThreadSeq,
+    limit: THREAD_MESSAGE_PAGE_SIZE,
+  });
+  const threadMessages = page.messages.sort(compareVisibleThreadMessages);
   const publicKeysByActorId = buildPublicKeysByActorId(
     await lookupMessagePublicKeys({
       conn: params.conn,
       agentDbId: actor.id,
       messages: threadMessages,
-      secretEnvelopes: params.rows.secretEnvelopes,
+      secretEnvelopes: page.secretEnvelopes,
       actorsById,
     })
   );
 
-  return await Promise.all(
+  const messages = await Promise.all(
     threadMessages.map(async message => {
       const sender = actorsById.get(message.senderAgentDbId);
       const decrypted = await decryptVisibleMessage({
@@ -1387,7 +1980,7 @@ async function buildLiveThreadMessages(params: {
         actorsById,
         publicKeysByActorId,
         ownActorIds,
-        secretEnvelopes: params.rows.secretEnvelopes,
+        secretEnvelopes: page.secretEnvelopes,
         recipientKeyPair,
       });
 
@@ -1407,60 +2000,136 @@ async function buildLiveThreadMessages(params: {
       } satisfies LiveThreadMessage;
     })
   );
+
+  return {
+    messages,
+    nextBeforeThreadSeq: page.nextBeforeThreadSeq ?? null,
+  };
 }
 
 function useLiveThreadMessages(params: {
   connectionState: ShellConnectionState;
+  rows: ShellRows | null;
   normalizedEmail: string;
   activeInboxSlug: string | null;
   routeType: ShellRoute['type'];
   selectedInboxItem: LiveInboxSectionItem | null;
   optimisticMessages: LiveThreadMessage[];
-  refreshToken: string;
+  threadSignalKey: string | null;
+  securityRefreshToken: number;
   inboxFocus: InboxFocus;
   messageWidth: number;
   messageMaxRows: number;
 }) {
   const [threadMessages, setThreadMessages] = useState<LiveThreadMessage[]>([]);
   const [threadMessagesError, setThreadMessagesError] = useState<string | null>(null);
+  const [threadMessagesLoading, setThreadMessagesLoading] = useState(false);
+  const [olderThreadMessagesLoading, setOlderThreadMessagesLoading] = useState(false);
+  const [nextBeforeThreadSeq, setNextBeforeThreadSeq] = useState<bigint | null>(null);
   const [rowScrollOffset, setRowScrollOffset] = useState(0);
+  const threadMessagesRequestRef = useRef(0);
+  const threadMessagesRef = useRef<LiveThreadMessage[]>([]);
+  const nextBeforeThreadSeqRef = useRef<bigint | null>(null);
+  const latestRowsRef = useRef<ShellRows | null>(params.rows);
+  const readyConn = params.connectionState.mode === 'ready' ? params.connectionState.conn : null;
+  const readyAuth = params.connectionState.mode === 'ready' ? params.connectionState.auth : null;
+  const rowsReady = params.rows !== null;
+
+  const setThreadMessagesWithRef = useCallback(
+    (
+      updater:
+        | LiveThreadMessage[]
+        | ((current: LiveThreadMessage[]) => LiveThreadMessage[])
+    ) => {
+      const next =
+        typeof updater === 'function' ? updater(threadMessagesRef.current) : updater;
+      threadMessagesRef.current = next;
+      setThreadMessages(next);
+    },
+    []
+  );
+
+  const setNextBeforeThreadSeqWithRef = useCallback((value: bigint | null) => {
+    nextBeforeThreadSeqRef.current = value;
+    setNextBeforeThreadSeq(value);
+  }, []);
 
   useEffect(() => {
+    latestRowsRef.current = params.rows;
+  }, [params.rows]);
+
+  useEffect(() => {
+    threadMessagesRequestRef.current += 1;
+    setThreadMessagesWithRef([]);
+    setThreadMessagesError(null);
+    setThreadMessagesLoading(false);
+    setOlderThreadMessagesLoading(false);
+    setNextBeforeThreadSeqWithRef(null);
     setRowScrollOffset(0);
-  }, [params.selectedInboxItem?.threadId]);
+  }, [
+    params.selectedInboxItem?.threadId,
+    setNextBeforeThreadSeqWithRef,
+    setThreadMessagesWithRef,
+  ]);
 
   useEffect(() => {
+    const rows = latestRowsRef.current;
     if (
-      params.connectionState.mode !== 'ready' ||
+      !readyConn ||
+      !readyAuth ||
+      !rowsReady ||
+      !rows ||
       params.routeType !== 'inboxes' ||
       !params.selectedInboxItem?.threadId ||
       params.inboxFocus === 'navigator'
     ) {
-      setThreadMessages([]);
+      setThreadMessagesWithRef([]);
       setThreadMessagesError(null);
+      setNextBeforeThreadSeqWithRef(null);
       setRowScrollOffset(0);
       return;
     }
 
     let cancelled = false;
+    const requestId = threadMessagesRequestRef.current + 1;
+    threadMessagesRequestRef.current = requestId;
+    setThreadMessagesLoading(true);
+    setOlderThreadMessagesLoading(false);
     void buildLiveThreadMessages({
-      conn: params.connectionState.conn,
-      rows: params.connectionState.rows,
-      auth: params.connectionState.auth,
+      conn: readyConn,
+      rows,
+      auth: readyAuth,
       normalizedEmail: params.normalizedEmail,
       activeInboxSlug: params.activeInboxSlug,
       threadId: params.selectedInboxItem.threadId,
     })
       .then(result => {
-        if (!cancelled) {
-          setThreadMessages(result);
+        if (!cancelled && threadMessagesRequestRef.current === requestId) {
+          const hadLoadedMessages = threadMessagesRef.current.length > 0;
+          const currentNextBeforeThreadSeq = nextBeforeThreadSeqRef.current;
+          setThreadMessagesWithRef(current =>
+            mergeLiveThreadMessages({
+              liveMessages: [...current, ...result.messages],
+              optimisticMessages: [],
+            })
+          );
+          setNextBeforeThreadSeqWithRef(
+            resolveThreadMessageRefreshCursor({
+              hadLoadedMessages,
+              currentNextBeforeThreadSeq,
+              refreshedNextBeforeThreadSeq: result.nextBeforeThreadSeq,
+            })
+          );
           setThreadMessagesError(null);
+          setThreadMessagesLoading(false);
         }
       })
       .catch(error => {
-        if (!cancelled) {
-          setThreadMessages([]);
+        if (!cancelled && threadMessagesRequestRef.current === requestId) {
+          setThreadMessagesWithRef([]);
+          setNextBeforeThreadSeqWithRef(null);
           setThreadMessagesError(toCliError(error).message);
+          setThreadMessagesLoading(false);
         }
       });
 
@@ -1469,12 +2138,88 @@ function useLiveThreadMessages(params: {
     };
   }, [
     params.activeInboxSlug,
-    params.connectionState,
     params.normalizedEmail,
-    params.refreshToken,
+    params.securityRefreshToken,
+    params.threadSignalKey,
     params.routeType,
     params.selectedInboxItem?.threadId,
     params.inboxFocus,
+    readyAuth,
+    readyConn,
+    rowsReady,
+    setNextBeforeThreadSeqWithRef,
+    setThreadMessagesWithRef,
+  ]);
+
+  const loadOlderMessages = useCallback(async () => {
+    const rows = latestRowsRef.current;
+    if (
+      !readyConn ||
+      !readyAuth ||
+      !rows ||
+      !params.selectedInboxItem?.threadId ||
+      nextBeforeThreadSeq === null ||
+      olderThreadMessagesLoading
+    ) {
+      return;
+    }
+
+    const requestId = threadMessagesRequestRef.current + 1;
+    threadMessagesRequestRef.current = requestId;
+    setOlderThreadMessagesLoading(true);
+    try {
+      const result = await buildLiveThreadMessages({
+        conn: readyConn,
+        rows,
+        auth: readyAuth,
+        normalizedEmail: params.normalizedEmail,
+        activeInboxSlug: params.activeInboxSlug,
+        threadId: params.selectedInboxItem.threadId,
+        beforeThreadSeq: nextBeforeThreadSeq,
+      });
+
+      if (threadMessagesRequestRef.current !== requestId) {
+        return;
+      }
+
+      const loadedRowCount = buildThreadMessageRenderRows({
+        messages: result.messages,
+        width: params.messageWidth,
+      }).length;
+      setThreadMessagesWithRef(current =>
+        mergeLiveThreadMessages({
+          liveMessages: [...current, ...result.messages],
+          optimisticMessages: [],
+        })
+      );
+      setNextBeforeThreadSeqWithRef(result.nextBeforeThreadSeq);
+      setThreadMessagesError(null);
+      if (loadedRowCount > 0) {
+        setRowScrollOffset(
+          current => current + Math.min(loadedRowCount, Math.max(1, params.messageMaxRows))
+        );
+      }
+    } catch (error) {
+      if (threadMessagesRequestRef.current === requestId) {
+        setThreadMessagesError(toCliError(error).message);
+      }
+    } finally {
+      if (threadMessagesRequestRef.current === requestId) {
+        setOlderThreadMessagesLoading(false);
+      }
+    }
+  }, [
+    nextBeforeThreadSeq,
+    olderThreadMessagesLoading,
+    params.activeInboxSlug,
+    params.messageMaxRows,
+    params.messageWidth,
+    params.normalizedEmail,
+    params.selectedInboxItem?.threadId,
+    readyAuth,
+    readyConn,
+    setNextBeforeThreadSeqWithRef,
+    setThreadMessagesWithRef,
   ]);
 
   const allMessages = useMemo(
@@ -1521,14 +2266,17 @@ function useLiveThreadMessages(params: {
       totalRows: allRows.length,
       rowWindowStart,
       rowWindowEnd,
-      canScrollOlder: rowWindowStart > 0,
+      canScrollOlder: rowWindowStart > 0 || nextBeforeThreadSeq !== null,
       canScrollNewer: rowWindowEnd < allRows.length,
     };
-  }, [allMessages, allRows, params.messageMaxRows, rowScrollOffset]);
+  }, [allMessages, allRows, nextBeforeThreadSeq, params.messageMaxRows, rowScrollOffset]);
 
   return {
     threadMessageRows: window.visibleRows,
     threadMessagesError,
+    threadMessagesLoading,
+    olderThreadMessagesLoading,
+    hasMoreOlderThreadMessages: nextBeforeThreadSeq !== null,
     firstThreadMessage: window.firstMessage,
     totalThreadMessages: window.totalMessages,
     threadWindowStart: window.windowStart,
@@ -1538,72 +2286,22 @@ function useLiveThreadMessages(params: {
     threadRowWindowEnd: window.rowWindowEnd,
     canScrollOlder: window.canScrollOlder,
     canScrollNewer: window.canScrollNewer,
-    scrollOlder: () =>
-      setRowScrollOffset(current =>
-        Math.min(current + 1, Math.max(allRows.length - params.messageMaxRows, 0))
-      ),
+    scrollOlder: () => {
+      const maxOffset = Math.max(allRows.length - params.messageMaxRows, 0);
+      if (rowScrollOffset < maxOffset) {
+        const nextOffset = Math.min(rowScrollOffset + 1, maxOffset);
+        setRowScrollOffset(nextOffset);
+        if (nextOffset >= maxOffset && nextBeforeThreadSeq !== null) {
+          void loadOlderMessages();
+        }
+        return;
+      }
+      void loadOlderMessages();
+    },
     scrollNewer: () =>
       setRowScrollOffset(current => Math.max(current - 1, 0)),
     resetThreadWindow: () => setRowScrollOffset(0),
   };
-}
-
-type RenderListRow = {
-  key: string;
-  text: string;
-  selected: boolean;
-};
-
-function buildWrappedListRows(params: {
-  items: string[];
-  selectedIndex: number;
-  width: number;
-}): RenderListRow[] {
-  return params.items.flatMap((item, itemIndex) => {
-    const selected = itemIndex === params.selectedIndex;
-    const firstPrefix = selected ? '▸ ' : '  ';
-    const continuationPrefix = '  ';
-    const rawLines = item.replace(/\r\n/g, '\n').split('\n');
-    const rows: RenderListRow[] = [];
-
-    rawLines.forEach((rawLine, rawLineIndex) => {
-      const prefix = rawLineIndex === 0 ? firstPrefix : continuationPrefix;
-      const bodyWidth = Math.max(1, params.width - textWidth(prefix));
-      const wrappedLines = wrapSingleLineToWidth(rawLine, bodyWidth);
-      wrappedLines.forEach((line, wrappedIndex) => {
-        const linePrefix = rawLineIndex === 0 && wrappedIndex === 0 ? firstPrefix : continuationPrefix;
-        rows.push({
-          key: `${itemIndex}:${rawLineIndex}:${wrappedIndex}:${line}`,
-          text: padText(`${linePrefix}${line}`, params.width),
-          selected,
-        });
-      });
-    });
-
-    return rows;
-  });
-}
-
-function sliceListRowsAroundSelection(params: {
-  rows: RenderListRow[];
-  maxRows?: number;
-}): RenderListRow[] {
-  if (!params.maxRows || params.maxRows <= 0 || params.rows.length <= params.maxRows) {
-    return params.rows;
-  }
-
-  const selectedRowIndexes = params.rows
-    .map((row, index) => (row.selected ? index : -1))
-    .filter(index => index >= 0);
-  const selectedStart = selectedRowIndexes[0] ?? 0;
-  const selectedEnd = selectedRowIndexes[selectedRowIndexes.length - 1] ?? selectedStart;
-  let start = Math.max(0, selectedEnd - params.maxRows + 1);
-  if (selectedStart < start) {
-    start = selectedStart;
-  }
-  start = Math.min(start, Math.max(0, params.rows.length - params.maxRows));
-
-  return params.rows.slice(start, start + params.maxRows);
 }
 
 function renderList(params: {
@@ -1623,44 +2321,45 @@ function renderList(params: {
   }
 
   const width = params.maxWidth ? Math.max(1, params.maxWidth) : undefined;
-  const rows = width
-      ? sliceListRowsAroundSelection({
-        rows: buildWrappedListRows({
-          items: params.items,
-          selectedIndex: params.selectedIndex,
-          width,
-        }),
-        maxRows: params.maxRows,
-      })
-    : [];
+  const selectedIndex = clampIndex(params.selectedIndex, params.items.length);
+  const maxRows = params.maxRows ? Math.max(1, params.maxRows) : undefined;
+  const startIndex = nextListWindowStart({
+    currentStart: 0,
+    itemCount: params.items.length,
+    maxItems: maxRows ?? params.items.length,
+    selectedIndex,
+  });
+  const visibleItems = params.items.slice(
+    startIndex,
+    maxRows ? startIndex + maxRows : undefined
+  );
 
   return (
     <Box flexDirection="column" width={params.maxWidth}>
-      {width
-        ? rows.map(row => (
+      {visibleItems.map((item, index) => {
+        const itemIndex = startIndex + index;
+        const selected = itemIndex === selectedIndex;
+        const row = `${selected ? '▸ ' : '  '}${item}`;
+        return width ? (
           <Text
-            key={row.key}
-            color={row.selected ? 'cyan' : params.color}
-            bold={row.selected}
+            key={`${itemIndex}:${item}`}
+            color={selected ? 'cyan' : params.color}
+            bold={selected}
             wrap="truncate"
           >
-            {row.text}
+            {truncateAndPadText(row, width)}
           </Text>
-        ))
-        : params.items.map((item, index) => {
-            const selected = index === params.selectedIndex;
-            const row = `${selected ? '▸ ' : '  '}${item}`;
-            return (
-              <Text
-                key={`${index}:${item}`}
-                color={selected ? 'cyan' : params.color}
-                bold={selected}
-                wrap="wrap"
-              >
-                {row}
-              </Text>
-            );
-          })}
+        ) : (
+          <Text
+            key={`${itemIndex}:${item}`}
+            color={selected ? 'cyan' : params.color}
+            bold={selected}
+            wrap="truncate"
+          >
+            {row}
+          </Text>
+        );
+      })}
     </Box>
   );
 }
@@ -1765,14 +2464,14 @@ function TabStrip<T extends string>({
   active,
   width,
 }: {
-  tabs: Array<{ key: T; label: string; count?: number }>;
+  tabs: Array<{ key: T; label: string; count?: number | string }>;
   active: T;
   width?: number;
 }) {
   const labels = tabs.map(tab => {
     const isActive = tab.key === active;
     return `${isActive ? '▸ ' : '  '}${tab.label}${
-      tab.count !== undefined ? ` ${tab.count.toString()}` : ''
+      tab.count !== undefined ? ` ${String(tab.count)}` : ''
     }`;
   });
   const naturalWidths = labels.map((label, index) => {
@@ -2216,6 +2915,7 @@ export function RootShell({
   const terminalSize = useTerminalSize();
   const contentListWidth = Math.max(1, terminalSize.columns - SIDEBAR_WIDTH - 3);
   const contentListMaxRows = Math.max(3, terminalSize.rows - 12);
+  const inboxListMaxRows = Math.max(1, terminalSize.rows - 17);
   const threadMessageMaxRows = Math.max(3, terminalSize.rows - 15);
   const { state: connectionState, reconnect } = useRootShellConnection(options.profile);
   const [route, setRoute] = useState<ShellRoute>(initialSnapshot?.route ?? { type: 'auth' });
@@ -2234,6 +2934,7 @@ export function RootShell({
   const [selectedChannelSlug, setSelectedChannelSlug] = useState<string | null>(
     initialSnapshot?.selectedChannelSlug ?? null
   );
+  const [exactActiveActorRow, setExactActiveActorRow] = useState<VisibleAgentRow | null>(null);
   const [channelMode, setChannelMode] = useState<ChannelMode>(
     initialSnapshot?.channelMode ?? 'overview'
   );
@@ -2283,7 +2984,6 @@ export function RootShell({
   });
   const [securityState, setSecurityState] = useState<ShellSecurityState>(DEFAULT_SECURITY_STATE);
   const [securityRefreshToken, setSecurityRefreshToken] = useState(0);
-  const [liveInboxRefreshToken, setLiveInboxRefreshToken] = useState(0);
   const [pendingBackupPrompt, setPendingBackupPrompt] = useState<string | null>(null);
   const [agentDiscovery, setAgentDiscovery] = useState<AgentDiscoveryState>(
     createInitialAgentDiscoveryState
@@ -2300,28 +3000,91 @@ export function RootShell({
   const [channelMembersState, setChannelMembersState] = useState<ChannelMembersPageState>(
     createInitialChannelMembersState
   );
+  const [threadListPageState, setThreadListPageState] = useState<ThreadListPageState>(() =>
+    createInitialThreadListPageState()
+  );
+  const [inboxSectionCountLabels, setInboxSectionCountLabels] = useState<InboxSectionCountLabels>(
+    createInitialInboxSectionCountLabels
+  );
   const agentDiscoveryRequestRef = useRef(0);
   const channelMessagesRequestRef = useRef(0);
   const channelMembersRequestRef = useRef(0);
+  const threadListPageRequestRef = useRef(0);
+  const threadListPageStateRef = useRef<ThreadListPageState>(threadListPageState);
+  const threadListPageLoadingRef = useRef(false);
+  const threadSignalSignatureRef = useRef<string | null>(null);
+  const pendingSelectNextInboxItemRef = useRef<PendingSelectNextInboxItem | null>(null);
   const activeTaskFieldKeyRef = useRef<string | null>(null);
   const initialSetupPublicDescriptionRef = useRef<string | null>(null);
+  const [inboxListScrollOffset, setInboxListScrollOffset] = useState(0);
 
   const normalizedEmail =
     connectionState.mode === 'ready'
       ? normalizeEmail(connectionState.auth.claims.email ?? '')
       : '';
 
-  const activeActorRow = useMemo(() => {
+  useEffect(() => {
     if (connectionState.mode !== 'ready' || !normalizedEmail) {
+      setExactActiveActorRow(null);
+      return;
+    }
+
+    const normalizedSlug = activeInboxSlug ? normalizeInboxSlug(activeInboxSlug) : undefined;
+    if (activeInboxSlug && !normalizedSlug) {
+      setExactActiveActorRow(null);
+      return;
+    }
+
+    let cancelled = false;
+    void readOwnedAgentRow(connectionState.conn, {
+      normalizedEmail,
+      actorSlug: normalizedSlug,
+    })
+      .then(actor => {
+        if (!cancelled) {
+          setExactActiveActorRow(actor);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setExactActiveActorRow(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeInboxSlug,
+    connectionState.mode,
+    connectionState.mode === 'ready' ? connectionState.conn : null,
+    normalizedEmail,
+  ]);
+
+  const exactConnectionRows = useMemo<ShellRows | null>(() => {
+    if (connectionState.mode !== 'ready') {
+      return null;
+    }
+    if (!exactActiveActorRow) {
+      return connectionState.rows;
+    }
+    return {
+      ...connectionState.rows,
+      actors: mergeRowsById(connectionState.rows.actors, [exactActiveActorRow]),
+    };
+  }, [connectionState, exactActiveActorRow]);
+
+  const activeActorRow = useMemo(() => {
+    if (connectionState.mode !== 'ready' || !normalizedEmail || !exactConnectionRows) {
       return null;
     }
 
     return findOwnedActor({
-      rows: connectionState.rows,
+      rows: exactConnectionRows,
       normalizedEmail,
       slug: activeInboxSlug,
     });
-  }, [activeInboxSlug, connectionState, normalizedEmail]);
+  }, [activeInboxSlug, connectionState.mode, exactConnectionRows, normalizedEmail]);
 
   useEffect(() => {
     if (connectionState.mode === 'signed_out') {
@@ -2329,6 +3092,9 @@ export function RootShell({
       setActiveInboxSlug(null);
       setSelectedAgentSlug(null);
       setSelectedInboxItemId(null);
+      setThreadListPageState(createInitialThreadListPageState());
+      setInboxSectionCountLabels(createInitialInboxSectionCountLabels());
+      pendingSelectNextInboxItemRef.current = null;
       setSelectedChannelSlug(null);
       setChannelMode('overview');
       setChannelTab('messages');
@@ -2374,6 +3140,64 @@ export function RootShell({
     setSidebarNavIndex(toSidebarSelectionIndex(route.type));
   }, [route.type, shellFocus]);
 
+  const currentThreadListScopeKey = useMemo(
+    () =>
+      threadListPageScopeKey({
+        actorId: activeActorRow?.id ?? null,
+        inboxSection,
+        threadFilter,
+      }),
+    [activeActorRow?.id, inboxSection, threadFilter]
+  );
+
+  useEffect(() => {
+    threadListPageRequestRef.current += 1;
+    threadListPageLoadingRef.current = false;
+    const nextPageState = createInitialThreadListPageState(currentThreadListScopeKey);
+    threadListPageStateRef.current = nextPageState;
+    setThreadListPageState(nextPageState);
+    pendingSelectNextInboxItemRef.current = null;
+    setSelectedInboxItemId(null);
+  }, [currentThreadListScopeKey]);
+
+  useEffect(() => {
+    if (threadListPageState.scopeKey === currentThreadListScopeKey) {
+      threadListPageStateRef.current = threadListPageState;
+    }
+  }, [currentThreadListScopeKey, threadListPageState]);
+
+  useEffect(() => {
+    setInboxSectionCountLabels(createInitialInboxSectionCountLabels());
+  }, [activeActorRow?.id, threadFilter]);
+
+  useEffect(() => {
+    if (connectionState.mode !== 'ready' || !activeActorRow) {
+      return;
+    }
+
+    void repairOwnSenderReadStatesOnce(connectionState.conn, {
+      profileName: connectionState.auth.profile.name,
+      actorId: activeActorRow.id,
+    }).catch(() => {
+      // Best-effort migration; future sends also advance sender read state.
+    });
+  }, [
+    activeActorRow?.id,
+    connectionState.mode,
+    connectionState.mode === 'ready' ? connectionState.auth.profile.name : null,
+    connectionState.mode === 'ready' ? connectionState.conn : null,
+  ]);
+
+  const shellRows = useMemo<ShellRows | null>(() => {
+    if (connectionState.mode !== 'ready' || !exactConnectionRows) {
+      return null;
+    }
+    if (threadListPageState.scopeKey !== currentThreadListScopeKey) {
+      return exactConnectionRows;
+    }
+    return mergeThreadPageRows(exactConnectionRows, threadListPageState);
+  }, [connectionState.mode, currentThreadListScopeKey, exactConnectionRows, threadListPageState]);
+
   useEffect(() => {
     if (connectionState.mode !== 'ready' || !activeActorRow) {
       setSecurityState(DEFAULT_SECURITY_STATE);
@@ -2413,12 +3237,12 @@ export function RootShell({
   ]);
 
   const model = useMemo<RootShellViewModel | null>(() => {
-    if (connectionState.mode !== 'ready' || !normalizedEmail) {
+    if (connectionState.mode !== 'ready' || !shellRows || !normalizedEmail) {
       return null;
     }
 
     return buildRootShellViewModel({
-      rows: connectionState.rows,
+      rows: shellRows,
       normalizedEmail,
       activeInboxSlug,
       securityState,
@@ -2431,6 +3255,7 @@ export function RootShell({
     normalizedEmail,
     pendingBackupPrompt,
     securityState,
+    shellRows,
   ]);
 
   useEffect(() => {
@@ -2561,13 +3386,91 @@ export function RootShell({
     model,
     inboxSection,
     threadFilter,
+    threadListPageState,
+    threadListScopeKey: currentThreadListScopeKey,
+    preservePagedSelection:
+      inboxSection !== 'pending' &&
+      currentThreadListScopeKey !== null &&
+      threadListPageState.scopeKey === currentThreadListScopeKey &&
+      (threadListPageState.loading || pendingSelectNextInboxItemRef.current !== null),
     selectedInboxItemId,
     setSelectedInboxItemId,
   });
 
+  const inboxListView = useMemo(() => {
+    const total = inboxSectionItems.length;
+    const maxRows = Math.max(1, inboxListMaxRows);
+    const maxStart = Math.max(0, total - maxRows);
+    const start = Math.min(Math.max(inboxListScrollOffset, 0), maxStart);
+    const end = Math.min(total, start + maxRows);
+    return {
+      start,
+      end,
+      visibleItems: inboxSectionItems.slice(start, end),
+    };
+  }, [inboxSectionItems, inboxListMaxRows, inboxListScrollOffset]);
+
+  useEffect(() => {
+    const maxOffset = Math.max(inboxSectionItems.length - inboxListMaxRows, 0);
+    setInboxListScrollOffset(current => Math.min(Math.max(current, 0), maxOffset));
+  }, [inboxSectionItems.length, inboxListMaxRows]);
+
+  useEffect(() => {
+    setInboxListScrollOffset(current => {
+      const maxRows = Math.max(1, inboxListMaxRows);
+      const total = inboxSectionItems.length;
+      const maxStart = Math.max(0, total - maxRows);
+      const clamped = Math.min(Math.max(current, 0), maxStart);
+      if (selectedInboxIndex < clamped) {
+        return selectedInboxIndex;
+      }
+      if (selectedInboxIndex >= clamped + maxRows) {
+        return Math.min(selectedInboxIndex - maxRows + 1, maxStart);
+      }
+      return clamped;
+    });
+  }, [selectedInboxIndex, inboxSectionItems.length, inboxListMaxRows]);
+
+  const selectedThreadSignalKey = useMemo(() => {
+    if (!shellRows || !selectedInboxItem?.threadId) {
+      return null;
+    }
+    const threadId = BigInt(selectedInboxItem.threadId);
+    const signal =
+      shellRows.threadSignals.find(row => row.id === threadId) ?? null;
+    return signal
+      ? [
+          signal.id.toString(),
+          signal.lastMessageSeq.toString(),
+          signal.updatedAt.microsSinceUnixEpoch.toString(),
+          signal.lastMessageAt.microsSinceUnixEpoch.toString(),
+        ].join(':')
+      : null;
+  }, [selectedInboxItem?.threadId, shellRows]);
+
+  const threadSignalSignature = useMemo(() => {
+    if (!shellRows) {
+      return '';
+    }
+    return shellRows.threadSignals
+      .map(thread =>
+        [
+          thread.id.toString(),
+          thread.lastMessageSeq.toString(),
+          thread.updatedAt.microsSinceUnixEpoch.toString(),
+          thread.lastMessageAt.microsSinceUnixEpoch.toString(),
+        ].join(':')
+      )
+      .sort()
+      .join('|');
+  }, [shellRows]);
+
   const {
     threadMessageRows,
     threadMessagesError,
+    threadMessagesLoading,
+    olderThreadMessagesLoading,
+    hasMoreOlderThreadMessages,
     firstThreadMessage,
     totalThreadMessages,
     threadWindowStart,
@@ -2582,6 +3485,7 @@ export function RootShell({
     resetThreadWindow,
   } = useLiveThreadMessages({
     connectionState,
+    rows: shellRows,
     normalizedEmail,
     activeInboxSlug: model?.activeInbox.slug ?? null,
     routeType: route.type,
@@ -2590,7 +3494,8 @@ export function RootShell({
       selectedInboxItem?.threadId
         ? optimisticThreadMessagesByThreadId[selectedInboxItem.threadId] ?? []
         : [],
-    refreshToken: `${liveInboxRefreshToken}:${securityRefreshToken}`,
+    threadSignalKey: selectedThreadSignalKey,
+    securityRefreshToken,
     inboxFocus,
     messageWidth: contentListWidth,
     messageMaxRows: threadMessageMaxRows,
@@ -2608,6 +3513,390 @@ export function RootShell({
       { key: 'members', label: 'Members', count: selectedThread?.participantCount ?? 0 },
     ];
   }, [selectedInboxItemKind, selectedRequest?.direction, selectedThread?.participantCount, totalThreadMessages]);
+
+  const loadNextThreadListPage = useCallback(async (params?: {
+    selectAfterItemId?: string | null;
+  }): Promise<ThreadListPageLoadResult> => {
+    const skippedResult: ThreadListPageLoadResult = {
+      nextItemId: null,
+      exhausted: false,
+      error: null,
+    };
+    if (
+      connectionState.mode !== 'ready' ||
+      !shellRows ||
+      !activeActorRow ||
+      !currentThreadListScopeKey ||
+      inboxSection === 'pending'
+    ) {
+      return skippedResult;
+    }
+
+    const latestPageState = threadListPageStateRef.current;
+    const currentPageState =
+      latestPageState.scopeKey === currentThreadListScopeKey
+        ? latestPageState
+        : createInitialThreadListPageState(currentThreadListScopeKey);
+    if (threadListPageLoadingRef.current || currentPageState.loading) {
+      return skippedResult;
+    }
+    if (currentPageState.exhausted) {
+      return {
+        ...skippedResult,
+        exhausted: true,
+      };
+    }
+    if (currentPageState.loaded && currentPageState.nextAfterSortKey === null) {
+      return {
+        ...skippedResult,
+        exhausted: true,
+      };
+    }
+
+    const requestId = threadListPageRequestRef.current + 1;
+    threadListPageRequestRef.current = requestId;
+    threadListPageLoadingRef.current = true;
+    const loadingPageState = {
+      ...currentPageState,
+      scopeKey: currentThreadListScopeKey,
+      loading: true,
+      error: null,
+    };
+    threadListPageStateRef.current = loadingPageState;
+    setThreadListPageState(loadingPageState);
+
+    let afterSortKey =
+      currentPageState.loaded
+        ? currentPageState.nextAfterSortKey ?? undefined
+        : undefined;
+    let nextAfterSortKey: string | null = null;
+    let exhausted = false;
+    let nextItemId: string | null = null;
+    const loadedActors: VisibleAgentRow[] = [];
+    const loadedParticipants: VisibleThreadParticipantRow[] = [];
+    const loadedReadStates: VisibleThreadReadStateRow[] = [];
+    const loadedThreads: VisibleThreadRow[] = [];
+
+    try {
+      await repairOwnSenderReadStatesOnce(connectionState.conn, {
+        profileName: connectionState.auth.profile.name,
+        actorId: activeActorRow.id,
+      });
+      const maxPageAttempts = threadFilter === 'all' ? 1 : 5;
+      for (let attempt = 0; attempt < maxPageAttempts; attempt += 1) {
+        const page = await connectionState.conn.procedures.listVisibleThreads({
+          agentDbId: activeActorRow.id,
+          afterSortKey,
+          filter: threadListProcedureFilter({
+            inboxSection,
+            threadFilter,
+          }),
+          query: undefined,
+          limit: THREAD_LIST_PAGE_SIZE,
+        });
+
+        loadedActors.push(...page.actors);
+        loadedParticipants.push(...page.participants);
+        loadedReadStates.push(...page.readStates);
+        loadedThreads.push(...page.threads);
+        const pageNextAfterSortKey = page.nextAfterSortKey ?? null;
+        nextAfterSortKey = pageNextAfterSortKey;
+        exhausted = pageNextAfterSortKey === null;
+        afterSortKey = pageNextAfterSortKey ?? undefined;
+
+        const candidateThreads = mergeThreadListRows(currentPageState.threads, loadedThreads);
+        const candidateReadStates = mergeRowsById(currentPageState.readStates, loadedReadStates);
+        nextItemId = findNextRenderedThreadItemId({
+          threads: candidateThreads,
+          readStates: candidateReadStates,
+          actorId: activeActorRow.id,
+          inboxSection,
+          threadFilter,
+          afterItemId: params?.selectAfterItemId ?? null,
+        });
+
+        if (nextItemId || exhausted) {
+          break;
+        }
+      }
+
+      if (threadListPageRequestRef.current !== requestId) {
+        return skippedResult;
+      }
+
+      const base =
+        threadListPageStateRef.current.scopeKey === currentThreadListScopeKey
+          ? threadListPageStateRef.current
+          : createInitialThreadListPageState(currentThreadListScopeKey);
+      const nextPageState = {
+        ...base,
+        scopeKey: currentThreadListScopeKey,
+        actors: mergeRowsById(base.actors, loadedActors),
+        participants: mergeRowsById(base.participants, loadedParticipants),
+        readStates: mergeRowsById(base.readStates, loadedReadStates),
+        threads: mergeThreadListRows(base.threads, loadedThreads),
+        nextAfterSortKey,
+        loading: false,
+        loaded: true,
+        exhausted,
+        error: null,
+      };
+      threadListPageStateRef.current = nextPageState;
+      setThreadListPageState(nextPageState);
+
+      return {
+        nextItemId,
+        exhausted,
+        error: null,
+      };
+    } catch (error) {
+      const message = toCliError(error).message;
+      if (threadListPageRequestRef.current === requestId) {
+        const base =
+          threadListPageStateRef.current.scopeKey === currentThreadListScopeKey
+            ? threadListPageStateRef.current
+            : createInitialThreadListPageState(currentThreadListScopeKey);
+        const nextPageState = {
+          ...base,
+          scopeKey: currentThreadListScopeKey,
+          loading: false,
+          error: message,
+        };
+        threadListPageStateRef.current = nextPageState;
+        setThreadListPageState(nextPageState);
+      }
+      return {
+        nextItemId: null,
+        exhausted: false,
+        error: message,
+      };
+    } finally {
+      if (threadListPageRequestRef.current === requestId) {
+        threadListPageLoadingRef.current = false;
+      }
+    }
+  }, [
+    activeActorRow,
+    connectionState,
+    currentThreadListScopeKey,
+    inboxSection,
+    shellRows,
+    threadFilter,
+    threadListPageState,
+  ]);
+
+  useEffect(() => {
+    const previousSignature = threadSignalSignatureRef.current;
+    threadSignalSignatureRef.current = threadSignalSignature;
+    if (!previousSignature || previousSignature === threadSignalSignature) {
+      return;
+    }
+    if (
+      connectionState.mode !== 'ready' ||
+      !activeActorRow ||
+      !currentThreadListScopeKey ||
+      inboxSection === 'pending' ||
+      threadListPageState.scopeKey !== currentThreadListScopeKey ||
+      !threadListPageState.loaded
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) {
+        return;
+      }
+      void repairOwnSenderReadStatesOnce(connectionState.conn, {
+          profileName: connectionState.auth.profile.name,
+          actorId: activeActorRow.id,
+        })
+        .catch(() => undefined)
+        .then(() =>
+          connectionState.conn.procedures.listVisibleThreads({
+            agentDbId: activeActorRow.id,
+            afterSortKey: undefined,
+            filter: threadListProcedureFilter({
+              inboxSection,
+              threadFilter,
+            }),
+            query: undefined,
+            limit: THREAD_LIST_PAGE_SIZE,
+          })
+        )
+        .then(page => {
+          if (cancelled) {
+            return;
+          }
+          setThreadListPageState(current => {
+            const base =
+              current.scopeKey === currentThreadListScopeKey
+                ? current
+                : createInitialThreadListPageState(currentThreadListScopeKey);
+            const refreshedCursor = resolveThreadListRefreshCursor({
+              current: base,
+              refreshedNextAfterSortKey: page.nextAfterSortKey ?? null,
+            });
+            const nextPageState = {
+              ...base,
+              scopeKey: currentThreadListScopeKey,
+              actors: mergeRowsById(base.actors, page.actors),
+              participants: mergeRowsById(base.participants, page.participants),
+              readStates: mergeRowsById(base.readStates, page.readStates),
+              threads: mergeThreadListRows(base.threads, page.threads),
+              nextAfterSortKey: refreshedCursor.nextAfterSortKey,
+              loaded: true,
+              exhausted: refreshedCursor.exhausted,
+              error: null,
+            };
+            threadListPageStateRef.current = nextPageState;
+            return nextPageState;
+          });
+        })
+        .catch(error => {
+          if (cancelled) {
+            return;
+          }
+          setThreadListPageState(current => {
+            if (current.scopeKey !== currentThreadListScopeKey) {
+              return current;
+            }
+            const nextPageState = {
+              ...current,
+              error: toCliError(error).message,
+            };
+            threadListPageStateRef.current = nextPageState;
+            return nextPageState;
+          });
+        });
+    }, 150);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    activeActorRow,
+    connectionState,
+    currentThreadListScopeKey,
+    inboxSection,
+    threadFilter,
+    threadListPageState.loaded,
+    threadListPageState.scopeKey,
+    threadSignalSignature,
+  ]);
+
+  useEffect(() => {
+    if (
+      !currentThreadListScopeKey ||
+      threadListPageState.scopeKey !== currentThreadListScopeKey ||
+      threadListPageState.loaded ||
+      threadListPageState.loading ||
+      threadListPageState.error
+    ) {
+      return;
+    }
+
+    void loadNextThreadListPage();
+  }, [
+    currentThreadListScopeKey,
+    loadNextThreadListPage,
+    threadListPageState.error,
+    threadListPageState.loaded,
+    threadListPageState.loading,
+    threadListPageState.scopeKey,
+  ]);
+
+  useEffect(() => {
+    const pending = pendingSelectNextInboxItemRef.current;
+    if (!pending) {
+      return;
+    }
+
+    const currentIndex = inboxSectionItems.findIndex(item => item.id === pending.fromId);
+    const nextIndex = currentIndex >= 0 ? currentIndex + 1 : pending.fromIndex + 1;
+    const nextItem = inboxSectionItems[nextIndex] ?? null;
+    if (nextItem) {
+      pendingSelectNextInboxItemRef.current = null;
+      setSelectedInboxItemId(nextItem.id);
+      return;
+    }
+
+    if (
+      !threadListPageState.loading &&
+      (threadListPageState.exhausted || threadListPageState.error)
+    ) {
+      pendingSelectNextInboxItemRef.current = null;
+    }
+  }, [
+    inboxSectionItems,
+    setSelectedInboxItemId,
+    threadListPageState.error,
+    threadListPageState.exhausted,
+    threadListPageState.loading,
+  ]);
+
+  useEffect(() => {
+    if (!model) {
+      return;
+    }
+
+    const pendingSection = model.inboxes.sections.find(section => section.key === 'pending');
+    const activeSection = model.inboxes.sections.find(section => section.key === inboxSection);
+    const currentSectionMayHaveMore = hasPossiblyMoreThreadListRows({
+      pageState: threadListPageState,
+      scopeKey: currentThreadListScopeKey,
+    });
+
+    setInboxSectionCountLabels(current => {
+      const next = { ...current };
+      if (pendingSection) {
+        next.pending = pendingSection.count.toString();
+      }
+      if (
+        activeSection &&
+        inboxSection !== 'pending' &&
+        threadListPageState.scopeKey === currentThreadListScopeKey &&
+        threadListPageState.loaded
+      ) {
+        next[inboxSection] = formatInboxSectionCountLabel({
+          count: activeSection.count,
+          section: inboxSection,
+          hasMore: currentSectionMayHaveMore,
+        });
+      }
+      return next;
+    });
+  }, [currentThreadListScopeKey, inboxSection, model, threadListPageState]);
+
+  const inboxSectionTabs = useMemo(() => {
+    const currentSectionMayHaveMore = hasPossiblyMoreThreadListRows({
+      pageState: threadListPageState,
+      scopeKey: currentThreadListScopeKey,
+    });
+    return model?.inboxes.sections.map(section => ({
+      key: section.key,
+      label: section.label,
+      count:
+        section.key === 'pending'
+          ? section.count
+          : section.key === inboxSection &&
+              threadListPageState.scopeKey === currentThreadListScopeKey &&
+              threadListPageState.loaded
+          ? formatInboxSectionCountLabel({
+              count: section.count,
+              section: section.key,
+              hasMore: currentSectionMayHaveMore,
+            })
+          : inboxSectionCountLabels[section.key] ?? section.count,
+    })) ?? [];
+  }, [
+    currentThreadListScopeKey,
+    inboxSection,
+    inboxSectionCountLabels,
+    model,
+    threadListPageState,
+  ]);
 
   useEffect(() => {
     setInboxDetailTab(selectedInboxItemKind === 'request' ? 'approval' : 'messages');
@@ -2929,28 +4218,6 @@ export function RootShell({
       clampIndex(current, agentDiscovery.results.length)
     );
   }, [agentDiscovery.results.length]);
-
-  useEffect(() => {
-    if (connectionState.mode !== 'ready') {
-      return;
-    }
-
-    const syncedMessageIds = new Set(connectionState.rows.messages.map(message => message.id.toString()));
-    setOptimisticThreadMessagesByThreadId(current => {
-      let changed = false;
-      const nextEntries = Object.entries(current)
-        .map(([threadId, messages]) => {
-          const remaining = messages.filter(message => !syncedMessageIds.has(message.id));
-          if (remaining.length !== messages.length) {
-            changed = true;
-          }
-          return remaining.length > 0 ? ([threadId, remaining] as const) : null;
-        })
-        .filter((entry): entry is readonly [string, LiveThreadMessage[]] => Boolean(entry));
-
-      return changed ? Object.fromEntries(nextEntries) : current;
-    });
-  }, [connectionState]);
 
   const snapshot = useMemo<RootShellSnapshot>(
     () => ({
@@ -3605,7 +4872,7 @@ export function RootShell({
       ],
       onSubmit: async values => {
         setTaskPanel(null);
-        if (!model) {
+        if (!model || connectionState.mode !== 'ready') {
           return;
         }
         const message = values.message;
@@ -3654,7 +4921,6 @@ export function RootShell({
               } else {
                 setInboxFocus('navigator');
               }
-              setLiveInboxRefreshToken(token => token + 1);
               setTask(current => ({
                 ...current,
                 notice: result.sent
@@ -3793,7 +5059,6 @@ export function RootShell({
               reporter,
             }),
           result => {
-            setLiveInboxRefreshToken(token => token + 1);
             setTask(current => ({
               ...current,
               notice: `Added ${result.participant} to thread.`,
@@ -3833,7 +5098,6 @@ export function RootShell({
               reporter,
             }),
           result => {
-            setLiveInboxRefreshToken(token => token + 1);
             setTask(current => ({
               ...current,
               notice: `Removed ${result.participant} from thread.`,
@@ -4039,7 +5303,6 @@ export function RootShell({
               reporter,
             }),
           () => {
-            setLiveInboxRefreshToken(token => token + 1);
             setTask(current => ({
               ...current,
               notice: `Updated settings for /${selectedChannel.slug}.`,
@@ -4423,7 +5686,6 @@ export function RootShell({
                 reporter,
               }),
             () => {
-              setLiveInboxRefreshToken(token => token + 1);
               setTask(current => ({
                 ...current,
                 notice: `Started thread with ${target.slug}.`,
@@ -5337,9 +6599,10 @@ export function RootShell({
           setInboxFocus('detail');
           return;
         }
-        if (!model) {
+        if (!model || connectionState.mode !== 'ready') {
           return;
         }
+        const readyConnectionState = connectionState;
         if (!currentDraft.trim()) {
           setTask(current => ({
             ...current,
@@ -5349,15 +6612,28 @@ export function RootShell({
         }
         await performTask(
           `Sending message to thread #${selectedThread.id}`,
-          reporter =>
-            sendMessageToThread({
+          reporter => {
+            const snapshotRows = shellRows ?? readyConnectionState.rows;
+            return sendMessageToThreadFromLiveSnapshot({
               profileName: options.profile,
               actorSlug: model.activeInbox.slug,
+              conn: readyConnectionState.conn,
+              snapshot: {
+                actors: snapshotRows.actors,
+                participants: snapshotRows.participants,
+                readStates: snapshotRows.readStates,
+                secretEnvelopes: snapshotRows.secretEnvelopes,
+                threads: snapshotRows.threads,
+                contactRequests: snapshotRows.contactRequests,
+                threadInvites: snapshotRows.threadInvites,
+                messages: [],
+              },
               message: currentDraft.trim(),
               threadId: selectedThread.id,
               headerLines: [],
               reporter,
-            }),
+            });
+          },
           result => {
             setThreadDrafts(current => ({
               ...current,
@@ -5380,7 +6656,6 @@ export function RootShell({
               ],
             }));
             resetThreadWindow();
-            setLiveInboxRefreshToken(token => token + 1);
             setTask(current => ({
               ...current,
               notice: 'Message sent.',
@@ -5674,7 +6949,6 @@ export function RootShell({
                 reporter,
               }),
             () => {
-              setLiveInboxRefreshToken(token => token + 1);
               setInboxFocus('navigator');
               setTask(current => ({
                 ...current,
@@ -5695,7 +6969,6 @@ export function RootShell({
                 reporter,
               }),
             () => {
-              setLiveInboxRefreshToken(token => token + 1);
               setInboxFocus('navigator');
               setTask(current => ({
                 ...current,
@@ -5755,7 +7028,6 @@ export function RootShell({
                 reporter,
               }),
             () => {
-              setLiveInboxRefreshToken(token => token + 1);
               setTask(current => ({
                 ...current,
                 notice: `Marked thread #${selectedThread.id} as read.`,
@@ -5795,14 +7067,39 @@ export function RootShell({
         return;
       }
       if (key.downArrow) {
-        const next = inboxSectionItems[clampIndex(selectedInboxIndex + 1, inboxSectionItems.length)];
+        const nextIndex = selectedInboxIndex + 1;
+        const next = inboxSectionItems[nextIndex];
         if (next) {
+          pendingSelectNextInboxItemRef.current = null;
           setSelectedInboxItemId(next.id);
+          if (nextIndex >= Math.max(0, inboxSectionItems.length - 2)) {
+            void loadNextThreadListPage({
+              selectAfterItemId: next.id,
+            });
+          }
+        } else if (selectedInboxItem) {
+          pendingSelectNextInboxItemRef.current = {
+            fromId: selectedInboxItem.id,
+            fromIndex: selectedInboxIndex,
+          };
+          void loadNextThreadListPage({
+            selectAfterItemId: selectedInboxItem.id,
+          });
+        } else {
+          pendingSelectNextInboxItemRef.current = {
+            fromId: '',
+            fromIndex: -1,
+          };
+          void loadNextThreadListPage({
+            selectAfterItemId: null,
+          });
         }
         return;
       }
       if (key.upArrow) {
-        const next = inboxSectionItems[clampIndex(selectedInboxIndex - 1, inboxSectionItems.length)];
+        pendingSelectNextInboxItemRef.current = null;
+        const nextIndex = Math.max(0, selectedInboxIndex - 1);
+        const next = inboxSectionItems[nextIndex];
         if (next) {
           setSelectedInboxItemId(next.id);
         }
@@ -5838,7 +7135,6 @@ export function RootShell({
               reporter,
             }),
           () => {
-            setLiveInboxRefreshToken(token => token + 1);
             setTask(current => ({
               ...current,
               notice: `Marked thread #${selectedThread.id} as read.`,
@@ -5859,7 +7155,6 @@ export function RootShell({
               reporter,
             }),
           result => {
-            setLiveInboxRefreshToken(token => token + 1);
             setTask(current => ({
               ...current,
               notice: result.archived ? 'Thread archived.' : 'Thread restored.',
@@ -6203,7 +7498,7 @@ export function RootShell({
       ? connectionState.connection
       : connectionState.connection === 'signed_out'
         ? 'signed_out'
-        : 'connecting';
+        : connectionState.connection;
   const connectionDotColor =
     connectionLabel === 'live'
       ? 'green'
@@ -6393,7 +7688,7 @@ export function RootShell({
     if (connectionState.mode === 'loading') {
       return {
         label: 'Connecting',
-        detail: connectionLabel,
+        detail: connectionLabel === 'reconnecting' ? connectionLabel : undefined,
         items: [
           { key: 'R', label: 'reconnect' },
           { key: 'Q', label: 'quit' },
@@ -6503,7 +7798,7 @@ export function RootShell({
               key: 'S',
               label: securityState.status === 'healthy' ? 'write message' : 'recover keys',
             },
-            ...(canScrollOlder || canScrollNewer
+            ...(canScrollOlder || canScrollNewer || hasMoreOlderThreadMessages
               ? [{ key: '↑/↓', label: 'page messages' }]
               : []),
             ...(selectedThread.unreadMessages > 0 ? [{ key: 'M', label: 'mark read' }] : []),
@@ -6832,11 +8127,7 @@ export function RootShell({
                 />
                 <Box marginTop={1}>
                   <TabStrip
-                    tabs={model.inboxes.sections.map(section => ({
-                      key: section.key,
-                      label: section.label,
-                      count: section.count,
-                    }))}
+                    tabs={inboxSectionTabs}
                     active={inboxSection}
                     width={contentListWidth}
                   />
@@ -6848,16 +8139,46 @@ export function RootShell({
                 <Text color="cyan" bold>
                   ◆ Threads overview
                 </Text>
-                {renderList({
-                  items: inboxSectionItems.map(item => `${item.label} · ${item.subtitle}`),
-                  selectedIndex: selectedInboxIndex,
-                  empty:
-                    inboxSection === 'pending'
-                      ? 'No pending requests for this agent.'
-                      : 'No threads match this section and filter.',
-                  maxWidth: contentListWidth,
-                  maxRows: contentListMaxRows,
-                })}
+                {inboxSectionItems.length === 0 ? (
+                  <Text color="gray" wrap="truncate">
+                    {truncateAndPadText(
+                      inboxSection === 'pending'
+                        ? 'No pending requests for this agent.'
+                        : 'No threads match this section and filter.',
+                      contentListWidth
+                    )}
+                  </Text>
+                ) : (
+                  <Box flexDirection="column" width={contentListWidth}>
+                    {inboxListView.visibleItems.map((item, index) => {
+                      const itemIndex = inboxListView.start + index;
+                      const selected = itemIndex === selectedInboxIndex;
+                      const isWaitingOnPeer =
+                        item.kind === 'request' && item.direction === 'outgoing';
+                      const row = `${selected ? '▸ ' : '  '}${item.label} · ${item.subtitle}`;
+                      return (
+                        <Text
+                          key={item.id}
+                          color={
+                            selected ? 'cyan' : isWaitingOnPeer ? 'gray' : undefined
+                          }
+                          bold={selected}
+                          wrap="truncate"
+                        >
+                          {truncateAndPadText(row, contentListWidth)}
+                        </Text>
+                      );
+                    })}
+                  </Box>
+                )}
+                {threadListPageState.scopeKey === currentThreadListScopeKey &&
+                threadListPageState.loading ? (
+                  <Text color="gray">Loading new threads...</Text>
+                ) : null}
+                {threadListPageState.scopeKey === currentThreadListScopeKey &&
+                threadListPageState.error ? (
+                  <Text color="red">✗ {threadListPageState.error}</Text>
+                ) : null}
               </Box>
             ) : null}
             <Box marginTop={1} flexDirection="column">
@@ -6960,6 +8281,12 @@ export function RootShell({
                           color="gray"
                         />
                         {threadMessagesError ? <Text color="red">✗ {threadMessagesError}</Text> : null}
+                        {threadMessagesLoading ? (
+                          <Text color="gray">Loading messages...</Text>
+                        ) : null}
+                        {olderThreadMessagesLoading ? (
+                          <Text color="gray">Loading older messages...</Text>
+                        ) : null}
                         {threadMessageRows.length > 0 ? (
                           threadMessageRows.map(row => (
                             <Text
@@ -6971,7 +8298,7 @@ export function RootShell({
                               {row.text}
                             </Text>
                           ))
-                        ) : (
+                        ) : threadMessagesLoading ? null : (
                           <Text color="gray">No visible messages yet.</Text>
                         )}
                         <Box marginTop={1} flexDirection="column">

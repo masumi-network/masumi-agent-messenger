@@ -18,7 +18,9 @@ import type {
   VisibleThreadReadStateRow,
   VisibleThreadRow,
   VisibleThreadInviteRow,
-  VisibleMessageSnapshot,
+  VisibleContactRequestRow,
+  VisibleMessageRow,
+  VisibleThreadSecretEnvelopeRow,
   VisibleThreadPage,
 } from '../../../webapp/src/module_bindings/types';
 import { ensureAuthenticatedSession } from './auth';
@@ -35,11 +37,22 @@ import { resolvePublishedActorLookup } from './published-actor-lookup';
 import {
   connectAuthenticated,
   disconnectConnection,
-  readLatestMessageRows,
+  readLatestMetadataRows,
+  repairOwnSenderReadStatesOnce,
 } from './spacetimedb';
+import { mergeRowsById } from './row-utils';
 import type { EncryptedMessageHeader } from '../../../shared/message-format';
 
-type MessageSnapshot = VisibleMessageSnapshot;
+type MessageSnapshot = {
+  actors: VisibleAgentRow[];
+  participants: VisibleThreadParticipantRow[];
+  readStates: VisibleThreadReadStateRow[];
+  secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
+  threads: VisibleThreadRow[];
+  contactRequests: VisibleContactRequestRow[];
+  threadInvites: VisibleThreadInviteRow[];
+  messages: VisibleMessageRow[];
+};
 type ThreadListFilter = 'active' | 'latest' | 'archived' | 'all';
 
 export type ActorLookupMetadata = {
@@ -187,16 +200,6 @@ function compareBigInt(left: bigint, right: bigint): number {
   if (left < right) return -1;
   if (left > right) return 1;
   return 0;
-}
-
-function mergeRowsById<Row extends { id: bigint }>(...rowGroups: Row[][]): Row[] {
-  const byId = new Map<bigint, Row>();
-  for (const rows of rowGroups) {
-    for (const row of rows) {
-      byId.set(row.id, row);
-    }
-  }
-  return Array.from(byId.values());
 }
 
 function normalizePage(value: number | undefined): number {
@@ -626,11 +629,18 @@ export async function listThreads(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const snapshot = await readLatestMessageRows(conn);
+    const snapshot = await readLatestMetadataRows(conn, {
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
     const actor = resolveOwnedActor({
       snapshot,
       normalizedEmail,
       actorSlug: params.actorSlug,
+    });
+    await repairOwnSenderReadStatesOnce(conn, {
+      profileName: profile.name,
+      actorId: actor.id,
     });
     const page = normalizePage(params.page);
     const pageSize = normalizePageSize(params.pageSize);
@@ -738,14 +748,29 @@ export async function countThreadMessages(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread message state');
-    const snapshot = await readLatestMessageRows(conn);
-      const { actor, page } = await readVisibleThreadPageForActor({
+    const snapshot = await readLatestMetadataRows(conn, {
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
+      const { actor, page: initialPage } = await readVisibleThreadPageForActor({
         conn,
         snapshot,
         normalizedEmail,
         actorSlug: params.actorSlug,
         threadId: requestedThreadId,
       });
+      await repairOwnSenderReadStatesOnce(conn, {
+        profileName: profile.name,
+        actorId: actor.id,
+      });
+      const page = await conn.procedures.readVisibleThread({
+        agentDbId: actor.id,
+        threadId: requestedThreadId,
+      }).then(refreshedPage =>
+        refreshedPage.threads.some(row => row.id === requestedThreadId)
+          ? refreshedPage
+          : initialPage
+      );
       const thread = requireThread(
         { ...snapshot, threads: page.threads },
         requestedThreadId
@@ -844,14 +869,29 @@ export async function readThreadHistory(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread history');
-    const snapshot = await readLatestMessageRows(conn);
-      const { actor, page } = await readVisibleThreadPageForActor({
+    const snapshot = await readLatestMetadataRows(conn, {
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
+      const { actor, page: initialPage } = await readVisibleThreadPageForActor({
         conn,
         snapshot,
         normalizedEmail,
         actorSlug: params.actorSlug,
         threadId: requestedThreadId,
       });
+      await repairOwnSenderReadStatesOnce(conn, {
+        profileName: profile.name,
+        actorId: actor.id,
+      });
+      const page = await conn.procedures.readVisibleThread({
+        agentDbId: actor.id,
+        threadId: requestedThreadId,
+      }).then(refreshedPage =>
+        refreshedPage.threads.some(row => row.id === requestedThreadId)
+          ? refreshedPage
+          : initialPage
+      );
       const thread = requireThread(
         { ...snapshot, threads: page.threads },
         requestedThreadId
@@ -1056,7 +1096,11 @@ export async function createDirectThread(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const read = () => readLatestMessageRows(conn);
+    const read = () =>
+      readLatestMetadataRows(conn, {
+        normalizedEmail,
+        actorSlug: params.actorSlug,
+      });
     const snapshot = await read();
     const actor = resolveOwnedActor({
       snapshot,
@@ -1188,7 +1232,11 @@ export async function createGroupThread(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const read = () => readLatestMessageRows(conn);
+    const read = () =>
+      readLatestMetadataRows(conn, {
+        normalizedEmail,
+        actorSlug: params.actorSlug,
+      });
     const snapshot = await read();
     const actor = resolveOwnedActor({
       snapshot,
@@ -1299,7 +1347,11 @@ export async function addThreadParticipant(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const read = () => readLatestMessageRows(conn);
+    const read = () =>
+      readLatestMetadataRows(conn, {
+        normalizedEmail,
+        actorSlug: params.actorSlug,
+      });
     const snapshot = await read();
     const actor = resolveOwnedActor({
       snapshot,
@@ -1404,7 +1456,10 @@ export async function removeThreadParticipant(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const snapshot = await readLatestMessageRows(conn);
+    const snapshot = await readLatestMetadataRows(conn, {
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
     const actor = resolveOwnedActor({
       snapshot,
       normalizedEmail,
@@ -1435,7 +1490,10 @@ export async function removeThreadParticipant(params: {
       participantAgentDbId: targetActor.id,
     });
 
-    const nextSnapshot = await readLatestMessageRows(conn);
+    const nextSnapshot = await readLatestMetadataRows(conn, {
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
     const thread = requireThread(nextSnapshot, requestedThreadId);
     const membership = summarizeThreadMembership(nextSnapshot, requestedThreadId);
     return {
@@ -1488,7 +1546,10 @@ export async function markThreadRead(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const snapshot = await readLatestMessageRows(conn);
+    const snapshot = await readLatestMetadataRows(conn, {
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
     const actor = resolveOwnedActor({
       snapshot,
       normalizedEmail,
@@ -1552,7 +1613,10 @@ export async function setThreadArchived(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const snapshot = await readLatestMessageRows(conn);
+    const snapshot = await readLatestMetadataRows(conn, {
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
     const actor = resolveOwnedActor({
       snapshot,
       normalizedEmail,
@@ -1614,7 +1678,10 @@ export async function deleteThread(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const snapshot = await readLatestMessageRows(conn);
+    const snapshot = await readLatestMetadataRows(conn, {
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
     const actor = resolveOwnedActor({
       snapshot,
       normalizedEmail,

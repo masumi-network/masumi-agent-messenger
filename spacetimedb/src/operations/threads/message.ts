@@ -14,13 +14,10 @@ import * as model from '../../model';
 const {
   MAX_THREAD_FANOUT,
   MAX_THREAD_MESSAGE_PAGE_SIZE,
-  MAX_VISIBLE_MESSAGES_PER_THREAD,
   CONTACT_REQUEST_RATE_WINDOW_MS,
   CONTACT_REQUEST_RATE_MAX_PER_WINDOW,
   SecretEnvelopeAttachment,
-  VisibleMessageSnapshot,
   VisibleThreadMessagePage,
-  VisibleMessageRow,
   dedupeRowsById,
   enforceRateLimit,
   requireNonEmpty,
@@ -29,33 +26,24 @@ const {
   normalizeContactRequestStatus,
   requireMaxArrayLength,
   buildMessageThreadSeqKey,
-  buildSenderSecretVisibilityKey,
-  getOwnActorIdsForInbox,
+  buildThreadReadStateKey,
   getRequiredInboxById,
   getRequiredActorByDbId,
   getRequiredActorByPublicIdentity,
-  getReadableInbox,
   getOwnedActor,
   getOwnedActorForRead,
   getContactRequestByThreadId,
   findPendingContactRequestForActors,
   isDirectContactAllowed,
-  getLatestVisibleThreadsForInbox,
-  ensureInboxThreadProjectionsForInbox,
-  getLatestThreadMessages,
   getThreadMessagesInSeqRange,
   getActiveThreadParticipants,
-  getVisibleContactRequestsForInbox,
-  toSanitizedVisibleAgentRow,
-  toVisibleContactRequestRow,
-  toVisibleThreadInviteRow,
   createDirectThreadRecord,
   requireVisibleThreadParticipant,
   requireActiveThreadParticipant,
+  getThreadReadStateForActor,
   getSenderLastSentState,
   senderHasMessageWithSecretVersion,
   canAgentReadMessage,
-  canAnyAgentReadMessage,
   requireExactEnvelopeCoverageForVersion,
   validateAttachedSecretEnvelopes,
   insertAttachedSecretEnvelopes,
@@ -196,169 +184,6 @@ function collectThreadPageSecretEnvelopes(params: {
     )
   );
 }
-
-export const visibleMessages = spacetimedb.view(
-  { public: true },
-  t.array(VisibleMessageRow),
-  ctx => {
-    const inbox = getReadableInbox(ctx);
-    if (!inbox) {
-      return [];
-    }
-
-    const ownActorIds = getOwnActorIdsForInbox(ctx, inbox.id);
-    return getLatestVisibleThreadsForInbox(ctx, inbox.id).flatMap(thread =>
-      getLatestThreadMessages(ctx, thread, MAX_VISIBLE_MESSAGES_PER_THREAD).filter(message =>
-        canAnyAgentReadMessage(ctx, ownActorIds, message)
-      ).map(toVisibleMessageRow)
-    );
-  }
-);
-
-function emptyVisibleMessageSnapshot() {
-  return {
-    actors: [],
-    participants: [],
-    readStates: [],
-    secretEnvelopes: [],
-    threads: [],
-    contactRequests: [],
-    threadInvites: [],
-    messages: [],
-  };
-}
-
-export const readVisibleMessageSnapshot = spacetimedb.procedure(
-  {},
-  VisibleMessageSnapshot,
-  ctx => {
-    return ctx.withTx(tx => {
-      const inbox = getReadableInbox(tx);
-      if (!inbox) {
-        return emptyVisibleMessageSnapshot();
-      }
-
-      ensureInboxThreadProjectionsForInbox(tx, inbox.id);
-      const ownActorIds = getOwnActorIdsForInbox(tx, inbox.id);
-      const latestThreads = getLatestVisibleThreadsForInbox(tx, inbox.id);
-      const visibleThreadIds = new Set(latestThreads.map(thread => thread.id));
-      const visibleAgentIds = new Set<bigint>(ownActorIds);
-
-      const participantRows = Array.from(visibleThreadIds).flatMap(threadId =>
-        Array.from(tx.db.threadParticipant.thread_participant_thread_id.filter(threadId))
-      );
-      for (const participant of participantRows) {
-        visibleAgentIds.add(participant.agentDbId);
-      }
-
-      const actors = Array.from(visibleAgentIds)
-        .map(agentDbId => tx.db.agent.id.find(agentDbId))
-        .filter((actor): actor is NonNullable<typeof actor> => Boolean(actor))
-        .map(actor => toSanitizedVisibleAgentRow(tx, inbox.id, actor));
-
-      const participants = participantRows.map(participant => ({
-        id: participant.id,
-        threadId: participant.threadId,
-        agentDbId: participant.agentDbId,
-        joinedAt: participant.joinedAt,
-        lastSentSeq: participant.lastSentSeq,
-        lastSentMembershipVersion: participant.lastSentMembershipVersion,
-        lastSentSecretVersion: participant.lastSentSecretVersion,
-        isAdmin: participant.isAdmin,
-        active: participant.active,
-      }));
-
-      const readStates = Array.from(ownActorIds).flatMap(agentDbId =>
-        Array.from(tx.db.threadReadState.thread_read_state_agent_db_id.filter(agentDbId))
-          .filter(readState => visibleThreadIds.has(readState.threadId))
-          .map(readState => ({
-            id: readState.id,
-            threadId: readState.threadId,
-            agentDbId: readState.agentDbId,
-            lastReadThreadSeq: readState.lastReadThreadSeq,
-            archived: readState.archived,
-            updatedAt: readState.updatedAt,
-          }))
-      );
-
-      const latestMessages = latestThreads.flatMap(thread => {
-        return getLatestThreadMessages(tx, thread).filter(message =>
-          canAnyAgentReadMessage(tx, ownActorIds, message)
-        );
-      });
-      const messageSecretKeys = new Map(
-        latestMessages.map(message => [
-          `${message.threadId.toString()}:${buildSenderSecretVisibilityKey(
-            message.membershipVersion,
-            message.senderAgentDbId,
-            message.secretVersion
-          )}`,
-          message,
-        ])
-      );
-      const secretEnvelopes = dedupeRowsById(
-        Array.from(messageSecretKeys.values()).flatMap(message =>
-          Array.from(
-            tx.db.threadSecretEnvelope.thread_secret_envelope_thread_id_membership_version_sender_agent_db_id_secret_version.filter([
-              message.threadId,
-              message.membershipVersion,
-              message.senderAgentDbId,
-              message.secretVersion,
-            ])
-          ).filter(
-            envelope =>
-              ownActorIds.has(envelope.senderAgentDbId) ||
-              ownActorIds.has(envelope.recipientAgentDbId)
-          )
-        )
-      ).map(envelope => ({
-        id: envelope.id,
-        threadId: envelope.threadId,
-        membershipVersion: envelope.membershipVersion,
-        secretVersion: envelope.secretVersion,
-        senderAgentDbId: envelope.senderAgentDbId,
-        recipientAgentDbId: envelope.recipientAgentDbId,
-        senderEncryptionKeyVersion: envelope.senderEncryptionKeyVersion,
-        recipientEncryptionKeyVersion: envelope.recipientEncryptionKeyVersion,
-        signingKeyVersion: envelope.signingKeyVersion,
-        wrappedSecretCiphertext: envelope.wrappedSecretCiphertext,
-        wrappedSecretIv: envelope.wrappedSecretIv,
-        wrapAlgorithm: envelope.wrapAlgorithm,
-        signature: envelope.signature,
-        createdAt: envelope.createdAt,
-      }));
-
-      const threads = latestThreads;
-
-      const contactRequests = getVisibleContactRequestsForInbox(tx, inbox.id).map(request =>
-        toVisibleContactRequestRow(tx, inbox.id, request)
-      );
-
-      const incomingInvites = Array.from(
-        tx.db.threadInvite.thread_invite_invitee_inbox_id.filter(inbox.id)
-      );
-      const outgoingInvites = Array.from(ownActorIds).flatMap(agentDbId =>
-        Array.from(tx.db.threadInvite.thread_invite_inviter_agent_db_id.filter(agentDbId))
-      );
-      const threadInvites = dedupeRowsById([...incomingInvites, ...outgoingInvites]).map(
-        invite => toVisibleThreadInviteRow(tx, invite)
-      );
-
-      const messages = latestMessages.map(toVisibleMessageRow);
-
-      return {
-        actors,
-        participants,
-        readStates,
-        secretEnvelopes,
-        threads,
-        contactRequests,
-        threadInvites,
-        messages,
-      };
-    });
-  }
-);
 
 export const listThreadMessages = spacetimedb.procedure(
   {
@@ -710,6 +535,30 @@ function insertEncryptedMessageIntoThread(
     lastSentMembershipVersion: thread.membershipVersion,
     lastSentSecretVersion: normalizedSecretVersion,
   });
+
+  // Sending from a thread counts as viewing it from that sender's inbox.
+  // This keeps headless clients from showing their own outgoing message as unread.
+  const existingReadState = getThreadReadStateForActor(ctx, params.threadId, params.senderActor.id);
+  if (!existingReadState) {
+    ctx.db.threadReadState.insert({
+      id: 0n,
+      threadId: params.threadId,
+      agentDbId: params.senderActor.id,
+      uniqueKey: buildThreadReadStateKey(params.threadId, params.senderActor.id),
+      lastReadThreadSeq: threadSeq,
+      archived: false,
+      updatedAt: ctx.timestamp,
+    });
+  } else if (
+    existingReadState.lastReadThreadSeq === undefined ||
+    existingReadState.lastReadThreadSeq < threadSeq
+  ) {
+    ctx.db.threadReadState.id.update({
+      ...existingReadState,
+      lastReadThreadSeq: threadSeq,
+      updatedAt: ctx.timestamp,
+    });
+  }
 
   if (contactRequest?.status.tag === 'pending' && !contactRequestAllowed) {
     ctx.db.contactRequest.id.update({

@@ -2,9 +2,9 @@ import { webcrypto } from 'node:crypto';
 import { DbConnection, tables } from '../webapp/src/module_bindings/index.ts';
 import type {
   Agent,
-  Message,
   Thread,
   ThreadSecretEnvelope,
+  VisibleMessageRow,
 } from '../webapp/src/module_bindings/types';
 import {
   decryptMessage,
@@ -58,17 +58,20 @@ const VISIBLE_QUERIES = [
   tables.visibleThreadParticipants,
   tables.visibleThreadReadStates,
   tables.visibleThreadSecretEnvelopes,
-  tables.visibleMessages,
 ] as const;
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function waitFor(check: () => boolean, label: string, timeoutMs = 15_000): Promise<void> {
+async function waitFor(
+  check: () => boolean | Promise<boolean>,
+  label: string,
+  timeoutMs = 15_000
+): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (check()) return;
+    if (await check()) return;
     await sleep(100);
   }
   throw new Error(`Timed out waiting for ${label}`);
@@ -191,10 +194,14 @@ function listThreads(conn: DbConnection): Thread[] {
   return Array.from(conn.db.visibleThreads.iter()) as Thread[];
 }
 
-function listMessagesForThread(conn: DbConnection, threadId: bigint): Message[] {
-  return (Array.from(conn.db.visibleMessages.iter()) as Message[])
-    .filter(row => row.threadId === threadId)
-    .sort((left, right) => Number(left.threadSeq - right.threadSeq));
+async function listMessagesForThread(client: ProvisionedClient, threadId: bigint): Promise<VisibleMessageRow[]> {
+  const page = await client.conn.procedures.listThreadMessages({
+    agentDbId: client.actor.id,
+    threadId,
+    beforeThreadSeq: undefined,
+    limit: 100n,
+  });
+  return page.messages.sort((left, right) => Number(left.threadSeq - right.threadSeq));
 }
 
 function toActorPublicKeys(actor: Agent): ActorPublicKeys {
@@ -242,7 +249,7 @@ async function findVersionedKey(
 
 async function decryptInbound(params: {
   recipient: ProvisionedClient;
-  message: Message;
+  message: VisibleMessageRow;
 }): Promise<string> {
   const sender = listAgents(params.recipient.conn).find(
     row => row.id === params.message.senderAgentDbId
@@ -420,10 +427,10 @@ async function main(): Promise<void> {
   });
 
   await waitFor(
-    () => listMessagesForThread(bob.conn, thread.id).length === 1,
+    async () => (await listMessagesForThread(bob, thread.id)).length === 1,
     'first inbound message'
   );
-  const firstInbound = listMessagesForThread(bob.conn, thread.id)[0]!;
+  const firstInbound = (await listMessagesForThread(bob, thread.id))[0]!;
   const bobFirstText = await decryptInbound({ recipient: bob, message: firstInbound });
   if (bobFirstText !== 'hello bob') {
     throw new Error(`Unexpected Bob plaintext: ${bobFirstText}`);
@@ -440,15 +447,15 @@ async function main(): Promise<void> {
   });
 
   await waitFor(
-    () => listMessagesForThread(bob.conn, thread.id).length === 2,
+    async () => (await listMessagesForThread(bob, thread.id)).length === 2,
     'second inbound message'
   );
-  const secondInbound = listMessagesForThread(bob.conn, thread.id)[1]!;
+  const secondInbound = (await listMessagesForThread(bob, thread.id))[1]!;
   if (secondInbound.secretVersion !== firstSecret.secretVersion) {
     throw new Error('Second message unexpectedly rotated the sender secret');
   }
 
-  const secondInboundOnAlice = listMessagesForThread(alice.conn, thread.id)[1];
+  const secondInboundOnAlice = (await listMessagesForThread(alice, thread.id))[1];
   await sendMessage({
     sender: bob,
     thread,
@@ -461,10 +468,11 @@ async function main(): Promise<void> {
   });
 
   await waitFor(
-    () => listMessagesForThread(alice.conn, thread.id).length === 3,
+    async () => (await listMessagesForThread(alice, thread.id)).length === 3,
     'bob reply visible to alice'
   );
-  const replyInbound = listMessagesForThread(alice.conn, thread.id)[2]!;
+  const aliceMessages = await listMessagesForThread(alice, thread.id);
+  const replyInbound = aliceMessages[2]!;
   const aliceReplyText = await decryptInbound({ recipient: alice, message: replyInbound });
   if (aliceReplyText !== 'hi alice') {
     throw new Error(`Unexpected Alice plaintext: ${aliceReplyText}`);
@@ -497,7 +505,7 @@ async function main(): Promise<void> {
         aliceIdentity: alice.identityHex,
         bobIdentity: bob.identityHex,
         threadId: thread.id.toString(),
-        messageCount: listMessagesForThread(alice.conn, thread.id).length,
+        messageCount: aliceMessages.length,
         bobFirstDecrypted: bobFirstText,
         aliceReplyDecrypted: aliceReplyText,
       },

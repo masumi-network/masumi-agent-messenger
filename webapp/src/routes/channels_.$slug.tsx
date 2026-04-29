@@ -57,6 +57,10 @@ import {
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { formatDayLabel } from '@/lib/format-relative-time';
 import { computeDayBoundaries, computeGroupedFlags } from '@/lib/group-messages';
+import {
+  usePublicChannelLookup,
+  usePublicChannelMessagesLookup,
+} from '@/lib/public-channel';
 import { buildRouteHead } from '@/lib/seo';
 import { useLiveTable, usePublicLiveTable } from '@/lib/spacetime-live-table';
 import { formatTimestamp } from '@/lib/thread-format';
@@ -93,6 +97,9 @@ import {
 
 const MAX_CHANNEL_MESSAGE_CHARS = 10_000;
 const SCROLL_LOAD_THRESHOLD_PX = 80;
+const PUBLIC_CHANNEL_RECENT_PAGE_SIZE = 25n;
+const CHANNEL_HISTORY_PAGE_SIZE = 10n;
+const CHANNEL_MEMBER_PAGE_SIZE = 10n;
 
 export const Route = createFileRoute('/channels_/$slug')({
   head: ({ params }) =>
@@ -352,18 +359,9 @@ function AuthenticatedChannelPage({ slug }: { slug: string }) {
 }
 
 function PublicChannelPageContent({ slug }: { slug: string }) {
-  const publicChannelQuery = useMemo(
-    () => tables.publicChannels.where(row => row.slug.eq(slug)),
-    [slug]
-  );
-  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannelMirrorRow>(
-    publicChannelQuery,
-    'publicChannels'
-  );
-  const publicChannel = useMemo(
-    () => channels.find(row => row.slug === slug) ?? null,
-    [channels, slug]
-  );
+  const [publicChannel, channelsReady, channelsError] = usePublicChannelLookup({
+    channelSlug: slug,
+  });
   const channel = useMemo<ChannelPageDetails | null>(
     () => (publicChannel ? toPublicChannelDetails(publicChannel) : null),
     [publicChannel]
@@ -373,14 +371,23 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
     () => tables.publicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
-  const [messages, messagesReady, messagesError] = usePublicLiveTable<PublicRecentChannelMessage>(
+  const [liveMessages, liveMessagesReady] = usePublicLiveTable<PublicRecentChannelMessage>(
     messageQuery,
     'publicRecentChannelMessages',
     { enabled: channel !== null }
   );
+  const [messages, messagesReady, messagesError, reloadMessages] = usePublicChannelMessagesLookup({
+    channelId,
+    enabled: channel !== null,
+    limit: PUBLIC_CHANNEL_RECENT_PAGE_SIZE,
+  });
   const [decryptedByKey, setDecryptedByKey] = useState<Record<string, DecryptedChannelMessage>>({});
   const connectionState = useSpacetimeDB();
   const connection = connectionState.getConnection?.() as DbConnection | null;
+  const liveMessagesRefreshKey = useMemo(
+    () => liveMessages.map(message => `${message.id.toString()}:${message.channelSeq.toString()}`).join('|'),
+    [liveMessages]
+  );
 
   const sortedMessages = useMemo(
     () =>
@@ -399,6 +406,12 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
       setDecryptedByKey({});
     });
   }, [channelId]);
+
+  useEffect(() => {
+    if (channel && liveMessagesReady) {
+      reloadMessages();
+    }
+  }, [channel, liveMessagesReady, liveMessagesRefreshKey, reloadMessages]);
 
   useEffect(() => {
     let cancelled = false;
@@ -673,14 +686,9 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const requestChannelJoinReducer = useReducer(reducers.requestChannelJoin);
   const setChannelMemberPermissionReducer = useReducer(reducers.setChannelMemberPermission);
   const updateChannelSettingsReducer = useReducer(reducers.updateChannelSettings);
-  const publicChannelQuery = useMemo(
-    () => tables.publicChannels.where(row => row.slug.eq(slug)),
-    [slug]
-  );
-  const [channels, channelsReady, channelsError] = usePublicLiveTable<PublicChannelMirrorRow>(
-    publicChannelQuery,
-    'publicChannels'
-  );
+  const [publicChannel, channelsReady, channelsError] = usePublicChannelLookup({
+    channelSlug: slug,
+  });
   const visibleChannelQuery = useMemo(
     () => tables.visibleChannels.where(row => row.slug.eq(slug)),
     [slug]
@@ -692,10 +700,6 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const [actors, actorsReady, actorsError] = useLiveTable<Agent>(
     tables.visibleAgents,
     'visibleAgents'
-  );
-  const publicChannel = useMemo(
-    () => channels.find(row => row.slug === slug) ?? null,
-    [channels, slug]
   );
   const visibleChannel = useMemo(
     () => visibleChannels.find(row => row.slug === slug) ?? null,
@@ -751,11 +755,16 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     () => tables.publicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
-  const [messages, messagesReady, messagesError] = usePublicLiveTable<PublicRecentChannelMessage>(
+  const [liveMessages, liveMessagesReady] = usePublicLiveTable<PublicRecentChannelMessage>(
     messageQuery,
     'publicRecentChannelMessages',
     { enabled: channel !== null }
   );
+  const [messages, messagesReady, messagesError, reloadMessages] = usePublicChannelMessagesLookup({
+    channelId,
+    enabled: channel !== null,
+    limit: PUBLIC_CHANNEL_RECENT_PAGE_SIZE,
+  });
   const [historyMessages, setHistoryMessages] = useState<ChannelMessageRow[]>([]);
   const [historyReady, setHistoryReady] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -777,6 +786,10 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const feedScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef<boolean>(true);
   const lastMessageKeyRef = useRef<string | null>(null);
+  const liveMessagesRefreshKey = useMemo(
+    () => liveMessages.map(message => `${message.id.toString()}:${message.channelSeq.toString()}`).join('|'),
+    [liveMessages]
+  );
   const [feedUnseenCount, setFeedUnseenCount] = useState(0);
 
   const authenticatedSession = auth.status === 'authenticated' ? auth.session : null;
@@ -891,6 +904,12 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   }, [channelId]);
 
   useEffect(() => {
+    if (channel && liveMessagesReady) {
+      reloadMessages();
+    }
+  }, [channel, liveMessagesReady, liveMessagesRefreshKey, reloadMessages]);
+
+  useEffect(() => {
     let cancelled = false;
     if (!canReadChannelHistory || !connection || !channel || !activeActor) {
       const cancelReady = deferEffectStateUpdate(() => {
@@ -916,7 +935,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         channelId: channel.channelId,
         channelSlug: undefined,
         beforeChannelSeq: undefined,
-        limit: 25n,
+        limit: CHANNEL_HISTORY_PAGE_SIZE,
       })
       .then(rows => {
         if (cancelled) {
@@ -1162,7 +1181,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         channelId: channel.channelId,
         channelSlug: undefined,
         afterMemberId,
-        limit: 25n,
+        limit: CHANNEL_MEMBER_PAGE_SIZE,
       });
       setMemberRows(current => (reset ? rows : [...current, ...rows]));
     } catch (error) {
@@ -1274,7 +1293,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         channelId: channel.channelId,
         channelSlug: undefined,
         beforeChannelSeq: earliestLoadedSeq,
-        limit: 25n,
+        limit: CHANNEL_HISTORY_PAGE_SIZE,
       });
       setHistoryMessages(current => {
         return mergeChannelMessageRows(current, rows);
@@ -1303,10 +1322,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
       (Array.from(connection.db.visibleChannels.iter()) as VisibleChannelRow[]).find(
         row => row.slug === slug
       ) ?? null;
-    const freshPublicChannel =
-      (Array.from(connection.db.publicChannels.iter()) as PublicChannelMirrorRow[]).find(
-        row => row.slug === slug
-      ) ?? null;
+    const freshPublicChannel = publicChannel?.slug === slug ? publicChannel : null;
     const freshChannelId = freshVisibleChannel?.id ?? freshPublicChannel?.channelId;
     if (!freshChannelId) {
       throw new Error('Channel is unavailable.');

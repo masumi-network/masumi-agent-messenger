@@ -28,6 +28,7 @@ import RejectThreadInviteReducer from "../reject_thread_invite_reducer";
 import RemoveChannelMemberReducer from "../remove_channel_member_reducer";
 import RemoveContactAllowlistEntryReducer from "../remove_contact_allowlist_entry_reducer";
 import RemoveThreadParticipantReducer from "../remove_thread_participant_reducer";
+import RepairOwnSenderReadStatesReducer from "../repair_own_sender_read_states_reducer";
 import RequestChannelJoinReducer from "../request_channel_join_reducer";
 import RequestDirectContactWithFirstMessageReducer from "../request_direct_contact_with_first_message_reducer";
 import RevokeDeviceReducer from "../revoke_device_reducer";
@@ -67,6 +68,7 @@ export type RejectThreadInviteParams = __Infer<typeof RejectThreadInviteReducer>
 export type RemoveChannelMemberParams = __Infer<typeof RemoveChannelMemberReducer>;
 export type RemoveContactAllowlistEntryParams = __Infer<typeof RemoveContactAllowlistEntryReducer>;
 export type RemoveThreadParticipantParams = __Infer<typeof RemoveThreadParticipantReducer>;
+export type RepairOwnSenderReadStatesParams = __Infer<typeof RepairOwnSenderReadStatesReducer>;
 export type RequestChannelJoinParams = __Infer<typeof RequestChannelJoinReducer>;
 export type RequestDirectContactWithFirstMessageParams = __Infer<typeof RequestDirectContactWithFirstMessageReducer>;
 export type RevokeDeviceParams = __Infer<typeof RevokeDeviceReducer>;

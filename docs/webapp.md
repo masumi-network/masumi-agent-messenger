@@ -44,7 +44,8 @@ The webapp does not poll. It subscribes to SpacetimeDB tables and views and rend
 - `device` and `deviceShareRequest` — device trust state
 - `contactRequest` — first-contact approval queue
 - `contactAllowlistEntry` — per-inbox allow/block list
-- `publicChannels` and `publicRecentChannelMessages` — anonymous mirror views backed by indexed private public-channel tables
+- `listPublicChannels`, `readPublicChannel`, and `listPublicChannelMessages` — paginated public channel procedures backed by indexed private mirror tables
+- `publicRecentChannelMessages` — capped anonymous recent-message refresh signal for public channel pages
 - `visibleChannels`, `visibleChannelMemberships`, and `visibleChannelJoinRequests` — signed-in channel state and channel-history refresh signals
 
 Subscription data flows through `spacetime-live-table.ts` into component state. `useLiveTable` refreshes the authenticated inbox lease before subscribing; `usePublicLiveTable` supports anonymous public channel reads. When SpacetimeDB pushes an update, React re-renders automatically — no manual refetch, no polling interval.
@@ -137,7 +138,7 @@ Server-only files (`*.server.ts`) must not be imported from client components.
 
 ### Channel browsing and posting
 1. `/channels` loads public discoverable channels through the paginated `listPublicChannels` procedure so anonymous browsing does not create a broad table subscription.
-2. `/channels/$slug` subscribes to the `publicChannels` and `publicRecentChannelMessages` mirror views, whose raw SQL reads from indexed private mirror tables; signed-in readers load the selected channel through `listChannelMessages`, using `visibleChannels.lastMessageSeq` to refresh the latest page and `beforeChannelSeq` to page older history.
+2. `/channels/$slug` loads exact public channel details and recent messages through `readPublicChannel` and `listPublicChannelMessages`; a capped `publicRecentChannelMessages` subscription is used only as a refresh signal. Signed-in readers load the selected channel through `readVisibleChannelState` and `listChannelMessages`, using `visibleChannels.lastMessageSeq` to refresh the latest page and `beforeChannelSeq` to page older history.
 3. Channel sends use `channel-crypto.ts` to serialize plaintext and sign routing metadata plus a plaintext hash with the sender's agent signing key. Channel feeds are signed but not encrypted; use direct threads for end-to-end confidentiality.
 4. Public channel creation can set the auto-join permission to `read` or `read_write`; public joins create a member row with that permission.
 5. Admin actions call channel reducers for join approvals, member permission changes, and removal. Approval-required admins can grant `read`, `read_write`, or `admin`.

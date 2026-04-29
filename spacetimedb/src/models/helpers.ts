@@ -64,6 +64,7 @@ import {
   CHANNEL_ACCESS_MODES,
   CHANNEL_PERMISSIONS,
   CHANNEL_JOIN_REQUEST_STATUSES,
+  INBOX_AUTH_LEASE_DURATION_MS,
   MAX_VISIBLE_THREAD_PAGE_SIZE,
   MAX_INBOX_THREAD_BACKFILL_BATCH_SIZE,
   MAX_VISIBLE_MESSAGES_PER_THREAD,
@@ -88,6 +89,7 @@ import type {
   ChannelMemberRow,
   ChannelMessageRecordRow,
   PublicChannelTableRow,
+  PublicRecentChannelMessageRecordRow,
   ThreadInviteRow,
   ReadDbCtx,
   ReadAuthCtx,
@@ -677,9 +679,6 @@ export function requireOidcIdentityClaims(ctx: ReadAuthCtx): OidcIdentityClaims 
     throw new SenderError('OIDC token exp claim is required');
   }
   const expiresAt = Timestamp.fromDate(new Date(exp * 1000));
-  if (isTimestampExpired(expiresAt, ctx.timestamp)) {
-    throw new SenderError('OIDC token is expired');
-  }
 
   return {
     normalizedEmail: requireValidEmail(displayEmail, 'jwt.email'),
@@ -752,14 +751,38 @@ export function buildInboxAuthIdentityKey(issuer: string, subject: string): stri
   return `${issuer}\u0000${subject}`;
 }
 
-export function requireFutureOidcExpiry(ctx: ModuleCtx, oidcClaims: OidcIdentityClaims): Timestamp {
+function inboxAuthLeaseMatchesInbox(lease: InboxAuthLeaseRow, inbox: InboxRow): boolean {
+  return (
+    lease.inboxId === inbox.id &&
+    lease.authIdentityKey === buildInboxAuthIdentityKey(inbox.authIssuer, inbox.authSubject) &&
+    lease.normalizedEmail === inbox.normalizedEmail &&
+    lease.authIssuer === inbox.authIssuer &&
+    lease.authSubject === inbox.authSubject
+  );
+}
+
+export function requireScheduledReducerCall(ctx: ModuleCtx): void {
+  // SpacetimeDB scheduled reducers are runtime invocations without a client connection;
+  // client-originated reducer calls carry a non-null connectionId. Use that SDK boundary
+  // so authenticated clients cannot spoof scheduler work.
+  if (ctx.connectionId !== null) {
+    throw new SenderError('This reducer can only be called by the scheduler');
+  }
+}
+
+export function requireOidcExpiryClaim(oidcClaims: OidcIdentityClaims): Timestamp {
   if (!oidcClaims.expiresAt) {
     throw new SenderError('OIDC token exp claim is required');
   }
-  if (isTimestampExpired(oidcClaims.expiresAt, ctx.timestamp)) {
+  return oidcClaims.expiresAt;
+}
+
+export function requireFutureOidcExpiry(ctx: ModuleCtx, oidcClaims: OidcIdentityClaims): Timestamp {
+  const expiresAt = requireOidcExpiryClaim(oidcClaims);
+  if (isTimestampExpired(expiresAt, ctx.timestamp)) {
     throw new SenderError('OIDC token is expired');
   }
-  return oidcClaims.expiresAt;
+  return expiresAt;
 }
 
 export function cancelInboxAuthLeaseExpirySchedules(ctx: ModuleCtx, leaseId: bigint) {
@@ -816,6 +839,7 @@ export const EXPECTED_INBOX_AUTH_LEASE_REFRESH_ERRORS = new Set([
   'Current OIDC session is not authorized for this inbox',
   'Current OIDC session email does not match this inbox namespace',
   'Inbox auth verification is required before this action',
+  'Inbox authorization expired',
 ]);
 
 export function isExpectedInboxAuthLeaseRefreshError(error: unknown): boolean {
@@ -836,9 +860,23 @@ export function upsertInboxAuthLease(
     throw new SenderError('Current OIDC session email does not match this inbox namespace');
   }
 
-  const expiresAt = requireFutureOidcExpiry(ctx, oidcClaims);
+  const tokenExpiresAt = requireOidcExpiryClaim(oidcClaims);
   const authIdentityKey = buildInboxAuthIdentityKey(oidcClaims.issuer, oidcClaims.subject);
   const existing = ctx.db.inboxAuthLease.ownerIdentity.find(ctx.sender);
+  const existingLeaseStillActive =
+    existing !== null &&
+    existing.active &&
+    !isTimestampExpired(existing.expiresAt, ctx.timestamp) &&
+    inboxAuthLeaseMatchesInbox(existing, inbox);
+  if (isTimestampExpired(tokenExpiresAt, ctx.timestamp) && !existingLeaseStillActive) {
+    throw new SenderError('OIDC token is expired');
+  }
+
+  // SpacetimeDB exchanges the original OIDC token for a short-lived WebSocket
+  // token before reducers run. Use a bounded server-side lease window so a
+  // healthy long-lived session does not lose visibility every WebSocket-token
+  // minute, while stale connections still expire without client cooperation.
+  const expiresAt = timestampPlusMilliseconds(ctx.timestamp, INBOX_AUTH_LEASE_DURATION_MS);
 
   const lease = existing
     ? ctx.db.inboxAuthLease.id.update({
@@ -886,18 +924,10 @@ export function getActiveInboxAuthLease(ctx: ReadDbCtx, inbox: InboxRow) {
   if (!lease || !lease.active) {
     return null;
   }
-  if (lease.inboxId !== inbox.id) {
-    return null;
-  }
   // Expiry is enforced by the scheduled `expireInboxAuthLease` reducer flipping
   // `active = false`. Views cannot access wall-clock time (no `ctx.timestamp`)
   // and must remain deterministic — do not read the current time here.
-  if (
-    lease.authIdentityKey !== buildInboxAuthIdentityKey(inbox.authIssuer, inbox.authSubject) ||
-    lease.normalizedEmail !== inbox.normalizedEmail ||
-    lease.authIssuer !== inbox.authIssuer ||
-    lease.authSubject !== inbox.authSubject
-  ) {
+  if (!inboxAuthLeaseMatchesInbox(lease, inbox)) {
     return null;
   }
   return lease;
@@ -984,6 +1014,15 @@ export function buildPublicChannelSortKeyFromCursor(
     beforeChannelId === undefined
       ? '9'.repeat(U64_SORT_DIGITS)
       : formatInvertedU64SortPart(beforeChannelId),
+  ].join(':');
+}
+
+export function buildPublicRecentChannelMessageSortKey(
+  message: Pick<PublicRecentChannelMessageRecordRow, 'id' | 'createdAt'>
+): string {
+  return [
+    formatInvertedU64SortPart(message.createdAt.microsSinceUnixEpoch),
+    formatInvertedU64SortPart(message.id),
   ].join(':');
 }
 
@@ -1238,6 +1277,10 @@ export function getOwnedInboxAnyStatus(ctx: ReadAuthCtx) {
     throw new SenderError('No inbox is bound to this identity');
   }
   requireInboxMatchesOidcIdentity(ctx, inbox);
+  const lease = getActiveInboxAuthLease(ctx, inbox);
+  if (!lease || isTimestampExpired(lease.expiresAt, ctx.timestamp)) {
+    throw new SenderError('Inbox authorization expired');
+  }
   return inbox;
 }
 
@@ -1532,6 +1575,7 @@ export function upsertInboxThreadProjection(
     threadId: thread.id,
     uniqueKey,
     sortKey: buildInboxThreadSortKey(thread),
+    updatedAtSortKey: buildInboxThreadSortKey(thread),
     lastMessageAt: thread.lastMessageAt,
     lastMessageSeq: thread.lastMessageSeq,
     updatedAt: ctx.timestamp,
@@ -3298,8 +3342,10 @@ export function rebuildPublicRecentChannelMessages(ctx: ModuleCtx, channel: Chan
     ctx.db.publicRecentChannelMessage.insert({
       // Use the source message id so mirror writes do not need a table-wide id scan.
       id: message.id,
+      visible: true,
       channelId: message.channelId,
       channelSeq: message.channelSeq,
+      sortKey: buildPublicRecentChannelMessageSortKey(message),
       channelSeqKey: message.channelSeqKey,
       senderAgentDbId: message.senderAgentDbId,
       senderPublicIdentity: message.senderPublicIdentity,
@@ -3400,8 +3446,10 @@ export function insertPublicRecentChannelMessage(ctx: ModuleCtx, message: Channe
   ctx.db.publicRecentChannelMessage.insert({
     // Use the source message id so mirror writes do not need a table-wide id scan.
     id: message.id,
+    visible: true,
     channelId: message.channelId,
     channelSeq: message.channelSeq,
+    sortKey: buildPublicRecentChannelMessageSortKey(message),
     channelSeqKey: message.channelSeqKey,
     senderAgentDbId: message.senderAgentDbId,
     senderPublicIdentity: message.senderPublicIdentity,
@@ -3414,16 +3462,19 @@ export function insertPublicRecentChannelMessage(ctx: ModuleCtx, message: Channe
     createdAt: message.createdAt,
   });
 
-  const latestRecentRows = Array.from(
-    ctx.db.publicRecentChannelMessage.public_recent_channel_message_channel_id.filter(
-      message.channelId
+  const channelSeqPrefixRange = [message.channelId] as unknown as Parameters<
+    typeof ctx.db.publicRecentChannelMessage.public_recent_channel_message_channel_id_seq.filter
+  >[0];
+  const recentRows = Array.from(
+    ctx.db.publicRecentChannelMessage.public_recent_channel_message_channel_id_seq.filter(
+      channelSeqPrefixRange
     )
-  ).sort((left, right) => {
-    if (left.channelSeq > right.channelSeq) return -1;
-    if (left.channelSeq < right.channelSeq) return 1;
-    return Number(right.id - left.id);
-  });
-  for (const oldRow of latestRecentRows.slice(MAX_CHANNEL_RECENT_PUBLIC_MESSAGES)) {
+  );
+  const rowsToDelete =
+    recentRows.length > MAX_CHANNEL_RECENT_PUBLIC_MESSAGES
+      ? recentRows.length - MAX_CHANNEL_RECENT_PUBLIC_MESSAGES
+      : 0;
+  for (const oldRow of recentRows.slice(0, rowsToDelete)) {
     ctx.db.publicRecentChannelMessage.id.delete(oldRow.id);
   }
 }

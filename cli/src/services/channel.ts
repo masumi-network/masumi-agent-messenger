@@ -8,6 +8,7 @@ import type { AgentKeyPair } from '../../../shared/agent-crypto';
 import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY } from '../../../shared/message-limits';
+import { limitSpacetimeSubscriptionQuery } from '../../../shared/spacetime-subscription-limits';
 import {
   formatEncryptedMessageBody,
   isJsonContentType,
@@ -20,7 +21,6 @@ import type {
   ChannelMemberListRow,
   PublicChannelMirrorRow,
   PublicChannelPageRow,
-  PublicRecentChannelMessage,
   VisibleChannelJoinRequestRow,
   VisibleChannelMembershipRow,
   VisibleChannelRow,
@@ -38,7 +38,8 @@ import {
   disconnectConnection,
 } from './spacetimedb';
 
-type ChannelQuery = Query<TypedTableDef>;
+type ChannelQuery = Query<TypedTableDef> | string;
+const limitSubscription = limitSpacetimeSubscriptionQuery;
 
 export type ChannelListItem = {
   id: string;
@@ -183,21 +184,76 @@ async function readPublicChannelMirrorBySlug(
   conn: DbConnection,
   normalizedSlug: string
 ): Promise<PublicChannelMirrorRow | null> {
-  const publicChannelQuery = tables.publicChannels.where(row => row.slug.eq(normalizedSlug));
-  const subscription = await subscribeQueries(
-    conn,
-    [publicChannelQuery],
-    'Live public channel subscription failed.'
-  );
-  try {
-    return (
-      (Array.from(conn.db.publicChannels.iter()) as PublicChannelMirrorRow[]).find(
-        row => row.slug === normalizedSlug
-      ) ?? null
-    );
-  } finally {
-    subscription.unsubscribe();
+  const rows = await conn.procedures.readPublicChannel({
+    channelId: undefined,
+    channelSlug: normalizedSlug,
+  });
+  return rows[0] ?? null;
+}
+
+async function readVisibleChannelStateSnapshot(
+  conn: DbConnection,
+  params: {
+    actorId: bigint;
+    channelId?: bigint;
+    channelSlug?: string;
+    requestId?: bigint;
   }
+): Promise<ChannelSnapshot> {
+  const state = await conn.procedures.readVisibleChannelState({
+    agentDbId: params.actorId,
+    channelId: params.channelId,
+    channelSlug: params.channelSlug,
+    requestId: params.requestId,
+  });
+  return {
+    actors: state.actors,
+    visibleChannels: state.channels,
+    memberships: state.memberships,
+    requests: state.requests,
+  };
+}
+
+async function readOwnedChannelActor(params: {
+  conn: DbConnection;
+  normalizedEmail: string;
+  actorSlug?: string;
+}): Promise<Agent> {
+  const normalizedSlug =
+    params.actorSlug === undefined ? undefined : normalizeInboxSlug(params.actorSlug);
+  if (params.actorSlug !== undefined && !normalizedSlug) {
+    throw userError('Agent slug is invalid.', {
+      code: 'INVALID_AGENT_SLUG',
+    });
+  }
+  const actors = await params.conn.procedures.readOwnedAgent({
+    agentSlug: normalizedSlug,
+  });
+  const actor = actors[0] ?? null;
+  if (!actor) {
+    throw userError(
+      normalizedSlug
+        ? `No owned agent found for slug \`${normalizedSlug}\`.`
+        : 'No default agent found. Run `masumi-agent-messenger account sync` first.',
+      {
+        code: normalizedSlug ? 'OWNED_ACTOR_NOT_FOUND' : 'INBOX_BOOTSTRAP_REQUIRED',
+      }
+    );
+  }
+  if (actor.normalizedEmail !== params.normalizedEmail) {
+    throw userError('Current OIDC session email does not match the selected agent.', {
+      code: 'OIDC_EMAIL_MISMATCH',
+    });
+  }
+  if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)) {
+    throw userError(
+      `Agent \`${actor.slug}\` is deregistering or deregistered and cannot be used for channels.`,
+      {
+        code: 'AGENT_DEREGISTERED',
+      }
+    );
+  }
+  return actor;
 }
 
 function findJoinedPublicChannelSnapshot(params: {
@@ -226,7 +282,7 @@ function findJoinedPublicChannelSnapshot(params: {
 }
 
 async function waitForJoinedPublicChannel(params: {
-  read: () => ChannelSnapshot;
+  read: () => ChannelSnapshot | Promise<ChannelSnapshot>;
   slug: string;
   actorId: bigint;
   timeoutMs?: number;
@@ -235,7 +291,7 @@ async function waitForJoinedPublicChannel(params: {
 
   while (Date.now() < timeoutAt) {
     const joined = findJoinedPublicChannelSnapshot({
-      snapshot: params.read(),
+      snapshot: await params.read(),
       slug: params.slug,
       actorId: params.actorId,
     });
@@ -594,24 +650,36 @@ function requireChannelAdminActor(params: {
   normalizedEmail: string;
   channelId: bigint;
   actorSlug?: string;
+  preferredActor?: Agent;
 }): Agent {
-  const defaultActor = requireDefaultActor(params.actors, params.normalizedEmail);
+  const preferredActor = params.preferredActor;
+  const defaultActor = preferredActor?.isDefault
+    ? preferredActor
+    : params.actorSlug
+      ? null
+      : requireDefaultActor(params.actors, params.normalizedEmail);
   const candidates = params.actorSlug
     ? [
-        requireOwnedActor({
-          actors: params.actors,
-          normalizedEmail: params.normalizedEmail,
-          actorSlug: params.actorSlug,
-        }),
+        preferredActor ??
+          requireOwnedActor({
+            actors: params.actors,
+            normalizedEmail: params.normalizedEmail,
+            actorSlug: params.actorSlug,
+          }),
       ]
     : [
         defaultActor,
-        ...params.actors.filter(
-          actor => actor.inboxId === defaultActor.inboxId && actor.id !== defaultActor.id
-        ),
-      ].filter(
-        actor => !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
-      );
+        ...(defaultActor
+          ? params.actors.filter(
+              actor => actor.inboxId === defaultActor.inboxId && actor.id !== defaultActor.id
+            )
+          : []),
+      ].filter((candidate): candidate is Agent => {
+        if (!candidate) {
+          return false;
+        }
+        return !isDeregisteringOrDeregisteredInboxAgentState(candidate.masumiRegistrationState);
+      });
   const adminActor = candidates.find(actor =>
     params.memberships.some(
       membership =>
@@ -676,7 +744,7 @@ function sortPublicChannels<T extends PublicChannelMirrorRow | PublicChannelPage
 async function connectForAuthenticatedChannels(params: {
   profileName: string;
   reporter: TaskReporter;
-}) {
+}, options: { includeJoinRequests?: boolean } = {}) {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
   const normalizedEmail = normalizeEmail(claims.email ?? '');
   if (!normalizedEmail) {
@@ -691,14 +759,15 @@ async function connectForAuthenticatedChannels(params: {
   });
   let subscription: SubscriptionHandle;
   try {
+    const queries: ChannelQuery[] = [
+      limitSubscription(tables.visibleAgents, 'visibleAgents'),
+    ];
+    if (options.includeJoinRequests) {
+      queries.push(limitSubscription(tables.visibleChannelJoinRequests, 'visibleChannelJoinRequests'));
+    }
     subscription = await subscribeQueries(
       conn,
-      [
-        tables.visibleAgents,
-        tables.visibleChannels,
-        tables.visibleChannelMemberships,
-        tables.visibleChannelJoinRequests,
-      ],
+      queries,
       'Live channel subscription failed.'
     );
   } catch (error) {
@@ -752,59 +821,39 @@ export async function readPublicChannelMessages(params: {
     databaseName: profile.spacetimeDbName,
   });
   try {
-    const publicChannelQuery = tables.publicChannels.where(row => row.slug.eq(normalizedSlug));
-    const channelSubscription = await subscribeQueries(
+    const channel = await readPublicChannelMirrorBySlug(conn, normalizedSlug);
+    if (!channel) {
+      throw userError(`Public channel \`${normalizedSlug}\` was not found.`, {
+        code: 'CHANNEL_NOT_FOUND',
+      });
+    }
+    const rows = await conn.procedures.listPublicChannelMessages({
+      channelId: channel.channelId,
+      channelSlug: undefined,
+      beforeChannelSeq: undefined,
+      limit: 25n,
+    });
+    const messages = await verifyChannelMessages(
       conn,
-      [publicChannelQuery],
-      'Live public channel subscription failed.'
-    );
-    try {
-      const channel =
-        (Array.from(conn.db.publicChannels.iter()) as PublicChannelMirrorRow[]).find(
-          row => row.slug === normalizedSlug
-        ) ?? null;
-      if (!channel) {
-        throw userError(`Public channel \`${normalizedSlug}\` was not found.`, {
-          code: 'CHANNEL_NOT_FOUND',
-        });
-      }
-      const publicRecentQuery = tables.publicRecentChannelMessages.where(row =>
-        row.channelId.eq(channel.channelId)
-      );
-      const publicRecentSubscription = await subscribeQueries(
-        conn,
-        [publicRecentQuery],
-        'Live public channel message subscription failed.'
-      );
-      try {
-        const rows = (Array.from(
-          conn.db.publicRecentChannelMessages.iter()
-        ) as PublicRecentChannelMessage[]).sort((left, right) => {
+      [...rows]
+        .sort((left, right) => {
           if (left.channelSeq < right.channelSeq) return -1;
           if (left.channelSeq > right.channelSeq) return 1;
           return Number(left.id - right.id);
-        });
-        const messages = await verifyChannelMessages(
-          conn,
-          rows.map(message => ({
-            ...message,
-            replyToMessageId: message.replyToMessageId ?? null,
-          }))
-        );
-        params.reporter.success(`Loaded ${messages.length.toString()} recent channel message${messages.length === 1 ? '' : 's'}`);
-        return {
-          profile: profile.name,
-          slug: channel.slug,
-          anonymous: true,
-          cappedToRecent: true,
-          messages,
-        };
-      } finally {
-        publicRecentSubscription.unsubscribe();
-      }
-    } finally {
-      channelSubscription.unsubscribe();
-    }
+        })
+        .map(message => ({
+          ...message,
+          replyToMessageId: message.replyToMessageId ?? null,
+        }))
+    );
+    params.reporter.success(`Loaded ${messages.length.toString()} recent channel message${messages.length === 1 ? '' : 's'}`);
+    return {
+      profile: profile.name,
+      slug: channel.slug,
+      anonymous: true,
+      cappedToRecent: true,
+      messages,
+    };
   } finally {
     disconnectConnection(conn);
   }
@@ -822,25 +871,12 @@ export async function showPublicChannel(params: {
     databaseName: profile.spacetimeDbName,
   });
   try {
-    const publicChannelQuery = tables.publicChannels.where(row => row.slug.eq(normalizedSlug));
-    const subscription = await subscribeQueries(
-      conn,
-      [publicChannelQuery],
-      'Live public channel subscription failed.'
-    );
-    try {
-      const channel =
-        (Array.from(conn.db.publicChannels.iter()) as PublicChannelMirrorRow[]).find(
-          row => row.slug === normalizedSlug
-        ) ?? null;
-      params.reporter.success(channel ? `Loaded #${channel.slug}` : `Channel ${normalizedSlug} not found`);
-      return {
-        profile: profile.name,
-        channel: channel ? publicChannelToListItem(channel) : null,
-      };
-    } finally {
-      subscription.unsubscribe();
-    }
+    const channel = await readPublicChannelMirrorBySlug(conn, normalizedSlug);
+    params.reporter.success(channel ? `Loaded #${channel.slug}` : `Channel ${normalizedSlug} not found`);
+    return {
+      profile: profile.name,
+      channel: channel ? publicChannelToListItem(channel) : null,
+    };
   } finally {
     disconnectConnection(conn);
   }
@@ -857,15 +893,18 @@ export async function readAuthenticatedChannelMessages(params: {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
-    const snapshot = readChannelSnapshot(conn);
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
-    const actor = requireOwnedActor({
-      actors: snapshot.actors,
+    const actor = await readOwnedChannelActor({
+      conn,
       normalizedEmail,
       actorSlug: params.actorSlug,
     });
+    const channelState = await readVisibleChannelStateSnapshot(conn, {
+      actorId: actor.id,
+      channelSlug: normalizedSlug,
+    });
     const visibleChannel =
-      snapshot.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
+      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
     const publicChannel = visibleChannel
       ? null
       : await readPublicChannelMirrorBySlug(conn, normalizedSlug);
@@ -914,15 +953,18 @@ export async function listChannelMembers(params: {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
-    const snapshot = readChannelSnapshot(conn);
-    const actor = requireOwnedActor({
-      actors: snapshot.actors,
+    const actor = await readOwnedChannelActor({
+      conn,
       normalizedEmail,
       actorSlug: params.actorSlug,
     });
+    const normalizedSlug = normalizeChannelSlugInput(params.slug);
+    const channelState = await readVisibleChannelStateSnapshot(conn, {
+      actorId: actor.id,
+      channelSlug: normalizedSlug,
+    });
     const channel =
-      snapshot.visibleChannels.find(row => row.slug === normalizeChannelSlugInput(params.slug)) ??
-      null;
+      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
@@ -962,8 +1004,8 @@ export async function createChannel(params: {
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
-    const actor = requireOwnedActor({
-      actors: readChannelSnapshot(conn).actors,
+    const actor = await readOwnedChannelActor({
+      conn,
       normalizedEmail,
       actorSlug: params.actorSlug,
     });
@@ -1011,21 +1053,30 @@ export async function updateChannelSettings(params: {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
-    const snapshot = readChannelSnapshot(conn);
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
+    const actor = await readOwnedChannelActor({
+      conn,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
+    const channelState = await readVisibleChannelStateSnapshot(conn, {
+      actorId: actor.id,
+      channelSlug: normalizedSlug,
+    });
     const channel =
-      snapshot.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
+      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
       });
     }
     const adminActor = requireChannelAdminActor({
-      actors: snapshot.actors,
-      memberships: snapshot.memberships,
+      actors: channelState.actors,
+      memberships: channelState.memberships,
       normalizedEmail,
       channelId: channel.id,
       actorSlug: params.actorSlug,
+      preferredActor: actor,
     });
 
     await conn.reducers.updateChannelSettings({
@@ -1061,8 +1112,8 @@ export async function joinPublicChannel(params: {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
-    const actor = requireOwnedActor({
-      actors: readChannelSnapshot(conn).actors,
+    const actor = await readOwnedChannelActor({
+      conn,
       normalizedEmail,
       actorSlug: params.actorSlug,
     });
@@ -1074,7 +1125,11 @@ export async function joinPublicChannel(params: {
     });
     const { channel: joinedChannel, membership: joinedMembership } =
       await waitForJoinedPublicChannel({
-        read: () => readChannelSnapshot(conn),
+        read: () =>
+          readVisibleChannelStateSnapshot(conn, {
+            actorId: actor.id,
+            channelSlug: normalizedSlug,
+          }),
         slug: normalizedSlug,
         actorId: actor.id,
       });
@@ -1103,8 +1158,8 @@ export async function requestChannelJoin(params: {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
-    const actor = requireOwnedActor({
-      actors: readChannelSnapshot(conn).actors,
+    const actor = await readOwnedChannelActor({
+      conn,
       normalizedEmail,
       actorSlug: params.actorSlug,
     });
@@ -1136,42 +1191,49 @@ export async function sendChannelMessage(params: {
 }): Promise<ChannelMutationResult> {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, normalizedEmail, conn, subscription } = connected;
+  let actor: Agent | null = null;
 
   async function attemptSend(): Promise<ChannelMutationResult> {
-    const snapshot = readChannelSnapshot(conn);
-    const actor = requireOwnedActor({
-      actors: snapshot.actors,
-      normalizedEmail,
-      actorSlug: params.actorSlug,
+    if (!actor) {
+      actor = await readOwnedChannelActor({
+        conn,
+        normalizedEmail,
+        actorSlug: params.actorSlug,
+      });
+    }
+    const activeActor = actor;
+    const normalizedSlug = normalizeChannelSlugInput(params.slug);
+    const channelState = await readVisibleChannelStateSnapshot(conn, {
+      actorId: activeActor.id,
+      channelSlug: normalizedSlug,
     });
     const channel =
-      snapshot.visibleChannels.find(row => row.slug === normalizeChannelSlugInput(params.slug)) ??
-      null;
+      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
       });
     }
     const membership =
-      snapshot.memberships.find(
-        row => row.channelId === channel.id && row.agentDbId === actor.id && row.active
+      channelState.memberships.find(
+        row => row.channelId === channel.id && row.agentDbId === activeActor.id && row.active
       ) ?? null;
     if (!membership) {
       throw userError('Join the channel before sending.', {
         code: 'CHANNEL_MEMBERSHIP_REQUIRED',
       });
     }
-    const keyPair = await requireLocalKeyPair({ profile, actor });
+    const keyPair = await requireLocalKeyPair({ profile, actor: activeActor });
     const nextSeq = membership.lastSentSeq + 1n;
     const prepared = await prepareChannelMessage({
       channelId: channel.id,
-      senderPublicIdentity: actor.publicIdentity,
+      senderPublicIdentity: activeActor.publicIdentity,
       senderSeq: nextSeq,
       keyPair,
       payload: buildTextPayload(params.message, params.contentType),
     });
     await conn.reducers.sendChannelMessage({
-      agentDbId: actor.id,
+      agentDbId: activeActor.id,
       channelId: channel.id,
       senderSeq: nextSeq,
       senderSigningKeyVersion: prepared.senderSigningKeyVersion,
@@ -1228,13 +1290,26 @@ export async function listChannelJoinRequests(params: {
   requireAdmin?: boolean;
   reporter: TaskReporter;
 }): Promise<ChannelJoinRequestsResult> {
-  const connected = await connectForAuthenticatedChannels(params);
+  const connected = await connectForAuthenticatedChannels(params, {
+    includeJoinRequests: !params.slug,
+  });
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
     const snapshot = readChannelSnapshot(conn);
     const channelSlug = params.slug ? normalizeChannelSlugInput(params.slug) : null;
+    const actor = await readOwnedChannelActor({
+      conn,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
+    const channelState = channelSlug
+      ? await readVisibleChannelStateSnapshot(conn, {
+          actorId: actor.id,
+          channelSlug,
+        })
+      : snapshot;
     const selectedChannel = channelSlug
-      ? snapshot.visibleChannels.find(row => row.slug === channelSlug) ?? null
+      ? channelState.visibleChannels.find(row => row.slug === channelSlug) ?? null
       : null;
     const selectedChannelId = selectedChannel?.id ?? null;
 
@@ -1251,15 +1326,16 @@ export async function listChannelJoinRequests(params: {
         });
       }
       requireChannelAdminActor({
-        actors: snapshot.actors,
-        memberships: snapshot.memberships,
+        actors: channelState.actors,
+        memberships: channelState.memberships,
         normalizedEmail,
         channelId: selectedChannelId,
         actorSlug: params.actorSlug,
+        preferredActor: actor,
       });
     }
 
-    const filtered = snapshot.requests.filter(request => {
+    const filtered = channelState.requests.filter(request => {
       if (selectedChannelId !== null && request.channelId !== selectedChannelId) {
         return false;
       }
@@ -1303,21 +1379,24 @@ export async function approveChannelJoin(params: {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
-    const snapshot = readChannelSnapshot(conn);
-    const adminActor = requireOwnedActor({
-      actors: snapshot.actors,
+    const adminActor = await readOwnedChannelActor({
+      conn,
       normalizedEmail,
       actorSlug: params.actorSlug,
     });
     const requestId = parseRequiredU64(params.requestId, 'requestId');
-    const request = snapshot.requests.find(row => row.id === requestId);
+    const requestState = await readVisibleChannelStateSnapshot(conn, {
+      actorId: adminActor.id,
+      requestId,
+    });
+    const request = requestState.requests.find(row => row.id === requestId);
     if (!request) {
       throw userError(`Channel join request ${params.requestId} is not visible.`, {
         code: 'CHANNEL_REQUEST_NOT_FOUND',
       });
     }
     const channel =
-      snapshot.visibleChannels.find(row => row.id === request.channelId) ?? null;
+      requestState.visibleChannels.find(row => row.id === request.channelId) ?? null;
     if (!channel) {
       throw userError(`Channel join request ${params.requestId} channel is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
@@ -1355,9 +1434,8 @@ export async function rejectChannelJoin(params: {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
-    const snapshot = readChannelSnapshot(conn);
-    const adminActor = requireOwnedActor({
-      actors: snapshot.actors,
+    const adminActor = await readOwnedChannelActor({
+      conn,
       normalizedEmail,
       actorSlug: params.actorSlug,
     });
@@ -1388,15 +1466,18 @@ export async function setChannelMemberPermission(params: {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
-    const snapshot = readChannelSnapshot(conn);
-    const adminActor = requireOwnedActor({
-      actors: snapshot.actors,
+    const adminActor = await readOwnedChannelActor({
+      conn,
       normalizedEmail,
       actorSlug: params.actorSlug,
     });
+    const normalizedSlug = normalizeChannelSlugInput(params.slug);
+    const channelState = await readVisibleChannelStateSnapshot(conn, {
+      actorId: adminActor.id,
+      channelSlug: normalizedSlug,
+    });
     const channel =
-      snapshot.visibleChannels.find(row => row.slug === normalizeChannelSlugInput(params.slug)) ??
-      null;
+      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
@@ -1431,15 +1512,18 @@ export async function removeChannelMember(params: {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, normalizedEmail, conn, subscription } = connected;
   try {
-    const snapshot = readChannelSnapshot(conn);
-    const actor = requireOwnedActor({
-      actors: snapshot.actors,
+    const actor = await readOwnedChannelActor({
+      conn,
       normalizedEmail,
       actorSlug: params.actorSlug,
     });
+    const normalizedSlug = normalizeChannelSlugInput(params.slug);
+    const channelState = await readVisibleChannelStateSnapshot(conn, {
+      actorId: actor.id,
+      channelSlug: normalizedSlug,
+    });
     const channel =
-      snapshot.visibleChannels.find(row => row.slug === normalizeChannelSlugInput(params.slug)) ??
-      null;
+      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
