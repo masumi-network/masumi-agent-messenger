@@ -53,12 +53,11 @@ import {
 import {
   approveChannelJoin,
   createChannel,
-  listChannelMembers,
-  readAuthenticatedChannelMessages,
   rejectChannelJoin,
   sendChannelMessage,
   setChannelMemberPermission,
   updateChannelSettings,
+  verifyChannelMessages,
   type ChannelMemberListItem,
   type ChannelMessageItem,
 } from '../services/channel';
@@ -108,6 +107,7 @@ import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { mergeRowsById } from '../services/row-utils';
 import type { DbConnection } from '../../../webapp/src/module_bindings';
 import type {
+  ChannelMemberListRow,
   VisibleAgentRow,
   VisibleMessageRow,
   VisibleThreadParticipantRow,
@@ -135,6 +135,7 @@ type ShellFocus = 'sidebar' | 'content';
 
 const THREAD_LIST_PAGE_SIZE = 5n;
 const THREAD_MESSAGE_PAGE_SIZE = 5n;
+const THREAD_MESSAGE_PREFETCH_ROWS = 4;
 const SHELL_RECONNECT_RETRY_DELAY_MS = 1000;
 const SHELL_LEASE_LOST_RECONNECT_DELAY_MS = 250;
 const SHELL_INBOX_AUTH_LEASE_DURATION_MS = 5 * 60_000;
@@ -314,6 +315,14 @@ type LiveThreadRenderRow = {
   bold?: boolean;
 };
 
+type ChannelMessageRenderRow = {
+  key: string;
+  messageIndex: number;
+  text: string;
+  color?: string;
+  bold?: boolean;
+};
+
 type LiveThreadWindow = {
   visibleRows: LiveThreadRenderRow[];
   firstMessage: LiveThreadMessage | null;
@@ -364,7 +373,9 @@ type ChannelMessagesPageState = {
   messages: ChannelMessageItem[];
   beforeSeqStack: Array<string | null>;
   pageIndex: number;
+  olderExhausted: boolean;
   loading: boolean;
+  loadingOlder: boolean;
   error: string | null;
   loaded: boolean;
 };
@@ -413,6 +424,7 @@ const DEFAULT_SECURITY_STATE: ShellSecurityState = {
 const DEFAULT_AGENT_DISCOVERY_TAKE = 10;
 const MAX_TUI_DESCRIPTION_LINES = 4;
 const CHANNEL_MESSAGE_PAGE_SIZE = 5;
+const CHANNEL_MESSAGE_PREFETCH_ROWS = 4;
 const CHANNEL_MEMBER_PAGE_SIZE = 5;
 const TAB_CELL_WIDTH = 18;
 const TAB_CELL_GAP = 2;
@@ -517,7 +529,9 @@ function createInitialChannelMessagesState(): ChannelMessagesPageState {
     messages: [],
     beforeSeqStack: [null],
     pageIndex: 0,
+    olderExhausted: false,
     loading: false,
+    loadingOlder: false,
     error: null,
     loaded: false,
   };
@@ -1915,6 +1929,81 @@ function buildThreadMessageRenderRows(params: {
   });
 }
 
+function buildChannelMessageRenderRows(params: {
+  messages: ChannelMessageItem[];
+  width: number;
+}): ChannelMessageRenderRow[] {
+  const safeWidth = Math.max(1, params.width);
+  const bodyWidth = Math.max(1, safeWidth - 2);
+
+  return params.messages.flatMap((message, messageIndex) => {
+    const body = message.text ?? message.error ?? 'Unable to read message.';
+    const header = `From ${message.sender} · ${
+      message.createdAt ? formatTimestamp(message.createdAt) : 'time unavailable'
+    } · #${message.channelSeq}${message.status === 'failed' ? ' · verification failed' : ''}`;
+    const rows: ChannelMessageRenderRow[] = [
+      {
+        key: `${message.id}:header`,
+        messageIndex,
+        text: padText(sliceTextWidth(header, 0, safeWidth), safeWidth),
+        color: message.status === 'failed' ? 'red' : 'gray',
+        bold: message.status === 'failed',
+      },
+    ];
+
+    wrapTextToLines(body, bodyWidth).forEach((line, rowIndex) => {
+      rows.push({
+        key: `${message.id}:body:${rowIndex.toString()}:${line}`,
+        messageIndex,
+        text: padText(`  ${line.length > 0 ? line : ' '}`, safeWidth),
+        color: message.status === 'failed' ? 'red' : undefined,
+      });
+    });
+
+    rows.push({
+      key: `${message.id}:gap`,
+      messageIndex,
+      text: padText(' ', safeWidth),
+    });
+
+    return rows;
+  });
+}
+
+function compareChannelMessageItems(left: ChannelMessageItem, right: ChannelMessageItem): number {
+  const leftSeq = BigInt(left.channelSeq);
+  const rightSeq = BigInt(right.channelSeq);
+  if (leftSeq < rightSeq) return -1;
+  if (leftSeq > rightSeq) return 1;
+  return left.id.localeCompare(right.id);
+}
+
+function mergeChannelMessageItems(...messageGroups: ChannelMessageItem[][]): ChannelMessageItem[] {
+  const byId = new Map<string, ChannelMessageItem>();
+  for (const messages of messageGroups) {
+    for (const message of messages) {
+      byId.set(message.id, message);
+    }
+  }
+  return [...byId.values()].sort(compareChannelMessageItems);
+}
+
+function channelMemberRowToListItem(member: ChannelMemberListRow): ChannelMemberListItem {
+  return {
+    id: member.id.toString(),
+    channelId: member.channelId.toString(),
+    agentDbId: member.agentDbId.toString(),
+    agentPublicIdentity: member.agentPublicIdentity,
+    agentSlug: member.agentSlug,
+    agentDisplayName: member.agentDisplayName ?? null,
+    agentCurrentEncryptionPublicKey: member.agentCurrentEncryptionPublicKey,
+    agentCurrentEncryptionKeyVersion: member.agentCurrentEncryptionKeyVersion,
+    permission: member.permission,
+    active: member.active,
+    lastSentSeq: member.lastSentSeq.toString(),
+  };
+}
+
 async function buildLiveThreadMessages(params: {
   conn: DbConnection;
   rows: ShellRows;
@@ -2031,6 +2120,8 @@ function useLiveThreadMessages(params: {
   const threadMessagesRef = useRef<LiveThreadMessage[]>([]);
   const nextBeforeThreadSeqRef = useRef<bigint | null>(null);
   const latestRowsRef = useRef<ShellRows | null>(params.rows);
+  const visibleThreadRowsRef = useRef<LiveThreadRenderRow[]>([]);
+  const threadMessageMaxRowsRef = useRef(params.messageMaxRows);
   const readyConn = params.connectionState.mode === 'ready' ? params.connectionState.conn : null;
   const readyAuth = params.connectionState.mode === 'ready' ? params.connectionState.auth : null;
   const rowsReady = params.rows !== null;
@@ -2182,10 +2273,29 @@ function useLiveThreadMessages(params: {
         return;
       }
 
-      const loadedRowCount = buildThreadMessageRenderRows({
-        messages: result.messages,
-        width: params.messageWidth,
-      }).length;
+      const currentMessages = threadMessagesRef.current;
+      const mergedMessages = mergeLiveThreadMessages({
+        liveMessages: [...currentMessages, ...result.messages],
+        optimisticMessages: [],
+      });
+      const latestVisibleRows = visibleThreadRowsRef.current;
+      const anchorRowKey = latestVisibleRows[0]?.key ?? null;
+      let anchoredRowScrollOffset: number | null = null;
+      if (anchorRowKey) {
+        const mergedRows = buildThreadMessageRenderRows({
+          messages: mergedMessages,
+          width: params.messageWidth,
+        });
+        const anchorIndex = mergedRows.findIndex(row => row.key === anchorRowKey);
+        if (anchorIndex >= 0) {
+          const visibleRowCount = Math.max(
+            1,
+            latestVisibleRows.length || threadMessageMaxRowsRef.current
+          );
+          const desiredEnd = Math.min(mergedRows.length, anchorIndex + visibleRowCount);
+          anchoredRowScrollOffset = Math.max(mergedRows.length - desiredEnd, 0);
+        }
+      }
       setThreadMessagesWithRef(current =>
         mergeLiveThreadMessages({
           liveMessages: [...current, ...result.messages],
@@ -2194,10 +2304,8 @@ function useLiveThreadMessages(params: {
       );
       setNextBeforeThreadSeqWithRef(result.nextBeforeThreadSeq);
       setThreadMessagesError(null);
-      if (loadedRowCount > 0) {
-        setRowScrollOffset(
-          current => current + Math.min(loadedRowCount, Math.max(1, params.messageMaxRows))
-        );
+      if (anchoredRowScrollOffset !== null) {
+        setRowScrollOffset(anchoredRowScrollOffset);
       }
     } catch (error) {
       if (threadMessagesRequestRef.current === requestId) {
@@ -2271,6 +2379,18 @@ function useLiveThreadMessages(params: {
     };
   }, [allMessages, allRows, nextBeforeThreadSeq, params.messageMaxRows, rowScrollOffset]);
 
+  useEffect(() => {
+    visibleThreadRowsRef.current = window.visibleRows;
+    threadMessageMaxRowsRef.current = params.messageMaxRows;
+  }, [params.messageMaxRows, window.visibleRows]);
+
+  const startLoadingOlderThreadMessages = useCallback(() => {
+    if (nextBeforeThreadSeqRef.current === null || olderThreadMessagesLoading) {
+      return;
+    }
+    void loadOlderMessages();
+  }, [loadOlderMessages, olderThreadMessagesLoading]);
+
   return {
     threadMessageRows: window.visibleRows,
     threadMessagesError,
@@ -2291,12 +2411,12 @@ function useLiveThreadMessages(params: {
       if (rowScrollOffset < maxOffset) {
         const nextOffset = Math.min(rowScrollOffset + 1, maxOffset);
         setRowScrollOffset(nextOffset);
-        if (nextOffset >= maxOffset && nextBeforeThreadSeq !== null) {
-          void loadOlderMessages();
+        if (nextOffset >= Math.max(maxOffset - THREAD_MESSAGE_PREFETCH_ROWS, 0)) {
+          startLoadingOlderThreadMessages();
         }
         return;
       }
-      void loadOlderMessages();
+      startLoadingOlderThreadMessages();
     },
     scrollNewer: () =>
       setRowScrollOffset(current => Math.max(current - 1, 0)),
@@ -2537,31 +2657,6 @@ function MessageBodyLines({ text, width }: { text: string; width?: number }) {
               : ' '}
         </Text>
       ))}
-    </Box>
-  );
-}
-
-function ChannelMessageBlock({
-  message,
-  width,
-}: {
-  message: ChannelMessageItem;
-  width?: number;
-}) {
-  const body = message.text ?? message.error ?? 'Unable to read message.';
-  const safeWidth = width ? Math.max(1, width) : undefined;
-  const header = `From ${message.sender} · ${
-    message.createdAt ? formatTimestamp(message.createdAt) : 'time unavailable'
-  } · #${message.channelSeq}${message.status === 'failed' ? ' · verification failed' : ''}`;
-  return (
-    <Box key={message.id} flexDirection="column" marginBottom={1} width="100%">
-      <Text
-        color={message.status === 'failed' ? 'red' : 'gray'}
-        wrap="truncate"
-      >
-        {safeWidth ? truncateAndPadText(header, safeWidth) : header}
-      </Text>
-      <MessageBodyLines text={body} width={safeWidth} />
     </Box>
   );
 }
@@ -2997,6 +3092,7 @@ export function RootShell({
   const [channelMessagesState, setChannelMessagesState] = useState<ChannelMessagesPageState>(
     createInitialChannelMessagesState
   );
+  const [channelMessageRowScrollOffset, setChannelMessageRowScrollOffset] = useState(0);
   const [channelMembersState, setChannelMembersState] = useState<ChannelMembersPageState>(
     createInitialChannelMembersState
   );
@@ -3008,6 +3104,9 @@ export function RootShell({
   );
   const agentDiscoveryRequestRef = useRef(0);
   const channelMessagesRequestRef = useRef(0);
+  const channelMessagesStateRef = useRef<ChannelMessagesPageState>(channelMessagesState);
+  const visibleChannelMessageRowsRef = useRef<ChannelMessageRenderRow[]>([]);
+  const channelMessageMaxRowsRef = useRef(threadMessageMaxRows);
   const channelMembersRequestRef = useRef(0);
   const threadListPageRequestRef = useRef(0);
   const threadListPageStateRef = useRef<ThreadListPageState>(threadListPageState);
@@ -4020,12 +4119,36 @@ export function RootShell({
     ],
     [selectedChannel?.isAdmin, selectedChannelApprovals.length]
   );
-  const selectedChannelMessagePageIndex =
-    channelMessagesState.channelId === selectedChannel?.id ? channelMessagesState.pageIndex : 0;
   const selectedChannelMessageItems =
     channelMessagesState.channelId === selectedChannel?.id
       ? channelMessagesState.messages
       : [];
+  const selectedChannelMessageRows = useMemo(
+    () =>
+      buildChannelMessageRenderRows({
+        messages: selectedChannelMessageItems,
+        width: contentListWidth,
+      }),
+    [contentListWidth, selectedChannelMessageItems]
+  );
+  const channelMessageMaxRows = threadMessageMaxRows;
+  const channelMessageRowWindowEnd = Math.max(
+    selectedChannelMessageRows.length - channelMessageRowScrollOffset,
+    0
+  );
+  const channelMessageRowWindowStart = Math.max(
+    0,
+    channelMessageRowWindowEnd - channelMessageMaxRows
+  );
+  const visibleChannelMessageRows = selectedChannelMessageRows.slice(
+    channelMessageRowWindowStart,
+    channelMessageRowWindowEnd
+  );
+  const visibleChannelMessageIndexes = visibleChannelMessageRows.map(row => row.messageIndex);
+  const channelMessageWindowStart =
+    visibleChannelMessageIndexes.length > 0 ? Math.min(...visibleChannelMessageIndexes) : 0;
+  const channelMessageWindowEnd =
+    visibleChannelMessageIndexes.length > 0 ? Math.max(...visibleChannelMessageIndexes) + 1 : 0;
   const selectedChannelMemberItems =
     channelMembersState.channelId === selectedChannel?.id
       ? channelMembersState.members
@@ -4035,6 +4158,8 @@ export function RootShell({
     null;
   const selectedChannelMessagesLoading =
     channelMessagesState.channelId === selectedChannel?.id && channelMessagesState.loading;
+  const selectedChannelMessagesLoadingOlder =
+    channelMessagesState.channelId === selectedChannel?.id && channelMessagesState.loadingOlder;
   const selectedChannelMembersLoading =
     channelMembersState.channelId === selectedChannel?.id && channelMembersState.loading;
   const selectedChannelMessagesError =
@@ -4043,15 +4168,32 @@ export function RootShell({
       : null;
   const selectedChannelMembersError =
     channelMembersState.channelId === selectedChannel?.id ? channelMembersState.error : null;
-  const canPageChannelMessagesNewer = selectedChannelMessagePageIndex > 0;
   const canPageChannelMessagesOlder =
     selectedChannel !== null &&
+    channelMessagesState.channelId === selectedChannel.id &&
+    !channelMessagesState.olderExhausted &&
+    !channelMessagesState.loadingOlder &&
     selectedChannelMessageItems.length >= CHANNEL_MESSAGE_PAGE_SIZE;
+  const canScrollChannelMessagesNewer =
+    channelMessageRowWindowEnd < selectedChannelMessageRows.length;
+  const canScrollChannelMessagesOlder =
+    channelMessageRowWindowStart > 0 || canPageChannelMessagesOlder;
   const canPageChannelMembersNewer =
     channelMembersState.channelId === selectedChannel?.id && channelMembersState.pageIndex > 0;
   const canPageChannelMembersOlder =
     channelMembersState.channelId === selectedChannel?.id &&
     selectedChannelMemberItems.length >= CHANNEL_MEMBER_PAGE_SIZE;
+
+  useEffect(() => {
+    channelMessagesStateRef.current = channelMessagesState;
+    visibleChannelMessageRowsRef.current = visibleChannelMessageRows;
+    channelMessageMaxRowsRef.current = channelMessageMaxRows;
+  }, [channelMessageMaxRows, channelMessagesState, visibleChannelMessageRows]);
+
+  useEffect(() => {
+    const maxOffset = Math.max(selectedChannelMessageRows.length - channelMessageMaxRows, 0);
+    setChannelMessageRowScrollOffset(current => Math.min(current, maxOffset));
+  }, [channelMessageMaxRows, selectedChannelMessageRows.length]);
 
   useEffect(() => {
     if (!model) {
@@ -4431,53 +4573,96 @@ export function RootShell({
 
   const loadSelectedChannelMessages = async (params?: {
     beforeSeq?: string | null;
-    pageIndex?: number;
-    beforeSeqStack?: Array<string | null>;
+    preserveRowScroll?: boolean;
+    prependOlder?: boolean;
   }): Promise<void> => {
-    if (!selectedChannel || !model) {
+    if (!selectedChannel || !model || connectionState.mode !== 'ready' || !activeActorRow) {
       return;
     }
 
     const requestId = channelMessagesRequestRef.current + 1;
     channelMessagesRequestRef.current = requestId;
     const beforeSeq = params?.beforeSeq ?? null;
-    const beforeSeqStack = params?.beforeSeqStack ?? [beforeSeq];
-    const pageIndex = params?.pageIndex ?? Math.max(beforeSeqStack.length - 1, 0);
+    const loadingOlder = params?.prependOlder === true;
 
     setChannelMessagesState(current => ({
       ...current,
       channelId: selectedChannel.id,
       lastMessageSeq: selectedChannel.lastMessageSeq,
-      loading: true,
+      loading: loadingOlder ? current.loading : true,
+      loadingOlder: loadingOlder ? true : current.loadingOlder,
       error: null,
-      beforeSeqStack,
-      pageIndex,
     }));
 
     try {
-      const result = await readAuthenticatedChannelMessages({
-        profileName: options.profile,
-        actorSlug: model.activeInbox.slug,
-        slug: selectedChannel.slug,
-        beforeChannelSeq: beforeSeq ?? undefined,
-        limit: String(CHANNEL_MESSAGE_PAGE_SIZE),
-        reporter: silentReporter(),
+      const rows = await connectionState.conn.procedures.listChannelMessages({
+        agentDbId: activeActorRow.id,
+        channelId: BigInt(selectedChannel.id),
+        channelSlug: undefined,
+        beforeChannelSeq: beforeSeq === null ? undefined : BigInt(beforeSeq),
+        limit: BigInt(CHANNEL_MESSAGE_PAGE_SIZE),
       });
+      const sortedRows = [...rows].sort((left, right) => {
+        if (left.channelSeq < right.channelSeq) return -1;
+        if (left.channelSeq > right.channelSeq) return 1;
+        return Number(left.id - right.id);
+      });
+      const messages = await verifyChannelMessages(connectionState.conn, sortedRows);
 
       if (channelMessagesRequestRef.current !== requestId) {
         return;
       }
 
-      setChannelMessagesState({
-        channelId: selectedChannel.id,
-        lastMessageSeq: selectedChannel.lastMessageSeq,
-        messages: result.messages,
-        beforeSeqStack,
-        pageIndex,
-        loading: false,
-        error: null,
-        loaded: true,
+      const latestState = channelMessagesStateRef.current;
+      const currentMessages =
+        latestState.channelId === selectedChannel.id ? latestState.messages : [];
+      const mergedMessages = mergeChannelMessageItems(currentMessages, messages);
+      let anchoredRowScrollOffset: number | null = null;
+      const latestVisibleRows = visibleChannelMessageRowsRef.current;
+      const anchorRowKey = latestVisibleRows[0]?.key ?? null;
+      if (params?.prependOlder === true && anchorRowKey) {
+        const mergedRows = buildChannelMessageRenderRows({
+          messages: mergedMessages,
+          width: contentListWidth,
+        });
+        const anchorIndex = mergedRows.findIndex(row => row.key === anchorRowKey);
+        if (anchorIndex >= 0) {
+          const visibleRowCount = Math.max(
+            1,
+            latestVisibleRows.length || channelMessageMaxRowsRef.current
+          );
+          const desiredEnd = Math.min(mergedRows.length, anchorIndex + visibleRowCount);
+          anchoredRowScrollOffset = Math.max(mergedRows.length - desiredEnd, 0);
+        }
+      }
+
+      setChannelMessagesState(current => {
+        const fallbackMessages = current.channelId === selectedChannel.id ? current.messages : [];
+        const merged = mergeChannelMessageItems(fallbackMessages, messages);
+
+        return {
+          channelId: selectedChannel.id,
+          lastMessageSeq: selectedChannel.lastMessageSeq,
+          messages: merged,
+          beforeSeqStack: current.beforeSeqStack,
+          pageIndex: current.pageIndex,
+          olderExhausted:
+            params?.prependOlder === true && messages.length === 0
+              ? true
+              : current.olderExhausted,
+          loading: false,
+          loadingOlder: false,
+          error: null,
+          loaded: true,
+        };
       });
+      if (params?.prependOlder === true) {
+        if (anchoredRowScrollOffset !== null) {
+          setChannelMessageRowScrollOffset(anchoredRowScrollOffset);
+        }
+      } else if (params?.preserveRowScroll !== true) {
+        setChannelMessageRowScrollOffset(0);
+      }
     } catch (error) {
       if (channelMessagesRequestRef.current !== requestId) {
         return;
@@ -4487,6 +4672,7 @@ export function RootShell({
         channelId: selectedChannel.id,
         lastMessageSeq: selectedChannel.lastMessageSeq,
         loading: false,
+        loadingOlder: false,
         loaded: true,
         error: toCliError(error).message,
       }));
@@ -4497,23 +4683,11 @@ export function RootShell({
     if (!selectedChannel || channelMessagesState.loading) {
       return;
     }
-    const pageIndex =
-      channelMessagesState.channelId === selectedChannel.id ? channelMessagesState.pageIndex : 0;
-    const beforeSeqStack =
-      channelMessagesState.channelId === selectedChannel.id
-        ? channelMessagesState.beforeSeqStack
-        : [null];
 
     if (direction < 0) {
-      if (pageIndex <= 0) {
-        return;
-      }
-      const nextIndex = pageIndex - 1;
-      const nextBeforeSeq = beforeSeqStack[nextIndex] ?? null;
       await loadSelectedChannelMessages({
-        beforeSeq: nextBeforeSeq,
-        pageIndex: nextIndex,
-        beforeSeqStack,
+        beforeSeq: null,
+        preserveRowScroll: true,
       });
       return;
     }
@@ -4523,16 +4697,47 @@ export function RootShell({
       return;
     }
     const nextBeforeSeq = firstMessage.channelSeq;
-    const nextStack = beforeSeqStack.slice(
-      0,
-      pageIndex + 1
-    );
-    nextStack.push(nextBeforeSeq);
     await loadSelectedChannelMessages({
       beforeSeq: nextBeforeSeq,
-      pageIndex: nextStack.length - 1,
-      beforeSeqStack: nextStack,
+      preserveRowScroll: true,
+      prependOlder: true,
     });
+  };
+
+  const startLoadingOlderChannelMessages = (): void => {
+    if (!canPageChannelMessagesOlder) {
+      return;
+    }
+    const firstMessage = selectedChannelMessageItems[0] ?? null;
+    if (!firstMessage) {
+      return;
+    }
+    void loadSelectedChannelMessages({
+      beforeSeq: firstMessage.channelSeq,
+      preserveRowScroll: true,
+      prependOlder: true,
+    });
+  };
+
+  const scrollSelectedChannelMessagesOlder = async (): Promise<void> => {
+    const maxOffset = Math.max(selectedChannelMessageRows.length - channelMessageMaxRows, 0);
+    if (channelMessageRowScrollOffset < maxOffset) {
+      const nextOffset = Math.min(channelMessageRowScrollOffset + 1, maxOffset);
+      setChannelMessageRowScrollOffset(nextOffset);
+      if (nextOffset >= Math.max(maxOffset - CHANNEL_MESSAGE_PREFETCH_ROWS, 0)) {
+        startLoadingOlderChannelMessages();
+      }
+      return;
+    }
+    if (canPageChannelMessagesOlder) {
+      startLoadingOlderChannelMessages();
+    }
+  };
+
+  const scrollSelectedChannelMessagesNewer = async (): Promise<void> => {
+    if (channelMessageRowScrollOffset > 0) {
+      setChannelMessageRowScrollOffset(current => Math.max(current - 1, 0));
+    }
   };
 
   const loadSelectedChannelMembers = async (params?: {
@@ -4540,7 +4745,7 @@ export function RootShell({
     pageIndex?: number;
     afterMemberIdStack?: Array<string | null>;
   }): Promise<void> => {
-    if (!selectedChannel || !model) {
+    if (!selectedChannel || !model || connectionState.mode !== 'ready' || !activeActorRow) {
       return;
     }
 
@@ -4560,13 +4765,12 @@ export function RootShell({
     }));
 
     try {
-      const result = await listChannelMembers({
-        profileName: options.profile,
-        actorSlug: model.activeInbox.slug,
-        slug: selectedChannel.slug,
-        afterMemberId: afterMemberId ?? undefined,
-        limit: String(CHANNEL_MEMBER_PAGE_SIZE),
-        reporter: silentReporter(),
+      const rows = await connectionState.conn.procedures.listChannelMembers({
+        agentDbId: activeActorRow.id,
+        channelId: BigInt(selectedChannel.id),
+        channelSlug: undefined,
+        afterMemberId: afterMemberId === null ? undefined : BigInt(afterMemberId),
+        limit: BigInt(CHANNEL_MEMBER_PAGE_SIZE),
       });
 
       if (channelMembersRequestRef.current !== requestId) {
@@ -4575,7 +4779,7 @@ export function RootShell({
 
       setChannelMembersState({
         channelId: selectedChannel.id,
-        members: result.members,
+        members: rows.map(channelMemberRowToListItem),
         afterMemberIdStack,
         pageIndex,
         loading: false,
@@ -4657,15 +4861,13 @@ export function RootShell({
     }
     void loadSelectedChannelMessages({
       beforeSeq: null,
-      pageIndex: 0,
-      beforeSeqStack: [null],
+      preserveRowScroll: stateMatchesChannel && channelMessagesState.loaded,
     });
   }, [
     channelMessagesState.channelId,
     channelMessagesState.lastMessageSeq,
     channelMessagesState.loaded,
     channelMessagesState.loading,
-    channelMessagesState.pageIndex,
     channelMode,
     channelTab,
     route.type,
@@ -5364,8 +5566,6 @@ export function RootShell({
           result => {
             void loadSelectedChannelMessages({
               beforeSeq: null,
-              pageIndex: 0,
-              beforeSeqStack: [null],
             });
             setTask(current => ({
               ...current,
@@ -7236,11 +7436,19 @@ export function RootShell({
 
       if (channelTab === 'messages') {
         if (input === '[' || key.upArrow) {
-          await pageSelectedChannelMessages(key.upArrow ? 1 : -1);
+          if (key.upArrow) {
+            await scrollSelectedChannelMessagesOlder();
+          } else {
+            await pageSelectedChannelMessages(-1);
+          }
           return;
         }
         if (input === ']' || key.downArrow) {
-          await pageSelectedChannelMessages(key.downArrow ? -1 : 1);
+          if (key.downArrow) {
+            await scrollSelectedChannelMessagesNewer();
+          } else {
+            await pageSelectedChannelMessages(1);
+          }
           return;
         }
         if (lowerInput === 's' && canSendSelectedChannel) {
@@ -7916,8 +8124,8 @@ export function RootShell({
           ...(channelTabs.length > 1 ? [{ key: '←/→', label: 'switch tab' }] : []),
           ...(selectedChannel?.isAdmin ? [{ key: 'E', label: 'settings' }] : []),
           ...(canSendSelectedChannel ? [{ key: 'S', label: 'send text' }] : []),
-          ...(canPageChannelMessagesNewer || canPageChannelMessagesOlder
-            ? [{ key: '↑/↓', label: 'page messages' }]
+          ...(canScrollChannelMessagesNewer || canScrollChannelMessagesOlder
+            ? [{ key: '↑/↓', label: 'scroll messages' }]
             : []),
           { key: 'Esc', label: 'overview' },
           { key: 'Tab', label: 'sidebar' },
@@ -8280,12 +8488,26 @@ export function RootShell({
                           width={contentListWidth}
                           color="gray"
                         />
-                        {threadMessagesError ? <Text color="red">✗ {threadMessagesError}</Text> : null}
+                        {threadMessagesError ? (
+                          <FixedLine
+                            text={`✗ ${threadMessagesError}`}
+                            width={contentListWidth}
+                            color="red"
+                          />
+                        ) : null}
                         {threadMessagesLoading ? (
-                          <Text color="gray">Loading messages...</Text>
+                          <FixedLine
+                            text="Loading messages..."
+                            width={contentListWidth}
+                            color="gray"
+                          />
                         ) : null}
                         {olderThreadMessagesLoading ? (
-                          <Text color="gray">Loading older messages...</Text>
+                          <FixedLine
+                            text="Loading older messages..."
+                            width={contentListWidth}
+                            color="gray"
+                          />
                         ) : null}
                         {threadMessageRows.length > 0 ? (
                           threadMessageRows.map(row => (
@@ -8299,7 +8521,11 @@ export function RootShell({
                             </Text>
                           ))
                         ) : threadMessagesLoading ? null : (
-                          <Text color="gray">No visible messages yet.</Text>
+                          <FixedLine
+                            text="No visible messages yet."
+                            width={contentListWidth}
+                            color="gray"
+                          />
                         )}
                         <Box marginTop={1} flexDirection="column">
                           <Text color={inboxFocus === 'composer' ? 'cyan' : 'gray'}>
@@ -8470,29 +8696,61 @@ export function RootShell({
                 {channelTab === 'messages' ? (
                   <Box marginTop={1} flexDirection="column">
                     <FixedLine
-                      text={`Channel messages · page ${(selectedChannelMessagePageIndex + 1).toString()}${
+                      text={`Channel messages · ${
+                        selectedChannelMessageItems.length === 0
+                          ? '0-0'
+                          : `${(channelMessageWindowStart + 1).toString()}-${channelMessageWindowEnd.toString()}`
+                      } of ${selectedChannelMessageItems.length.toString()} loaded${
+                        selectedChannelMessageRows.length > channelMessageMaxRows
+                          ? ` · rows ${(channelMessageRowWindowStart + 1).toString()}-${channelMessageRowWindowEnd.toString()} of ${selectedChannelMessageRows.length.toString()}`
+                          : ''
+                      }${
                         selectedChannelMessagesLoading ? ' · loading' : ''
-                      }${canPageChannelMessagesNewer ? ' · newer available' : ''}${
-                        canPageChannelMessagesOlder ? ' · older available' : ''
+                      }${
+                        selectedChannelMessagesLoadingOlder ? ' · loading older' : ''
+                      }${canScrollChannelMessagesNewer ? ' · newer available' : ''}${
+                        canScrollChannelMessagesOlder ? ' · older available' : ''
                       }`}
                       width={contentListWidth}
                       color="gray"
                     />
                     {selectedChannelMessagesError ? (
-                      <Text color="red">✗ {selectedChannelMessagesError}</Text>
+                      <FixedLine
+                        text={`✗ ${selectedChannelMessagesError}`}
+                        width={contentListWidth}
+                        color="red"
+                      />
                     ) : null}
-                    {selectedChannelMessageItems.length > 0 ? (
-                      selectedChannelMessageItems.map(message => (
-                        <ChannelMessageBlock
-                          key={message.id}
-                          message={message}
-                          width={contentListWidth}
-                        />
+                    {selectedChannelMessagesLoadingOlder ? (
+                      <FixedLine
+                        text="Loading more messages..."
+                        width={contentListWidth}
+                        color="gray"
+                      />
+                    ) : null}
+                    {visibleChannelMessageRows.length > 0 ? (
+                      visibleChannelMessageRows.map(row => (
+                        <Text
+                          key={row.key}
+                          color={row.color}
+                          bold={row.bold}
+                          wrap="truncate"
+                        >
+                          {row.text}
+                        </Text>
                       ))
                     ) : selectedChannelMessagesLoading ? (
-                      <Text color="gray">Loading channel messages...</Text>
+                      <FixedLine
+                        text="Loading channel messages..."
+                        width={contentListWidth}
+                        color="gray"
+                      />
                     ) : (
-                      <Text color="gray">No visible channel messages yet.</Text>
+                      <FixedLine
+                        text="No visible channel messages yet."
+                        width={contentListWidth}
+                        color="gray"
+                      />
                     )}
                   </Box>
                 ) : null}
