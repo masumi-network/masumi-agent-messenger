@@ -641,6 +641,7 @@ async function waitForSentThreadMessage(params: {
   conn: DbConnection;
   actorId: bigint;
   threadId: bigint;
+  threadSeq: bigint;
   senderActorId: bigint;
   senderSeq: bigint;
   timeoutMs?: number;
@@ -651,12 +652,13 @@ async function waitForSentThreadMessage(params: {
     const page = await params.conn.procedures.listThreadMessages({
       agentDbId: params.actorId,
       threadId: params.threadId,
-      beforeThreadSeq: undefined,
-      limit: 25n,
+      beforeThreadSeq: params.threadSeq + 1n,
+      limit: 1n,
     });
     const message = page.messages.find(row => {
       return (
         row.threadId === params.threadId &&
+        row.threadSeq === params.threadSeq &&
         row.senderAgentDbId === params.senderActorId &&
         row.senderSeq === params.senderSeq
       );
@@ -801,6 +803,7 @@ async function sendMessageToThreadCore(
         conn,
         actorId: ownActor.id,
         threadId: requestedThreadId,
+        threadSeq: expectedThreadSeq,
         senderActorId: ownActor.id,
         senderSeq,
       })
@@ -867,12 +870,6 @@ async function readThreadSendSnapshot(params: {
     agentDbId: ownActor.id,
     threadId: params.threadId,
   });
-  const messagePage = await params.conn.procedures.listThreadMessages({
-    agentDbId: ownActor.id,
-    threadId: params.threadId,
-    beforeThreadSeq: undefined,
-    limit: 25n,
-  });
   const thread = threadPage.threads.find(row => row.id === params.threadId);
   const senderParticipant = threadPage.participants.find(participant => {
     return participant.threadId === params.threadId && participant.agentDbId === ownActor.id;
@@ -900,11 +897,11 @@ async function readThreadSendSnapshot(params: {
     actors: mergeRowsById([ownActor], threadPage.actors),
     participants: threadPage.participants,
     readStates: threadPage.readStates,
-    secretEnvelopes: mergeRowsById(messagePage.secretEnvelopes, currentSecretEnvelopes),
+    secretEnvelopes: currentSecretEnvelopes,
     threads: threadPage.threads,
     contactRequests: [],
     threadInvites: [],
-    messages: messagePage.messages,
+    messages: [],
   };
 }
 
@@ -1491,6 +1488,7 @@ export async function sendMessageToSlug(params: {
       conn,
       actorId: ownActor.id,
       threadId: thread.id,
+      threadSeq: thread.lastMessageSeq + 1n,
       senderActorId: ownActor.id,
       senderSeq: senderParticipant.lastSentSeq + 1n,
     });

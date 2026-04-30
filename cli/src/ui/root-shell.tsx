@@ -28,6 +28,7 @@ import {
   subscribeShellTables,
   type ShellRows,
 } from '../services/spacetimedb';
+import { withExistingAuthenticatedSpacetimeRuntime } from '../services/spacetime-runtime';
 import {
   isDeregisteringOrDeregisteredInboxAgentState,
   isFailedRegistrationInboxAgentState,
@@ -143,6 +144,93 @@ const SHELL_LEASE_REFRESH_LEAD_MS = 30_000;
 const SHELL_LEASE_REFRESH_MIN_DELAY_MS = 5_000;
 const SHELL_LEASE_REFRESH_FALLBACK_DELAY_MS = 10_000;
 const SHELL_LEASE_LOST_DEBOUNCE_MS = 1500;
+type LoadingSceneLine = {
+  text: string;
+  color?: string;
+  dim?: boolean;
+  bold?: boolean;
+};
+
+const SHELL_LOADING_FRAME_COUNT = 48;
+const LOADING_ORBIT_PATTERN = [
+  '·', ' ', ' ', '˚', ' ', ' ', '✦', ' ', ' ', '.', ' ', ' ', '✧', ' ', ' ',
+] as const;
+const LOADING_PULSE_PATTERN = [
+  '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '▇', '▆', '▅', '▄', '▃', '▂',
+] as const;
+const LOADING_TRANSIT_LEFT = ' agent ⟦';
+const LOADING_TRANSIT_RIGHT = '⟧ spacetime ';
+
+function buildLoadingOrbitLine(frame: number, width: number): string {
+  const len = LOADING_ORBIT_PATTERN.length;
+  let out = '';
+  for (let i = 0; i < width; i += 1) {
+    out += LOADING_ORBIT_PATTERN[(i + frame) % len];
+  }
+  return out;
+}
+
+function buildLoadingPulseLine(frame: number, width: number): string {
+  const len = LOADING_PULSE_PATTERN.length;
+  let out = '';
+  for (let i = 0; i < width; i += 1) {
+    const idx = ((i - frame) % len + len) % len;
+    out += LOADING_PULSE_PATTERN[idx];
+  }
+  return out;
+}
+
+function buildLoadingTransitLine(frame: number, width: number): string {
+  const left = LOADING_TRANSIT_LEFT;
+  const right = LOADING_TRANSIT_RIGHT;
+  const corridorWidth = Math.max(7, width - left.length - right.length);
+  const cycle = Math.max(1, (corridorWidth - 1) * 2);
+  const phase = frame % cycle;
+  const pos = phase < corridorWidth ? phase : cycle - phase;
+  let corridor = '';
+  for (let i = 0; i < corridorWidth; i += 1) {
+    if (i === pos) {
+      corridor += '◆';
+    } else if (i === pos - 1 || i === pos + 1) {
+      corridor += '·';
+    } else {
+      corridor += '─';
+    }
+  }
+  return `${left}${corridor}${right}`;
+}
+
+function buildLoadingScene(frame: number, width: number): readonly LoadingSceneLine[] {
+  const safeWidth = Math.max(24, width);
+  return [
+    { text: buildLoadingOrbitLine(frame, safeWidth), color: 'gray', dim: true },
+    { text: buildLoadingTransitLine(frame, safeWidth), color: 'cyan', bold: true },
+    { text: buildLoadingPulseLine(frame, safeWidth), color: 'magenta' },
+  ];
+}
+const SHELL_LOADING_STEPS = [
+  {
+    message: 'Connecting to SpacetimeDB...',
+    detail: 'Opening the realtime inbox line.',
+  },
+  {
+    message: 'Authenticating session...',
+    detail: 'Checking your agent lease and profile.',
+  },
+  {
+    message: 'Subscribing to live tables...',
+    detail: 'Listening for threads, channels, and devices.',
+  },
+  {
+    message: 'Syncing inbox state...',
+    detail: 'Gathering agents, unread counts, and approvals.',
+  },
+  {
+    message: 'Loading terminal UI...',
+    detail: 'Arranging panels, shortcuts, and status bars.',
+  },
+] as const;
+const SHELL_LOADING_STEP_FRAME_COUNT = 4;
 
 const SIDEBAR_NAV_ITEMS = ['inboxes', 'channels', 'agents', 'discover', 'account'] as const;
 type SidebarNavItem = (typeof SIDEBAR_NAV_ITEMS)[number];
@@ -153,6 +241,32 @@ function toSidebarSelectionIndex(routeType: ShellRoute['type'] | undefined): num
   }
   const index = SIDEBAR_NAV_ITEMS.indexOf(routeType as SidebarNavItem);
   return index >= 0 ? index : 0;
+}
+
+function LoadingShellAnimation(params: {
+  scene: readonly LoadingSceneLine[];
+  message: string;
+  detail?: string;
+  width: number;
+}) {
+  return (
+    <Box flexDirection="column">
+      {params.scene.map((line, index) => (
+        <FixedLine
+          key={index.toString()}
+          text={line.text}
+          width={params.width}
+          color={line.color}
+          bold={line.bold}
+          dimColor={line.dim}
+        />
+      ))}
+      <FixedLine text={params.message} width={params.width} color="yellow" />
+      {params.detail ? (
+        <FixedLine text={params.detail} width={params.width} color="gray" />
+      ) : null}
+    </Box>
+  );
 }
 
 export type RootShellSnapshot = {
@@ -3099,6 +3213,7 @@ export function RootShell({
   const [threadListPageState, setThreadListPageState] = useState<ThreadListPageState>(() =>
     createInitialThreadListPageState()
   );
+  const [loadingFrameIndex, setLoadingFrameIndex] = useState(0);
   const [inboxSectionCountLabels, setInboxSectionCountLabels] = useState<InboxSectionCountLabels>(
     createInitialInboxSectionCountLabels
   );
@@ -3121,6 +3236,10 @@ export function RootShell({
     connectionState.mode === 'ready'
       ? normalizeEmail(connectionState.auth.claims.email ?? '')
       : '';
+  const loadingStepIndex =
+    Math.floor(loadingFrameIndex / SHELL_LOADING_STEP_FRAME_COUNT) %
+    SHELL_LOADING_STEPS.length;
+  const loadingStep = SHELL_LOADING_STEPS[loadingStepIndex] ?? SHELL_LOADING_STEPS[0];
 
   useEffect(() => {
     if (connectionState.mode !== 'ready' || !normalizedEmail) {
@@ -3356,6 +3475,25 @@ export function RootShell({
     securityState,
     shellRows,
   ]);
+
+  useEffect(() => {
+    if (connectionState.mode !== 'loading' && model) {
+      setLoadingFrameIndex(0);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setLoadingFrameIndex(
+        current =>
+          (current + 1) %
+          (SHELL_LOADING_FRAME_COUNT * SHELL_LOADING_STEPS.length)
+      );
+    }, 140);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [connectionState.mode, model]);
 
   useEffect(() => {
     if (!model) {
@@ -4277,13 +4415,15 @@ export function RootShell({
 
         try {
           if (currentTaskField.lookup?.mode === 'saas_agent') {
-            const result = await discoverAgents({
-              profileName: options.profile,
-              reporter: silentReporter(),
-              query,
-              limit: 6,
-              actorSlug: model?.activeInbox.slug ?? null,
-            });
+            const result = await runWithShellConnection(() =>
+              discoverAgents({
+                profileName: options.profile,
+                reporter: silentReporter(),
+                query,
+                limit: 6,
+                actorSlug: model?.activeInbox.slug ?? null,
+              })
+            );
 
             if (cancelled) {
               return;
@@ -4299,12 +4439,14 @@ export function RootShell({
             return;
           }
 
-          const result = await lookupInboxes({
-            profileName: options.profile,
-            query,
-            limit: 6,
-            reporter: silentReporter(),
-          });
+          const result = await runWithShellConnection(() =>
+            lookupInboxes({
+              profileName: options.profile,
+              query,
+              limit: 6,
+              reporter: silentReporter(),
+            })
+          );
 
           if (cancelled) {
             return;
@@ -4392,6 +4534,24 @@ export function RootShell({
   );
   void snapshot;
 
+  const runWithShellConnection = async <T,>(
+    run: () => Promise<T>,
+    reporter: TaskReporter = silentReporter()
+  ): Promise<T> => {
+    if (connectionState.mode !== 'ready') {
+      return await run();
+    }
+
+    return await withExistingAuthenticatedSpacetimeRuntime(
+      {
+        conn: connectionState.conn,
+        auth: connectionState.auth,
+        reporter,
+      },
+      () => run()
+    );
+  };
+
   const loadAgentDiscovery = async (params?: {
     query?: string;
     page?: number;
@@ -4416,14 +4576,16 @@ export function RootShell({
     }));
 
     try {
-      const result = await discoverAgents({
-        profileName: options.profile,
-        reporter: silentReporter(),
-        query: query || undefined,
-        limit: agentDiscovery.take,
-        page,
-        actorSlug: model?.activeInbox.slug ?? null,
-      });
+      const result = await runWithShellConnection(() =>
+        discoverAgents({
+          profileName: options.profile,
+          reporter: silentReporter(),
+          query: query || undefined,
+          limit: agentDiscovery.take,
+          page,
+          actorSlug: model?.activeInbox.slug ?? null,
+        })
+      );
 
       if (agentDiscoveryRequestRef.current !== requestId) {
         return;
@@ -4551,7 +4713,7 @@ export function RootShell({
     });
 
     try {
-      const result = await runner(reporter);
+      const result = await runWithShellConnection(() => runner(reporter), reporter);
       setTask(current => ({
         ...current,
         busy: false,
@@ -5816,12 +5978,14 @@ export function RootShell({
     });
 
     try {
-      const detail = await showDiscoveredAgent({
-        profileName: options.profile,
-        reporter: silentReporter(),
-        identifier: slug,
-        actorSlug: model?.activeInbox.slug ?? null,
-      });
+      const detail = await runWithShellConnection(() =>
+        showDiscoveredAgent({
+          profileName: options.profile,
+          reporter: silentReporter(),
+          identifier: slug,
+          actorSlug: model?.activeInbox.slug ?? null,
+        })
+      );
       setDiscoverDetail({
         status: 'ready',
         slug,
@@ -7750,6 +7914,7 @@ export function RootShell({
   const headerRuleWidth = Math.max(0, Math.min(terminalSize.columns - 22, 58));
   const fullRuleWidth = Math.max(0, Math.min(terminalSize.columns, 80));
   const fullContentWidth = Math.max(1, fullRuleWidth);
+  const loadingScene = buildLoadingScene(loadingFrameIndex, fullContentWidth);
   const activePanelWidth = model ? contentListWidth : fullContentWidth;
 
   const contentHeader = (
@@ -8196,6 +8361,17 @@ export function RootShell({
   if (connectionState.mode === 'loading') {
     return (
       <Box flexDirection="column" height={terminalSize.rows} overflow="hidden">
+        <LoadingShellAnimation
+          scene={loadingScene}
+          message={
+            connectionLabel === 'reconnecting' && loadingStepIndex === 0
+              ? 'Reconnecting to SpacetimeDB...'
+              : loadingStep.message
+          }
+          detail={loadingStep.detail}
+          width={fullContentWidth}
+        />
+        <Text> </Text>
         {statusBar}
         <ModeBar mode={footerMode} width={fullContentWidth} />
       </Box>
@@ -8263,7 +8439,13 @@ export function RootShell({
 
     return (
       <Box flexDirection="column" height={terminalSize.rows} overflow="hidden">
-        <Text color="yellow">Loading shell state...</Text>
+        <LoadingShellAnimation
+          scene={loadingScene}
+          message={loadingStep.message}
+          detail={loadingStep.detail}
+          width={fullContentWidth}
+        />
+        <Text> </Text>
         {statusBar}
         <ModeBar mode={footerMode} width={fullContentWidth} />
       </Box>

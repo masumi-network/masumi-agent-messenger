@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { tables, type DbConnection, type SubscriptionHandle } from '../../../webapp/src/module_bindings';
 import {
   buildOwnActorIds,
@@ -37,6 +38,17 @@ type ConnectionResult = {
   conn: DbConnection;
   identityHex: string;
 };
+
+export type BorrowedAuthenticatedConnection = {
+  conn: DbConnection;
+  host: string;
+  databaseName: string;
+  sessionToken: string;
+  identityHex?: string;
+};
+
+const borrowedAuthenticatedConnection =
+  new AsyncLocalStorage<BorrowedAuthenticatedConnection>();
 
 export type ShellRows = {
   inboxes: VisibleInboxRow[];
@@ -225,6 +237,20 @@ export async function connectAuthenticated(params: {
   sessionToken: string;
   onDisconnect?: (error: Error | undefined) => void;
 }): Promise<ConnectionResult> {
+  const borrowed = borrowedAuthenticatedConnection.getStore();
+  if (
+    borrowed &&
+    borrowed.host === params.host &&
+    borrowed.databaseName === params.databaseName &&
+    borrowed.sessionToken === params.sessionToken
+  ) {
+    await refreshInboxAuthLeaseIfBound(borrowed.conn);
+    return {
+      conn: borrowed.conn,
+      identityHex: borrowed.identityHex ?? '',
+    };
+  }
+
   return new Promise((resolve, reject) => {
     let settled = false;
     const settleResolve = (value: ConnectionResult) => {
@@ -306,6 +332,13 @@ export async function connectAuthenticated(params: {
       })
       .build();
   });
+}
+
+export async function withExistingAuthenticatedConnection<Result>(
+  params: BorrowedAuthenticatedConnection,
+  run: () => Promise<Result>
+): Promise<Result> {
+  return await borrowedAuthenticatedConnection.run(params, run);
 }
 
 export async function connectAnonymous(params: {
@@ -894,6 +927,11 @@ export async function waitForBootstrapRows(params: {
 }
 
 export function disconnectConnection(conn: DbConnection): void {
+  const borrowed = borrowedAuthenticatedConnection.getStore();
+  if (borrowed?.conn === conn) {
+    return;
+  }
+
   releaseMessageTablesSubscription(conn);
   conn.disconnect();
 }
