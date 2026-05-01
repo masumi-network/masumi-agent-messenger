@@ -416,23 +416,23 @@ function insertEncryptedMessageIntoThread(
     throw new SenderError('signingKeyVersion must match the sender current signing key version');
   }
 
-  // senderSeq is deprecated and no longer enforced. Replay protection comes
-  // from a per-sender uniqueness check on senderMessageId. Sentinel values
-  // (`0n` / `1n`) mark legacy rows that predate this column and are skipped
-  // so they do not collide with each other.
-  if (params.senderMessageId !== 0n && params.senderMessageId !== 1n) {
-    // Array.from fully drains the generator so its `using` cleanup runs.
-    // Calling `.next()` once and dropping the generator leaks the iterator
-    // handle and surfaces as a fatal reducer error.
-    const existing = Array.from(
-      ctx.db.message.message_sender_agent_db_id_sender_message_id.filter([
-        params.senderActor.id,
-        params.senderMessageId,
-      ])
-    );
-    if (existing.length > 0) {
-      throw new SenderError('senderMessageId has already been used by this sender');
-    }
+  // senderSeq is deprecated and no longer enforced. Replay protection now
+  // lives on senderMessageId. `0n` and `1n` are reserved sentinel values
+  // for legacy rows that predate this column; clients must supply a
+  // randomly-generated value outside that range, otherwise an attacker
+  // could replay legacy-signed messages by claiming the sentinel and
+  // bypassing the uniqueness check.
+  if (params.senderMessageId === 0n || params.senderMessageId === 1n) {
+    throw new SenderError('senderMessageId 0 and 1 are reserved');
+  }
+  const existingSenderMessage = Array.from(
+    ctx.db.message.message_sender_agent_db_id_sender_message_id.filter([
+      params.senderActor.id,
+      params.senderMessageId,
+    ])
+  );
+  if (existingSenderMessage.length > 0) {
+    throw new SenderError('senderMessageId has already been used by this sender');
   }
 
   if (params.replyToMessageId !== undefined) {
