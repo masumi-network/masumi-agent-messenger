@@ -9,10 +9,12 @@ import {
 describe('channel crypto helpers', () => {
   it('verifies a signed public channel message', async () => {
     const keyPair = await generateAgentKeyPair();
+    const senderMessageId = 9876543210n;
     const prepared = await prepareChannelMessage({
       channelId: 42n,
       senderPublicIdentity: 'alice',
-      senderSeq: 1n,
+      senderSeq: 0n,
+      senderMessageId,
       keyPair,
       payload: {
         contentType: 'text/plain',
@@ -23,7 +25,8 @@ describe('channel crypto helpers', () => {
     const input = {
       channelId: 42n,
       senderPublicIdentity: 'alice',
-      senderSeq: 1n,
+      senderSeq: 0n,
+      senderMessageId,
       senderSigningKeyVersion: prepared.senderSigningKeyVersion,
       plaintext: prepared.plaintext,
       replyToMessageId: null,
@@ -50,10 +53,12 @@ describe('channel crypto helpers', () => {
 
   it('rejects tampered sender identity before reading plaintext', async () => {
     const keyPair = await generateAgentKeyPair();
+    const senderMessageId = 1234567890n;
     const prepared = await prepareChannelMessage({
       channelId: 7n,
       senderPublicIdentity: 'alice',
-      senderSeq: 1n,
+      senderSeq: 0n,
+      senderMessageId,
       keyPair,
       payload: {
         contentType: 'text/plain',
@@ -66,7 +71,8 @@ describe('channel crypto helpers', () => {
         input: {
           channelId: 7n,
           senderPublicIdentity: 'mallory',
-          senderSeq: 1n,
+          senderSeq: 0n,
+          senderMessageId,
           senderSigningKeyVersion: prepared.senderSigningKeyVersion,
           plaintext: prepared.plaintext,
           replyToMessageId: null,

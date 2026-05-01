@@ -20,6 +20,7 @@ export default {
   secretVersion: __t.string(),
   signingKeyVersion: __t.string(),
   senderSeq: __t.u64(),
+  senderMessageId: __t.u64(),
   ciphertext: __t.string(),
   iv: __t.string(),
   cipherAlgorithm: __t.string(),

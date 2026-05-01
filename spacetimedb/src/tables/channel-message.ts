@@ -20,6 +20,14 @@ export const channelMessageTable = table(
           algorithm: 'btree',
           columns: ['channelId', 'channelSeq'],
         },
+        {
+          // Used by sendChannelMessage to reject replays of the same
+          // (sender, senderMessageId) pair. Not unique — legacy rows share
+          // the sentinel value; the reducer skips the check for sentinels.
+          accessor: 'channel_message_sender_agent_db_id_sender_message_id',
+          algorithm: 'btree',
+          columns: ['senderAgentDbId', 'senderMessageId'],
+        },
       ],
     },
     {
@@ -36,5 +44,6 @@ export const channelMessageTable = table(
       replyToMessageId: t.u64().optional(),
       createdAt: t.timestamp(),
       senderSigningPublicKey: t.string().default(LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY),
+      senderMessageId: t.u64().default(1n),
     }
 );

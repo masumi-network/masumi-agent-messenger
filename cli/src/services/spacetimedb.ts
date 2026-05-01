@@ -98,7 +98,10 @@ const SHELL_VISIBLE_QUERIES = [
   limitSubscription(tables.visibleAgents, 'visibleAgents'),
   limitSubscription(tables.visibleThreadParticipants, 'visibleThreadParticipants'),
   limitSubscription(tables.visibleThreadReadStates, 'visibleThreadReadStates'),
-  limitSubscription(tables.visibleThreadSecretEnvelopes, 'visibleThreadSecretEnvelopes'),
+  // visibleThreadSecretEnvelopes is intentionally NOT subscribed here. The
+  // view recomputes thread × messages × envelopes on every subscribe; TMUI
+  // fetches envelopes per page via `listThreadMessages` and per-rotation via
+  // `listThreadSecretEnvelopes` instead.
   limitSubscription(tables.visibleThreads, 'visibleThreads'),
   limitSubscription(tables.visibleContactRequests, 'visibleContactRequests'),
   limitSubscription(tables.visibleThreadInvites, 'visibleThreadInvites'),
@@ -116,7 +119,6 @@ const SHELL_TABLE_ACCESSORS = [
   'visibleAgents',
   'visibleThreadParticipants',
   'visibleThreadReadStates',
-  'visibleThreadSecretEnvelopes',
   'visibleThreads',
   'visibleContactRequests',
   'visibleThreadInvites',
@@ -422,7 +424,12 @@ export async function subscribeMessageTables(conn: DbConnection): Promise<Subscr
         limitSubscription(tables.visibleAgents, 'visibleAgents'),
         limitSubscription(tables.visibleThreadParticipants, 'visibleThreadParticipants'),
         limitSubscription(tables.visibleThreadReadStates, 'visibleThreadReadStates'),
-        limitSubscription(tables.visibleThreadSecretEnvelopes, 'visibleThreadSecretEnvelopes'),
+        // visibleThreadSecretEnvelopes is intentionally NOT subscribed here.
+        // The view recomputes thread × messages × envelopes on every subscribe
+        // and was the source of the bytes-scanned spike on send. Envelope
+        // rows are fetched per use via `listThreadSecretEnvelopes`
+        // (rotation check on send) or returned per page by
+        // `listThreadMessages` (display / decrypt).
         limitSubscription(tables.visibleThreads, 'visibleThreads'),
         limitSubscription(tables.visibleContactRequests, 'visibleContactRequests'),
         limitSubscription(tables.visibleThreadInvites, 'visibleThreadInvites'),
@@ -570,9 +577,10 @@ export function readMessageRows(conn: DbConnection): {
       conn.db.visibleThreadParticipants.iter()
     ) as VisibleThreadParticipantRow[],
     readStates: Array.from(conn.db.visibleThreadReadStates.iter()) as VisibleThreadReadStateRow[],
-    secretEnvelopes: Array.from(
-      conn.db.visibleThreadSecretEnvelopes.iter()
-    ) as VisibleThreadSecretEnvelopeRow[],
+    // Envelopes are no longer in the global subscription. Callers that need
+    // them fetch via `listThreadSecretEnvelopes` (rotation check) or
+    // `listThreadMessages` page responses (display / decrypt).
+    secretEnvelopes: [],
     threads: Array.from(conn.db.visibleThreads.iter()) as VisibleThreadRow[],
     contactRequests: Array.from(
       conn.db.visibleContactRequests.iter()
@@ -856,9 +864,10 @@ export function readShellRows(conn: DbConnection): ShellRows {
       conn.db.visibleThreadParticipants.iter()
     ) as VisibleThreadParticipantRow[],
     readStates: Array.from(conn.db.visibleThreadReadStates.iter()) as VisibleThreadReadStateRow[],
-    secretEnvelopes: Array.from(
-      conn.db.visibleThreadSecretEnvelopes.iter()
-    ) as VisibleThreadSecretEnvelopeRow[],
+    // Envelopes are no longer subscribed globally; consumers fetch them
+    // per-thread via `listThreadSecretEnvelopes` or via `listThreadMessages`
+    // page responses on demand.
+    secretEnvelopes: [],
     threads: [],
     threadSignals: Array.from(conn.db.visibleThreads.iter()) as VisibleThreadRow[],
     contactRequests: contact.contactRequests,

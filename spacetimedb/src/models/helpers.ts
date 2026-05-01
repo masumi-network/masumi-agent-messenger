@@ -1,5 +1,32 @@
 import { SenderError } from 'spacetimedb/server';
 import { ScheduleAt, Timestamp } from 'spacetimedb';
+
+// Workaround for a SpacetimeDB v2.1 autoinc-counter bug observed on this
+// database where some tables' counters allocate an id that already has a
+// row, causing `id: 0n` inserts to throw `UniqueAlreadyExists` on the PK.
+// A failed insert poisons the reducer's txn buffer so subsequent inserts in
+// the same call also fail. Use this helper to allocate a fresh id via the
+// host RNG and a PK find-walk before any at-risk insert.
+export function allocFreshId(
+  table: { id: { find: (id: bigint) => unknown } },
+  random: { fill: (buf: BigUint64Array) => BigUint64Array },
+  label: string
+): bigint {
+  const buf = new BigUint64Array(1);
+  random.fill(buf);
+  let candidateId = buf[0] === 0n ? 1n : buf[0];
+  let walkGuard = 0;
+  while (table.id.find(candidateId)) {
+    candidateId = candidateId + 1n;
+    walkGuard += 1;
+    if (walkGuard > 1024) {
+      throw new SenderError(
+        `Failed to allocate ${label} id (gap walk overflow)`
+      );
+    }
+  }
+  return candidateId;
+}
 import {
   buildPreferredDefaultInboxSlug,
   inboxSlugContainsEmailToken,
@@ -273,14 +300,18 @@ export function cancelRateLimitCleanupSchedules(
 }
 
 export function scheduleRateLimitCleanup(
-  dbCtx: { db: ModuleCtx['db'] },
+  dbCtx: { db: ModuleCtx['db']; random: ModuleCtx['random'] },
   bucketKey: string,
   expiresAt: Timestamp,
   now: Timestamp
 ): void {
   cancelRateLimitCleanupSchedules(dbCtx, bucketKey);
   dbCtx.db.rateLimitCleanup.insert({
-    id: 0n,
+    id: allocFreshId(
+      dbCtx.db.rateLimitCleanup,
+      dbCtx.random,
+      'rate_limit_cleanup'
+    ),
     scheduledAt: ScheduleAt.time(expiresAt.microsSinceUnixEpoch),
     bucketKey,
     expiresAt,
@@ -308,13 +339,17 @@ export function cancelRateLimitReportCleanupSchedules(
 }
 
 export function scheduleRateLimitReportCleanup(
-  dbCtx: { db: ModuleCtx['db'] },
+  dbCtx: { db: ModuleCtx['db']; random: ModuleCtx['random'] },
   report: RateLimitReportRow,
   now: Timestamp
 ): void {
   cancelRateLimitReportCleanupSchedules(dbCtx, report.id);
   dbCtx.db.rateLimitReportCleanup.insert({
-    id: 0n,
+    id: allocFreshId(
+      dbCtx.db.rateLimitReportCleanup,
+      dbCtx.random,
+      'rate_limit_report_cleanup'
+    ),
     scheduledAt: ScheduleAt.time(report.expiresAt.microsSinceUnixEpoch),
     reportId: report.id,
     expiresAt: report.expiresAt,
@@ -323,7 +358,7 @@ export function scheduleRateLimitReportCleanup(
 }
 
 export function reportRateLimitBucket(
-  dbCtx: { db: ModuleCtx['db'] },
+  dbCtx: { db: ModuleCtx['db']; random: ModuleCtx['random'] },
   bucket: RateLimitRow,
   reportedAt: Timestamp
 ): void {
@@ -349,7 +384,11 @@ export function reportRateLimitBucket(
         expiresAt: reportExpiresAt,
       })
     : dbCtx.db.rateLimitReport.insert({
-        id: 0n,
+        id: allocFreshId(
+          dbCtx.db.rateLimitReport,
+          dbCtx.random,
+          'rate_limit_report'
+        ),
         reportKey,
         bucketKey: bucket.bucketKey,
         action: bucket.action,
@@ -368,7 +407,7 @@ export function reportRateLimitBucket(
 }
 
 export function enforceRateLimit(
-  dbCtx: { db: ModuleCtx['db'] },
+  dbCtx: { db: ModuleCtx['db']; random: ModuleCtx['random'] },
   params: {
     bucketKey: string;
     action: string;
@@ -383,7 +422,7 @@ export function enforceRateLimit(
   const expiresAt = timestampPlusMilliseconds(now, windowMs);
   if (!existing) {
     dbCtx.db.rateLimit.insert({
-      id: 0n,
+      id: allocFreshId(dbCtx.db.rateLimit, dbCtx.random, 'rate_limit'),
       bucketKey,
       action,
       ownerIdentity,
@@ -1583,7 +1622,7 @@ export function upsertInboxThreadProjection(
 
   if (!existing) {
     ctx.db.inboxThread.insert({
-      id: 0n,
+      id: allocFreshId(ctx.db.inboxThread, ctx.random, 'inbox_thread'),
       ...row,
     });
     return;
@@ -3066,7 +3105,11 @@ export function insertAttachedSecretEnvelopes(params: {
       requireNonEmpty(envelope.recipientPublicIdentity, 'recipientPublicIdentity')
     );
     params.ctx.db.threadSecretEnvelope.insert({
-        id: 0n,
+        id: allocFreshId(
+          params.ctx.db.threadSecretEnvelope,
+          params.ctx.random,
+          'thread_secret_envelope'
+        ),
         threadId: params.threadId,
         membershipVersion: params.membershipVersion,
         secretVersion: params.secretVersion,
@@ -3350,6 +3393,7 @@ export function rebuildPublicRecentChannelMessages(ctx: ModuleCtx, channel: Chan
       senderAgentDbId: message.senderAgentDbId,
       senderPublicIdentity: message.senderPublicIdentity,
       senderSeq: message.senderSeq,
+      senderMessageId: message.senderMessageId,
       senderSigningPublicKey: message.senderSigningPublicKey,
       senderSigningKeyVersion: message.senderSigningKeyVersion,
       plaintext: message.plaintext,
@@ -3421,6 +3465,7 @@ export function toChannelMessageRow(
     senderAgentDbId: message.senderAgentDbId,
     senderPublicIdentity: message.senderPublicIdentity,
     senderSeq: message.senderSeq,
+    senderMessageId: message.senderMessageId,
     senderSigningPublicKey:
       senderSigningPublicKey ||
       getActorSigningPublicKeyForVersion(ctx, message.senderAgentDbId, message.senderSigningKeyVersion),
@@ -3454,6 +3499,7 @@ export function insertPublicRecentChannelMessage(ctx: ModuleCtx, message: Channe
     senderAgentDbId: message.senderAgentDbId,
     senderPublicIdentity: message.senderPublicIdentity,
     senderSeq: message.senderSeq,
+    senderMessageId: message.senderMessageId,
     senderSigningPublicKey: message.senderSigningPublicKey,
     senderSigningKeyVersion: message.senderSigningKeyVersion,
     plaintext: message.plaintext,

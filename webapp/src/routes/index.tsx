@@ -221,6 +221,7 @@ function toPublicChannelSignatureInput(message: {
   channelId: bigint;
   senderPublicIdentity: string;
   senderSeq: bigint;
+  senderMessageId?: bigint;
   senderSigningKeyVersion: string;
   plaintext: string;
   replyToMessageId?: bigint | null;
@@ -229,6 +230,7 @@ function toPublicChannelSignatureInput(message: {
     channelId: message.channelId,
     senderPublicIdentity: message.senderPublicIdentity,
     senderSeq: message.senderSeq,
+    senderMessageId: message.senderMessageId,
     senderSigningKeyVersion: message.senderSigningKeyVersion,
     plaintext: message.plaintext,
     replyToMessageId: message.replyToMessageId ?? null,

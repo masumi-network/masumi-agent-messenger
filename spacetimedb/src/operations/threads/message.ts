@@ -59,6 +59,7 @@ function toVisibleMessageRow(message: model.MessageRow) {
     membershipVersion: message.membershipVersion,
     senderAgentDbId: message.senderAgentDbId,
     senderSeq: message.senderSeq,
+    senderMessageId: message.senderMessageId,
     secretVersion: message.secretVersion,
     secretVersionStart: message.secretVersionStart,
     signingKeyVersion: message.signingKeyVersion,
@@ -234,6 +235,7 @@ export const requestDirectContactWithFirstMessage = spacetimedb.reducer(
     secretVersion: t.string(),
     signingKeyVersion: t.string(),
     senderSeq: t.u64(),
+    senderMessageId: t.u64(),
     ciphertext: t.string(),
     iv: t.string(),
     cipherAlgorithm: t.string(),
@@ -252,6 +254,7 @@ export const requestDirectContactWithFirstMessage = spacetimedb.reducer(
       secretVersion,
       signingKeyVersion,
       senderSeq,
+      senderMessageId,
       ciphertext,
       iv,
       cipherAlgorithm,
@@ -297,6 +300,7 @@ export const requestDirectContactWithFirstMessage = spacetimedb.reducer(
       secretVersion,
       signingKeyVersion,
       senderSeq,
+      senderMessageId,
       ciphertext,
       iv,
       cipherAlgorithm,
@@ -336,6 +340,7 @@ function insertEncryptedMessageIntoThread(
     secretVersion: string;
     signingKeyVersion: string;
     senderSeq: bigint;
+    senderMessageId: bigint;
     ciphertext: string;
     iv: string;
     cipherAlgorithm: string;
@@ -411,9 +416,23 @@ function insertEncryptedMessageIntoThread(
     throw new SenderError('signingKeyVersion must match the sender current signing key version');
   }
 
-  const expectedSenderSeq = senderParticipant.lastSentSeq + 1n;
-  if (params.senderSeq !== expectedSenderSeq) {
-    throw new SenderError(`senderSeq must be ${expectedSenderSeq.toString()} for this sender`);
+  // senderSeq is deprecated and no longer enforced. Replay protection comes
+  // from a per-sender uniqueness check on senderMessageId. Sentinel values
+  // (`0n` / `1n`) mark legacy rows that predate this column and are skipped
+  // so they do not collide with each other.
+  if (params.senderMessageId !== 0n && params.senderMessageId !== 1n) {
+    // Array.from fully drains the generator so its `using` cleanup runs.
+    // Calling `.next()` once and dropping the generator leaks the iterator
+    // handle and surfaces as a fatal reducer error.
+    const existing = Array.from(
+      ctx.db.message.message_sender_agent_db_id_sender_message_id.filter([
+        params.senderActor.id,
+        params.senderMessageId,
+      ])
+    );
+    if (existing.length > 0) {
+      throw new SenderError('senderMessageId has already been used by this sender');
+    }
   }
 
   if (params.replyToMessageId !== undefined) {
@@ -496,18 +515,35 @@ function insertEncryptedMessageIntoThread(
     });
   }
 
-  const threadSeq = thread.nextThreadSeq;
-  if (threadSeq <= thread.lastMessageSeq && thread.lastMessageSeq !== 0n) {
-    throw new SenderError('Thread sequence state is inconsistent');
+  // Walk forward via the unique `threadSeqKey` PK lookup to skip any slots
+  // another reducer already filled, then insert with a fresh PK id (the
+  // autoinc workaround — see `allocFreshId`). Two collision dimensions
+  // (threadSeqKey and the autoinc PK) are both handled before the insert,
+  // so the txn buffer can't get poisoned by a failed attempt.
+  let threadSeq = thread.nextThreadSeq;
+  let walkGuard = 0;
+  while (
+    ctx.db.message.threadSeqKey.find(
+      buildMessageThreadSeqKey(params.threadId, threadSeq)
+    )
+  ) {
+    threadSeq = threadSeq + 1n;
+    walkGuard += 1;
+    if (walkGuard > 1024) {
+      throw new SenderError(
+        'Failed to allocate thread message sequence (gap walk overflow)'
+      );
+    }
   }
   ctx.db.message.insert({
-    id: 0n,
+    id: model.allocFreshId(ctx.db.message, ctx.random, 'message'),
     threadId: params.threadId,
     threadSeq,
     threadSeqKey: buildMessageThreadSeqKey(params.threadId, threadSeq),
     membershipVersion: thread.membershipVersion,
     senderAgentDbId: params.senderActor.id,
     senderSeq: params.senderSeq,
+    senderMessageId: params.senderMessageId,
     secretVersion: normalizedSecretVersion,
     secretVersionStart,
     signingKeyVersion: normalizedSigningVersion,
@@ -521,17 +557,24 @@ function insertEncryptedMessageIntoThread(
 
   const updatedThread = {
     ...thread,
-    nextThreadSeq: threadSeq + 1n,
-    lastMessageSeq: threadSeq,
+    // Advance counters monotonically so a concurrent reducer that already
+    // landed at a higher seq is not regressed by this writer.
+    nextThreadSeq:
+      thread.nextThreadSeq > threadSeq + 1n ? thread.nextThreadSeq : threadSeq + 1n,
+    lastMessageSeq:
+      thread.lastMessageSeq > threadSeq ? thread.lastMessageSeq : threadSeq,
     updatedAt: ctx.timestamp,
     lastMessageAt: ctx.timestamp,
   };
   ctx.db.thread.id.update(updatedThread);
   refreshInboxThreadProjectionsForThread(ctx, updatedThread);
 
+  // lastSentSeq is a server-allocated marker (kept non-zero so
+  // getSenderLastSentState can still detect "has sent in this thread").
+  // The client-supplied params.senderSeq is deprecated and not used here.
   ctx.db.threadParticipant.id.update({
     ...senderParticipant,
-    lastSentSeq: params.senderSeq,
+    lastSentSeq: senderParticipant.lastSentSeq + 1n,
     lastSentMembershipVersion: thread.membershipVersion,
     lastSentSecretVersion: normalizedSecretVersion,
   });
@@ -576,6 +619,7 @@ export const sendEncryptedMessage = spacetimedb.reducer(
     secretVersion: t.string(),
     signingKeyVersion: t.string(),
     senderSeq: t.u64(),
+    senderMessageId: t.u64(),
     ciphertext: t.string(),
     iv: t.string(),
     cipherAlgorithm: t.string(),
@@ -591,6 +635,7 @@ export const sendEncryptedMessage = spacetimedb.reducer(
       secretVersion,
       signingKeyVersion,
       senderSeq,
+      senderMessageId,
       ciphertext,
       iv,
       cipherAlgorithm,
@@ -606,6 +651,7 @@ export const sendEncryptedMessage = spacetimedb.reducer(
       secretVersion,
       signingKeyVersion,
       senderSeq,
+      senderMessageId,
       ciphertext,
       iv,
       cipherAlgorithm,

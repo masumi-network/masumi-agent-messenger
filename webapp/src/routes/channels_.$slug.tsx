@@ -87,6 +87,7 @@ import {
   verifySignedChannelMessage,
   type ChannelMessageSignatureInput,
 } from '../../../shared/channel-crypto';
+import { randomSenderMessageId } from '../../../shared/agent-crypto';
 import { normalizeEmail } from '../../../shared/inbox-slug';
 import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 import {
@@ -262,6 +263,7 @@ function toSignatureInput(message: {
   channelId: bigint;
   senderPublicIdentity: string;
   senderSeq: bigint;
+  senderMessageId?: bigint;
   senderSigningKeyVersion: string;
   plaintext: string;
   replyToMessageId?: bigint | null;
@@ -270,6 +272,7 @@ function toSignatureInput(message: {
     channelId: message.channelId,
     senderPublicIdentity: message.senderPublicIdentity,
     senderSeq: message.senderSeq,
+    senderMessageId: message.senderMessageId,
     senderSigningKeyVersion: message.senderSigningKeyVersion,
     plaintext: message.plaintext,
     replyToMessageId: message.replyToMessageId ?? null,
@@ -1358,11 +1361,12 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     if (!matchesPublishedActorKeys(freshActor, keyPair)) {
       throw new Error('Local key pair does not match the published agent keys.');
     }
-    const nextSeq = freshMembership.lastSentSeq + 1n;
+    const senderMessageId = randomSenderMessageId();
     const prepared = await prepareChannelMessage({
       channelId: freshChannelId,
       senderPublicIdentity: freshActor.publicIdentity,
-      senderSeq: nextSeq,
+      senderSeq: 0n,
+      senderMessageId,
       keyPair,
       payload: normalizeEncryptedMessagePayload({
         contentType: 'text/plain',
@@ -1373,7 +1377,8 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
       sendChannelMessageReducer({
         agentDbId: freshActor.id,
         channelId: freshChannelId,
-        senderSeq: nextSeq,
+        senderSeq: 0n,
+        senderMessageId,
         senderSigningKeyVersion: prepared.senderSigningKeyVersion,
         plaintext: prepared.plaintext,
         signature: prepared.signature,

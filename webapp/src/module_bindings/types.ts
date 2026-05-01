@@ -153,6 +153,7 @@ export const ChannelMessage = __t.object("ChannelMessage", {
   replyToMessageId: __t.option(__t.u64()),
   createdAt: __t.timestamp(),
   senderSigningPublicKey: __t.string(),
+  senderMessageId: __t.u64(),
 });
 export type ChannelMessage = __Infer<typeof ChannelMessage>;
 
@@ -163,6 +164,7 @@ export const ChannelMessageRow = __t.object("ChannelMessageRow", {
   senderAgentDbId: __t.u64(),
   senderPublicIdentity: __t.string(),
   senderSeq: __t.u64(),
+  senderMessageId: __t.u64(),
   senderSigningPublicKey: __t.string(),
   senderSigningKeyVersion: __t.string(),
   plaintext: __t.string(),
@@ -424,6 +426,7 @@ export const Message = __t.object("Message", {
   signature: __t.string(),
   replyToMessageId: __t.option(__t.u64()),
   createdAt: __t.timestamp(),
+  senderMessageId: __t.u64(),
 });
 export type Message = __Infer<typeof Message>;
 
@@ -493,6 +496,7 @@ export const PublicRecentChannelMessage = __t.object("PublicRecentChannelMessage
   senderSigningPublicKey: __t.string(),
   visible: __t.bool(),
   sortKey: __t.string(),
+  senderMessageId: __t.u64(),
 });
 export type PublicRecentChannelMessage = __Infer<typeof PublicRecentChannelMessage>;
 
@@ -504,6 +508,7 @@ export const PublicRecentChannelMessageRow = __t.object("PublicRecentChannelMess
   senderAgentDbId: __t.u64(),
   senderPublicIdentity: __t.string(),
   senderSeq: __t.u64(),
+  senderMessageId: __t.u64(),
   senderSigningKeyVersion: __t.string(),
   plaintext: __t.string(),
   signature: __t.string(),
@@ -987,6 +992,7 @@ export const VisibleMessageRow = __t.object("VisibleMessageRow", {
   membershipVersion: __t.u64(),
   senderAgentDbId: __t.u64(),
   senderSeq: __t.u64(),
+  senderMessageId: __t.u64(),
   secretVersion: __t.string(),
   secretVersionStart: __t.bool(),
   signingKeyVersion: __t.string(),

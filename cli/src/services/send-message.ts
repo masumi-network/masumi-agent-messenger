@@ -2,6 +2,7 @@ import {
   cacheSenderSecret,
   getCachedSenderSecret,
   prepareEncryptedMessage,
+  randomSenderMessageId,
   type ActorPublicKeys,
   type AgentKeyPair,
 } from '../../../shared/agent-crypto';
@@ -107,7 +108,6 @@ type SendMessageToThreadCoreParams = {
   message: string;
   contentType?: string;
   headerLines: string[];
-  waitForSync: boolean;
   reporter: TaskReporter;
 };
 
@@ -637,47 +637,6 @@ async function waitForDirectThread(params: {
   });
 }
 
-async function waitForSentThreadMessage(params: {
-  conn: DbConnection;
-  actorId: bigint;
-  threadId: bigint;
-  threadSeq: bigint;
-  senderActorId: bigint;
-  senderSeq: bigint;
-  timeoutMs?: number;
-}): Promise<VisibleMessageRow> {
-  const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
-
-  while (Date.now() < timeoutAt) {
-    const page = await params.conn.procedures.listThreadMessages({
-      agentDbId: params.actorId,
-      threadId: params.threadId,
-      beforeThreadSeq: params.threadSeq + 1n,
-      limit: 1n,
-    });
-    const message = page.messages.find(row => {
-      return (
-        row.threadId === params.threadId &&
-        row.threadSeq === params.threadSeq &&
-        row.senderAgentDbId === params.senderActorId &&
-        row.senderSeq === params.senderSeq
-      );
-    });
-
-    if (message) {
-      return message;
-    }
-
-    await new Promise(resolve => {
-      setTimeout(resolve, 100);
-    });
-  }
-
-  throw connectivityError('Timed out waiting for sent message to sync.', {
-    code: 'SPACETIMEDB_MESSAGE_TIMEOUT',
-  });
-}
-
 async function sendMessageToThreadCore(
   params: SendMessageToThreadCoreParams
 ): Promise<SendMessageToThreadResult> {
@@ -691,7 +650,6 @@ async function sendMessageToThreadCore(
     message,
     contentType,
     headerLines,
-    waitForSync,
     reporter,
   } = params;
   const ownActor = requireOwnedActor({
@@ -738,10 +696,10 @@ async function sendMessageToThreadCore(
   }
   const recipients = recipientActors.map(toActorPublicKeys);
 
-  const latestSenderMessage = [...snapshot.messages]
-    .filter(row => row.threadId === requestedThreadId && row.senderAgentDbId === ownActor.id)
-    .sort((left, right) => compareBigIntDesc(left.senderSeq, right.senderSeq))[0];
-  const latestSenderState = resolveSenderState(latestSenderMessage, senderParticipant);
+  // senderSeq is deprecated; resolveSenderState falls back to the participant's
+  // cached lastSentSecretVersion, so the per-thread message scan that used to
+  // sit here is no longer needed.
+  const latestSenderState = resolveSenderState(undefined, senderParticipant);
 
   const existingSecret = latestSenderState
     ? getCachedSenderSecret(
@@ -750,16 +708,28 @@ async function sendMessageToThreadCore(
         latestSenderState.secretVersion
       )
     : null;
+  // Envelopes for the rotation check are fetched on-demand via the indexed
+  // procedure rather than read from a global subscription. Empty when the
+  // sender has not yet published a secret in this thread.
+  const envelopesForRotation = latestSenderState
+    ? await conn.procedures.listThreadSecretEnvelopes({
+        agentDbId: ownActor.id,
+        threadId: requestedThreadId,
+        membershipVersion: latestSenderState.membershipVersion,
+        senderAgentDbId: ownActor.id,
+        secretVersion: latestSenderState.secretVersion,
+      })
+    : [];
   const requiresSecretRotation = senderSecretRotationRequired({
     senderActor: ownActor,
     thread,
     latestSenderState,
     participants: snapshot.participants,
     actors: snapshot.actors,
-    envelopes: snapshot.secretEnvelopes,
+    envelopes: envelopesForRotation,
   });
 
-  const senderSeq = senderParticipant.lastSentSeq + 1n;
+  const senderMessageId = randomSenderMessageId();
   const expectedThreadSeq = thread.lastMessageSeq + 1n;
 
   reporter.verbose?.(`Encrypting message for thread ${requestedThreadId.toString()}`);
@@ -767,7 +737,8 @@ async function sendMessageToThreadCore(
     threadId: requestedThreadId,
     senderActorId: ownActor.id,
     senderPublicIdentity: ownActor.publicIdentity,
-    senderSeq,
+    senderSeq: 0n,
+    senderMessageId,
     payload,
     keyPair,
     recipients,
@@ -782,7 +753,8 @@ async function sendMessageToThreadCore(
     threadId: requestedThreadId,
     secretVersion: prepared.secretVersion,
     signingKeyVersion: prepared.signingKeyVersion,
-    senderSeq,
+    senderSeq: 0n,
+    senderMessageId,
     ciphertext: prepared.ciphertext,
     iv: prepared.iv,
     cipherAlgorithm: prepared.cipherAlgorithm,
@@ -798,17 +770,8 @@ async function sendMessageToThreadCore(
     prepared.senderSecret.secretHex
   );
 
-  const sentMessage = waitForSync
-    ? await waitForSentThreadMessage({
-        conn,
-        actorId: ownActor.id,
-        threadId: requestedThreadId,
-        threadSeq: expectedThreadSeq,
-        senderActorId: ownActor.id,
-        senderSeq,
-      })
-    : null;
-
+  // The reducer's success is the source of truth — no need to poll
+  // listThreadMessages back to confirm the row landed.
   const activeParticipantsByThreadId = buildParticipantsByThreadId(
     snapshot.participants.filter(participant => participant.active)
   );
@@ -830,8 +793,8 @@ async function sendMessageToThreadCore(
     threadId: requestedThreadId.toString(),
     threadKind: thread.kind,
     label,
-    messageId: sentMessage?.id.toString() ?? `optimistic:${requestedThreadId.toString()}:${senderSeq.toString()}`,
-    threadSeq: (sentMessage?.threadSeq ?? expectedThreadSeq).toString(),
+    messageId: `sent:${requestedThreadId.toString()}:${senderMessageId.toString()}`,
+    threadSeq: expectedThreadSeq.toString(),
   };
 }
 
@@ -1212,12 +1175,14 @@ export async function sendMessageToSlug(params: {
           snapshot.contactRequests.map(request => request.id.toString())
         );
         const pendingThreadId = generateClientThreadId();
+        const senderMessageId = randomSenderMessageId();
         params.reporter.verbose?.(`Encrypting atomic first-contact request for ${target.slug}`);
         const prepared = await prepareEncryptedMessage({
           threadId: pendingThreadId,
           senderActorId: ownActor.id,
           senderPublicIdentity: ownActor.publicIdentity,
-          senderSeq: 1n,
+          senderSeq: 0n,
+          senderMessageId,
           payload,
           keyPair,
           recipients: [toActorPublicKeys(ownActor), toPublishedActorPublicKeys(target)],
@@ -1236,7 +1201,8 @@ export async function sendMessageToSlug(params: {
           title: params.title?.trim() ? params.title.trim() : undefined,
           secretVersion: prepared.secretVersion,
           signingKeyVersion: prepared.signingKeyVersion,
-          senderSeq: 1n,
+          senderSeq: 0n,
+          senderMessageId,
           ciphertext: prepared.ciphertext,
           iv: prepared.iv,
           cipherAlgorithm: prepared.cipherAlgorithm,
@@ -1337,11 +1303,13 @@ export async function sendMessageToSlug(params: {
       });
 
       params.reporter.verbose?.(`Encrypting first-contact request for ${target.slug}`);
+      const senderMessageId = randomSenderMessageId();
       const prepared = await prepareEncryptedMessage({
         threadId: pendingRequest.threadId,
         senderActorId: ownActor.id,
         senderPublicIdentity: ownActor.publicIdentity,
-        senderSeq: 1n,
+        senderSeq: 0n,
+        senderMessageId,
         payload,
         keyPair,
         recipients: [toActorPublicKeys(ownActor), toPublishedActorPublicKeys(target)],
@@ -1356,7 +1324,8 @@ export async function sendMessageToSlug(params: {
         threadId: pendingRequest.threadId,
         secretVersion: prepared.secretVersion,
         signingKeyVersion: prepared.signingKeyVersion,
-        senderSeq: 1n,
+        senderSeq: 0n,
+        senderMessageId,
         ciphertext: prepared.ciphertext,
         iv: prepared.iv,
         cipherAlgorithm: prepared.cipherAlgorithm,
@@ -1431,29 +1400,41 @@ export async function sendMessageToSlug(params: {
     }
     const recipients = recipientActors.map(toActorPublicKeys);
 
-    const latestSenderMessage = [...snapshot.messages]
-      .filter(message => message.threadId === thread.id && message.senderAgentDbId === ownActor.id)
-      .sort((left, right) => compareBigIntDesc(left.senderSeq, right.senderSeq))[0];
-    const latestSenderState = resolveSenderState(latestSenderMessage, senderParticipant);
+    // senderSeq is deprecated; resolveSenderState falls back to the
+    // participant's cached lastSentSecretVersion, so the snapshot.messages scan
+    // that previously sat here is no longer needed.
+    const latestSenderState = resolveSenderState(undefined, senderParticipant);
 
     const existingSecret = latestSenderState
       ? getCachedSenderSecret(thread.id, ownActor.publicIdentity, latestSenderState.secretVersion)
       : null;
+    const envelopesForRotation = latestSenderState
+      ? await conn.procedures.listThreadSecretEnvelopes({
+          agentDbId: ownActor.id,
+          threadId: thread.id,
+          membershipVersion: latestSenderState.membershipVersion,
+          senderAgentDbId: ownActor.id,
+          secretVersion: latestSenderState.secretVersion,
+        })
+      : [];
     const requiresSecretRotation = senderSecretRotationRequired({
       senderActor: ownActor,
       thread,
       latestSenderState,
       participants: snapshot.participants,
       actors: snapshot.actors,
-      envelopes: snapshot.secretEnvelopes,
+      envelopes: envelopesForRotation,
     });
+
+    const senderMessageId = randomSenderMessageId();
 
     params.reporter.verbose?.(`Encrypting message for ${target.slug}`);
     const prepared = await prepareEncryptedMessage({
       threadId: thread.id,
       senderActorId: ownActor.id,
       senderPublicIdentity: ownActor.publicIdentity,
-      senderSeq: senderParticipant.lastSentSeq + 1n,
+      senderSeq: 0n,
+      senderMessageId,
       payload,
       keyPair,
       recipients,
@@ -1468,7 +1449,8 @@ export async function sendMessageToSlug(params: {
       threadId: thread.id,
       secretVersion: prepared.secretVersion,
       signingKeyVersion: prepared.signingKeyVersion,
-      senderSeq: senderParticipant.lastSentSeq + 1n,
+      senderSeq: 0n,
+      senderMessageId,
       ciphertext: prepared.ciphertext,
       iv: prepared.iv,
       cipherAlgorithm: prepared.cipherAlgorithm,
@@ -1484,14 +1466,8 @@ export async function sendMessageToSlug(params: {
       prepared.senderSecret.secretHex
     );
 
-    const sentMessage = await waitForSentThreadMessage({
-      conn,
-      actorId: ownActor.id,
-      threadId: thread.id,
-      threadSeq: thread.lastMessageSeq + 1n,
-      senderActorId: ownActor.id,
-      senderSeq: senderParticipant.lastSentSeq + 1n,
-    });
+    // Reducer success is authoritative; no post-send poll needed.
+    const expectedThreadSeq = thread.lastMessageSeq + 1n;
     params.reporter.success(`Encrypted message sent to ${target.slug}`);
 
     return {
@@ -1505,8 +1481,8 @@ export async function sendMessageToSlug(params: {
         displayName: target.displayName ?? null,
       },
       threadId: thread.id.toString(),
-      messageId: sentMessage.id.toString(),
-      threadSeq: sentMessage.threadSeq.toString(),
+      messageId: `sent:${thread.id.toString()}:${senderMessageId.toString()}`,
+      threadSeq: expectedThreadSeq.toString(),
       createdDirectThread,
       targetLookup: {
         input: targetLookup.input,
@@ -1571,7 +1547,6 @@ export async function sendMessageToThread(params: {
       message: params.message,
       contentType: params.contentType,
       headerLines: params.headerLines,
-      waitForSync: true,
       reporter: params.reporter,
     });
   } finally {
@@ -1615,7 +1590,6 @@ export async function sendMessageToThreadFromLiveSnapshot(params: {
     message: params.message,
     contentType: params.contentType,
     headerLines: params.headerLines,
-    waitForSync: false,
     reporter: params.reporter,
   });
 }

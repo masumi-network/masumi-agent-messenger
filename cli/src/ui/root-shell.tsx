@@ -111,6 +111,7 @@ import type {
   ChannelMemberListRow,
   VisibleAgentRow,
   VisibleMessageRow,
+  VisibleThreadSecretEnvelopeRow,
   VisibleThreadParticipantRow,
   VisibleThreadReadStateRow,
   VisibleThreadRow,
@@ -2126,6 +2127,8 @@ async function buildLiveThreadMessages(params: {
   activeInboxSlug: string | null;
   threadId: string;
   beforeThreadSeq?: bigint;
+  fromThreadSeq?: bigint;
+  toThreadSeq?: bigint;
 }): Promise<LiveThreadMessagesPage> {
   const actor = findOwnedActor({
     rows: params.rows,
@@ -2157,19 +2160,50 @@ async function buildLiveThreadMessages(params: {
       .map(row => row.id)
   );
 
-  const page = await params.conn.procedures.listThreadMessages({
-    agentDbId: actor.id,
-    threadId: requestedThreadId,
-    beforeThreadSeq: params.beforeThreadSeq,
-    limit: THREAD_MESSAGE_PAGE_SIZE,
-  });
-  const threadMessages = page.messages.sort(compareVisibleThreadMessages);
+  let messageRows: VisibleMessageRow[] = [];
+  let secretEnvelopes: VisibleThreadSecretEnvelopeRow[] = [];
+  let nextBeforeThreadSeq: bigint | null = null;
+
+  if (params.fromThreadSeq !== undefined && params.toThreadSeq !== undefined) {
+    for (
+      let threadSeq = params.fromThreadSeq;
+      threadSeq <= params.toThreadSeq;
+      threadSeq += 1n
+    ) {
+      const page = await params.conn.procedures.listThreadMessages({
+        agentDbId: actor.id,
+        threadId: requestedThreadId,
+        beforeThreadSeq: threadSeq + 1n,
+        limit: 1n,
+      });
+      const exactMessage = page.messages.find(message => {
+        return message.threadId === requestedThreadId && message.threadSeq === threadSeq;
+      });
+      if (!exactMessage) {
+        continue;
+      }
+      messageRows = mergeRowsById(messageRows, [exactMessage]);
+      secretEnvelopes = mergeRowsById(secretEnvelopes, page.secretEnvelopes);
+    }
+  } else {
+    const page = await params.conn.procedures.listThreadMessages({
+      agentDbId: actor.id,
+      threadId: requestedThreadId,
+      beforeThreadSeq: params.beforeThreadSeq,
+      limit: THREAD_MESSAGE_PAGE_SIZE,
+    });
+    messageRows = page.messages;
+    secretEnvelopes = page.secretEnvelopes;
+    nextBeforeThreadSeq = page.nextBeforeThreadSeq ?? null;
+  }
+
+  const threadMessages = messageRows.sort(compareVisibleThreadMessages);
   const publicKeysByActorId = buildPublicKeysByActorId(
     await lookupMessagePublicKeys({
       conn: params.conn,
       agentDbId: actor.id,
       messages: threadMessages,
-      secretEnvelopes: page.secretEnvelopes,
+      secretEnvelopes,
       actorsById,
     })
   );
@@ -2183,7 +2217,7 @@ async function buildLiveThreadMessages(params: {
         actorsById,
         publicKeysByActorId,
         ownActorIds,
-        secretEnvelopes: page.secretEnvelopes,
+        secretEnvelopes,
         recipientKeyPair,
       });
 
@@ -2206,7 +2240,7 @@ async function buildLiveThreadMessages(params: {
 
   return {
     messages,
-    nextBeforeThreadSeq: page.nextBeforeThreadSeq ?? null,
+    nextBeforeThreadSeq,
   };
 }
 
@@ -2217,8 +2251,8 @@ function useLiveThreadMessages(params: {
   activeInboxSlug: string | null;
   routeType: ShellRoute['type'];
   selectedInboxItem: LiveInboxSectionItem | null;
+  selectedThreadLastMessageSeq: string | null;
   optimisticMessages: LiveThreadMessage[];
-  threadSignalKey: string | null;
   securityRefreshToken: number;
   inboxFocus: InboxFocus;
   messageWidth: number;
@@ -2236,6 +2270,7 @@ function useLiveThreadMessages(params: {
   const latestRowsRef = useRef<ShellRows | null>(params.rows);
   const visibleThreadRowsRef = useRef<LiveThreadRenderRow[]>([]);
   const threadMessageMaxRowsRef = useRef(params.messageMaxRows);
+  const lastSecurityRefreshTokenRef = useRef(params.securityRefreshToken);
   const readyConn = params.connectionState.mode === 'ready' ? params.connectionState.conn : null;
   const readyAuth = params.connectionState.mode === 'ready' ? params.connectionState.auth : null;
   const rowsReady = params.rows !== null;
@@ -2296,6 +2331,35 @@ function useLiveThreadMessages(params: {
     }
 
     let cancelled = false;
+    const currentMessages = threadMessagesRef.current;
+    const latestLoadedThreadSeq = currentMessages.reduce(
+      (latest, message) => (message.threadSeq > latest ? message.threadSeq : latest),
+      0n
+    );
+    const latestVisibleThreadSeq =
+      params.selectedThreadLastMessageSeq === null
+        ? null
+        : BigInt(params.selectedThreadLastMessageSeq);
+    const securityRefreshChanged =
+      lastSecurityRefreshTokenRef.current !== params.securityRefreshToken;
+    lastSecurityRefreshTokenRef.current = params.securityRefreshToken;
+    const shouldLoadMissingTail =
+      !securityRefreshChanged &&
+      currentMessages.length > 0 &&
+      latestVisibleThreadSeq !== null &&
+      latestVisibleThreadSeq > latestLoadedThreadSeq;
+    if (
+      !securityRefreshChanged &&
+      currentMessages.length > 0 &&
+      latestVisibleThreadSeq !== null &&
+      latestVisibleThreadSeq <= latestLoadedThreadSeq
+    ) {
+      setThreadMessagesLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const requestId = threadMessagesRequestRef.current + 1;
     threadMessagesRequestRef.current = requestId;
     setThreadMessagesLoading(true);
@@ -2307,6 +2371,8 @@ function useLiveThreadMessages(params: {
       normalizedEmail: params.normalizedEmail,
       activeInboxSlug: params.activeInboxSlug,
       threadId: params.selectedInboxItem.threadId,
+      fromThreadSeq: shouldLoadMissingTail ? latestLoadedThreadSeq + 1n : undefined,
+      toThreadSeq: shouldLoadMissingTail ? latestVisibleThreadSeq : undefined,
     })
       .then(result => {
         if (!cancelled && threadMessagesRequestRef.current === requestId) {
@@ -2318,21 +2384,25 @@ function useLiveThreadMessages(params: {
               optimisticMessages: [],
             })
           );
-          setNextBeforeThreadSeqWithRef(
-            resolveThreadMessageRefreshCursor({
-              hadLoadedMessages,
-              currentNextBeforeThreadSeq,
-              refreshedNextBeforeThreadSeq: result.nextBeforeThreadSeq,
-            })
-          );
+          if (!shouldLoadMissingTail) {
+            setNextBeforeThreadSeqWithRef(
+              resolveThreadMessageRefreshCursor({
+                hadLoadedMessages,
+                currentNextBeforeThreadSeq,
+                refreshedNextBeforeThreadSeq: result.nextBeforeThreadSeq,
+              })
+            );
+          }
           setThreadMessagesError(null);
           setThreadMessagesLoading(false);
         }
       })
       .catch(error => {
         if (!cancelled && threadMessagesRequestRef.current === requestId) {
-          setThreadMessagesWithRef([]);
-          setNextBeforeThreadSeqWithRef(null);
+          if (!shouldLoadMissingTail) {
+            setThreadMessagesWithRef([]);
+            setNextBeforeThreadSeqWithRef(null);
+          }
           setThreadMessagesError(toCliError(error).message);
           setThreadMessagesLoading(false);
         }
@@ -2345,7 +2415,7 @@ function useLiveThreadMessages(params: {
     params.activeInboxSlug,
     params.normalizedEmail,
     params.securityRefreshToken,
-    params.threadSignalKey,
+    params.selectedThreadLastMessageSeq,
     params.routeType,
     params.selectedInboxItem?.threadId,
     params.inboxFocus,
@@ -3668,23 +3738,6 @@ export function RootShell({
     });
   }, [selectedInboxIndex, inboxSectionItems.length, inboxListMaxRows]);
 
-  const selectedThreadSignalKey = useMemo(() => {
-    if (!shellRows || !selectedInboxItem?.threadId) {
-      return null;
-    }
-    const threadId = BigInt(selectedInboxItem.threadId);
-    const signal =
-      shellRows.threadSignals.find(row => row.id === threadId) ?? null;
-    return signal
-      ? [
-          signal.id.toString(),
-          signal.lastMessageSeq.toString(),
-          signal.updatedAt.microsSinceUnixEpoch.toString(),
-          signal.lastMessageAt.microsSinceUnixEpoch.toString(),
-        ].join(':')
-      : null;
-  }, [selectedInboxItem?.threadId, shellRows]);
-
   const threadSignalSignature = useMemo(() => {
     if (!shellRows) {
       return '';
@@ -3727,11 +3780,11 @@ export function RootShell({
     activeInboxSlug: model?.activeInbox.slug ?? null,
     routeType: route.type,
     selectedInboxItem,
+    selectedThreadLastMessageSeq: selectedThread?.lastMessageSeq ?? null,
     optimisticMessages:
       selectedInboxItem?.threadId
         ? optimisticThreadMessagesByThreadId[selectedInboxItem.threadId] ?? []
         : [],
-    threadSignalKey: selectedThreadSignalKey,
     securityRefreshToken,
     inboxFocus,
     messageWidth: contentListWidth,

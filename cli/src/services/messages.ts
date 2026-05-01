@@ -470,8 +470,9 @@ export async function decryptVisibleMessage(params: {
       signingPublicKey: senderActor.currentSigningPublicKey,
       signingKeyVersion: senderActor.currentSigningKeyVersion,
     };
-    const allowFirstContactTrust =
-      params.message.threadSeq === 1n && params.message.senderSeq === 1n;
+    // senderSeq is deprecated (always 0n on new messages); threadSeq alone
+    // identifies the first message in a thread for first-contact auto-pin.
+    const allowFirstContactTrust = params.message.threadSeq === 1n;
     const comparison = allowFirstContactTrust
       ? await autoPinPeerIfUnknown(senderActor.publicIdentity, observedTuple)
       : await comparePinnedPeer(senderActor.publicIdentity, observedTuple);
@@ -597,6 +598,7 @@ export async function decryptVisibleMessage(params: {
         senderActorId: senderActor.id,
         senderPublicIdentity: senderActor.publicIdentity,
         senderSeq: params.message.senderSeq,
+        senderMessageId: params.message.senderMessageId,
         secretVersion: params.message.secretVersion,
         signingKeyVersion: params.message.signingKeyVersion,
         ciphertext: params.message.ciphertext,

@@ -22,6 +22,9 @@ export type ChannelMessageSignatureInput = {
   channelId: bigint;
   senderPublicIdentity: string;
   senderSeq: bigint;
+  // Random per-sender opaque id used for replay protection. `0n` indicates a
+  // legacy message that was signed before this field existed.
+  senderMessageId?: bigint;
   senderSigningKeyVersion: string;
   plaintext: string;
   replyToMessageId?: bigint | null;
@@ -63,7 +66,7 @@ async function verifyCanonicalPayload(params: {
 export async function buildChannelMessageSignaturePayload(
   input: ChannelMessageSignatureInput
 ): Promise<JsonLike> {
-  return {
+  const base: JsonLike = {
     channelId: input.channelId.toString(),
     senderPublicIdentity: input.senderPublicIdentity,
     senderSeq: input.senderSeq.toString(),
@@ -74,6 +77,17 @@ export async function buildChannelMessageSignaturePayload(
         : input.replyToMessageId.toString(),
     plaintextHash: await sha256Hex(input.plaintext),
   };
+  // Legacy rows carry the schema sentinel (`1n`) or `0n`; their signatures
+  // were built before this field existed, so we must omit it for them to
+  // keep verification working.
+  if (
+    input.senderMessageId !== undefined &&
+    input.senderMessageId !== 0n &&
+    input.senderMessageId !== 1n
+  ) {
+    (base as Record<string, unknown>).senderMessageId = input.senderMessageId.toString();
+  }
+  return base;
 }
 
 export async function signChannelMessage(params: {
@@ -102,6 +116,7 @@ export async function prepareChannelMessage(params: {
   channelId: bigint;
   senderPublicIdentity: string;
   senderSeq: bigint;
+  senderMessageId: bigint;
   payload: EncryptedMessagePayload;
   keyPair: AgentKeyPair;
   replyToMessageId?: bigint | null;
@@ -114,6 +129,7 @@ export async function prepareChannelMessage(params: {
     channelId: params.channelId,
     senderPublicIdentity: params.senderPublicIdentity,
     senderSeq: params.senderSeq,
+    senderMessageId: params.senderMessageId,
     senderSigningKeyVersion: params.keyPair.signing.keyVersion,
     plaintext,
     replyToMessageId: params.replyToMessageId ?? null,

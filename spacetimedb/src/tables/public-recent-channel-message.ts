@@ -20,6 +20,11 @@ export const publicRecentChannelMessageTable = table(
           algorithm: 'btree',
           columns: ['visible', 'sortKey'],
         },
+        {
+          accessor: 'public_recent_channel_message_sender_agent_db_id_sender_message_id',
+          algorithm: 'btree',
+          columns: ['senderAgentDbId', 'senderMessageId'],
+        },
       ],
     },
     {
@@ -40,5 +45,6 @@ export const publicRecentChannelMessageTable = table(
       // a manual reordering migration during publish.
       visible: t.bool().default(true),
       sortKey: t.string().default('pending'),
+      senderMessageId: t.u64().default(1n),
     }
 );

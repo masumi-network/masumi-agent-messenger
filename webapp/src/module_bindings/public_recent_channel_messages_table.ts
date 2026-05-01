@@ -18,6 +18,7 @@ export default __t.row({
   senderAgentDbId: __t.u64().name("sender_agent_db_id"),
   senderPublicIdentity: __t.string().name("sender_public_identity"),
   senderSeq: __t.u64().name("sender_seq"),
+  senderMessageId: __t.u64().name("sender_message_id"),
   senderSigningKeyVersion: __t.string().name("sender_signing_key_version"),
   plaintext: __t.string(),
   signature: __t.string(),

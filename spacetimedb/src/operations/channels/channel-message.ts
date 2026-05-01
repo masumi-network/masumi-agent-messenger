@@ -42,6 +42,7 @@ function toPublicRecentChannelMessageRow(message: model.PublicRecentChannelMessa
     senderAgentDbId: message.senderAgentDbId,
     senderPublicIdentity: message.senderPublicIdentity,
     senderSeq: message.senderSeq,
+    senderMessageId: message.senderMessageId,
     senderSigningKeyVersion: message.senderSigningKeyVersion,
     plaintext: message.plaintext,
     signature: message.signature,
@@ -189,6 +190,7 @@ export const sendChannelMessage = spacetimedb.reducer(
     agentDbId: t.u64(),
     channelId: t.u64(),
     senderSeq: t.u64(),
+    senderMessageId: t.u64(),
     senderSigningKeyVersion: t.string(),
     plaintext: t.string(),
     signature: t.string(),
@@ -200,6 +202,7 @@ export const sendChannelMessage = spacetimedb.reducer(
       agentDbId,
       channelId,
       senderSeq,
+      senderMessageId,
       senderSigningKeyVersion,
       plaintext,
       signature,
@@ -238,9 +241,23 @@ export const sendChannelMessage = spacetimedb.reducer(
       MAX_MESSAGE_SIGNATURE_HEX_CHARS,
       'signature'
     );
-    const expectedSenderSeq = senderMember.lastSentSeq + 1n;
-    if (senderSeq !== expectedSenderSeq) {
-      throw new SenderError(`senderSeq must be ${expectedSenderSeq.toString()} for this sender`);
+    // senderSeq is deprecated and no longer enforced. Replay protection comes
+    // from a per-sender uniqueness check on senderMessageId. Sentinel values
+    // (`0n` / `1n`) mark legacy rows that predate this column and are skipped
+    // so they do not collide with each other.
+    if (senderMessageId !== 0n && senderMessageId !== 1n) {
+      // Array.from fully drains the generator so its `using` cleanup runs.
+      // Calling `.next()` once and dropping the generator leaks the iterator
+      // handle and surfaces as a fatal reducer error.
+      const existing = Array.from(
+        ctx.db.channelMessage.channel_message_sender_agent_db_id_sender_message_id.filter([
+          senderAgent.id,
+          senderMessageId,
+        ])
+      );
+      if (existing.length > 0) {
+        throw new SenderError('senderMessageId has already been used by this sender');
+      }
     }
     if (replyToMessageId !== undefined) {
       const replied = ctx.db.channelMessage.id.find(replyToMessageId);
@@ -249,16 +266,33 @@ export const sendChannelMessage = spacetimedb.reducer(
       }
     }
 
-    const channelSeq = channel.lastMessageSeq + 1n;
-
+    // Walk forward via the unique `channelSeqKey` PK lookup to skip any
+    // slots another reducer already filled, then insert with a fresh PK id
+    // (autoinc workaround — see `allocFreshId`).
+    let channelSeq = channel.lastMessageSeq + 1n;
+    let walkGuard = 0;
+    while (
+      ctx.db.channelMessage.channelSeqKey.find(
+        buildChannelMessageSeqKey(channel.id, channelSeq)
+      )
+    ) {
+      channelSeq = channelSeq + 1n;
+      walkGuard += 1;
+      if (walkGuard > 1024) {
+        throw new SenderError(
+          'Failed to allocate channel message sequence (gap walk overflow)'
+        );
+      }
+    }
     const message = ctx.db.channelMessage.insert({
-      id: 0n,
+      id: model.allocFreshId(ctx.db.channelMessage, ctx.random, 'channel_message'),
       channelId: channel.id,
       channelSeq,
       channelSeqKey: buildChannelMessageSeqKey(channel.id, channelSeq),
       senderAgentDbId: senderAgent.id,
       senderPublicIdentity: senderAgent.publicIdentity,
       senderSeq,
+      senderMessageId,
       senderSigningPublicKey: senderAgent.currentSigningPublicKey,
       senderSigningKeyVersion: normalizedSigningKeyVersion,
       plaintext: normalizedPlaintext,
@@ -269,8 +303,12 @@ export const sendChannelMessage = spacetimedb.reducer(
 
     const updatedChannel = ctx.db.channel.id.update({
       ...channel,
-      nextChannelSeq: channelSeq + 1n,
-      lastMessageSeq: channelSeq,
+      // The channel row may already reflect a higher seq if a concurrent
+      // reducer landed first; only advance the counters monotonically.
+      nextChannelSeq:
+        channel.nextChannelSeq > channelSeq + 1n ? channel.nextChannelSeq : channelSeq + 1n,
+      lastMessageSeq:
+        channel.lastMessageSeq > channelSeq ? channel.lastMessageSeq : channelSeq,
       updatedAt: ctx.timestamp,
       lastMessageAt: ctx.timestamp,
       discoverableSortKey: buildChannelDiscoverableSortKey({
@@ -280,7 +318,7 @@ export const sendChannelMessage = spacetimedb.reducer(
     });
     ctx.db.channelMember.id.update({
       ...senderMember,
-      lastSentSeq: senderSeq,
+      lastSentSeq: senderMember.lastSentSeq + 1n,
       updatedAt: ctx.timestamp,
     });
     if (updatedChannel.accessMode === 'public') {

@@ -129,6 +129,7 @@ import {
   decryptMessage,
   getCachedSenderSecret,
   prepareEncryptedMessage,
+  randomSenderMessageId,
   type ActorPublicKeys,
   type AgentKeyPair,
 } from '@/lib/crypto';
@@ -244,6 +245,50 @@ function mergeRowsById<Row extends { id: bigint }>(
     byId.set(row.id.toString(), row);
   }
   return Array.from(byId.values());
+}
+
+async function loadVisibleThreadMessagesInSeqRange(params: {
+  conn: DbConnection;
+  agentDbId: bigint;
+  threadId: bigint;
+  fromThreadSeq: bigint;
+  toThreadSeq: bigint;
+  isCancelled?: () => boolean;
+}): Promise<{
+  messages: Message[];
+  secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
+}> {
+  let messages: Message[] = [];
+  let secretEnvelopes: VisibleThreadSecretEnvelopeRow[] = [];
+
+  for (
+    let threadSeq = params.fromThreadSeq;
+    threadSeq <= params.toThreadSeq;
+    threadSeq += 1n
+  ) {
+    if (params.isCancelled?.()) {
+      break;
+    }
+    const page = await params.conn.procedures.listThreadMessages({
+      agentDbId: params.agentDbId,
+      threadId: params.threadId,
+      beforeThreadSeq: threadSeq + 1n,
+      limit: 1n,
+    });
+    const exactMessage = page.messages.find(message => {
+      return message.threadId === params.threadId && message.threadSeq === threadSeq;
+    });
+    if (!exactMessage) {
+      continue;
+    }
+    messages = mergeRowsById(messages, [exactMessage]);
+    secretEnvelopes = mergeRowsById(secretEnvelopes, page.secretEnvelopes);
+  }
+
+  return {
+    messages,
+    secretEnvelopes,
+  };
 }
 
 function patchOptimisticReadState(
@@ -1314,6 +1359,7 @@ function AuthenticatedInboxPage() {
   const mountedRef = useRef(true);
   const pendingDeviceShareRequestRef = useRef<PendingDeviceShareRequestState | null>(null);
   const deviceShareClaimDeviceIdRef = useRef<string | null>(null);
+  const pagedThreadMessagesRef = useRef<Message[]>([]);
   const authenticatedSession =
     auth.status === 'authenticated' ? auth.session : null;
   const keyVaultOwner = useMemo<KeyVaultOwner | null>(
@@ -1343,6 +1389,10 @@ function AuthenticatedInboxPage() {
   useEffect(() => {
     pendingDeviceShareRequestRef.current = pendingDeviceShareRequest;
   }, [pendingDeviceShareRequest]);
+
+  useEffect(() => {
+    pagedThreadMessagesRef.current = pagedThreadMessages;
+  }, [pagedThreadMessages]);
 
   useEffect(() => {
     if (!hydrated || !keyVaultOwner) {
@@ -3403,22 +3453,57 @@ function AuthenticatedInboxPage() {
         setThreadHistoryLoading(true);
       }
     });
-    void liveConnection.procedures
-      .listThreadMessages({
-        agentDbId: activeActor.id,
-        threadId: selectedThread.id,
-        beforeThreadSeq: undefined,
-        limit: BigInt(THREAD_TIMELINE_PAGE_SIZE),
-      })
+    const loadedThreadMessages = pagedThreadMessagesRef.current
+      .filter(message => message.threadId === selectedThread.id)
+      .sort((left, right) => Number(left.threadSeq - right.threadSeq));
+    const latestLoadedThreadSeq =
+      loadedThreadMessages[loadedThreadMessages.length - 1]?.threadSeq ?? 0n;
+    const latestVisibleThreadSeq =
+      selectedThreadSignal?.lastMessageSeq ?? selectedThread.lastMessageSeq;
+    if (
+      loadedThreadMessages.length > 0 &&
+      latestVisibleThreadSeq <= latestLoadedThreadSeq
+    ) {
+      cancelLoadingStart();
+      setThreadHistoryLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    const shouldLoadMissingTail =
+      loadedThreadMessages.length > 0 && latestVisibleThreadSeq > latestLoadedThreadSeq;
+    const pagePromise = shouldLoadMissingTail
+      ? loadVisibleThreadMessagesInSeqRange({
+          conn: liveConnection,
+          agentDbId: activeActor.id,
+          threadId: selectedThread.id,
+          fromThreadSeq: latestLoadedThreadSeq + 1n,
+          toThreadSeq: latestVisibleThreadSeq,
+          isCancelled: () => cancelled,
+        }).then(page => ({
+          messages: page.messages,
+          secretEnvelopes: page.secretEnvelopes,
+          nextBeforeThreadSeq: undefined,
+        }))
+      : liveConnection.procedures.listThreadMessages({
+          agentDbId: activeActor.id,
+          threadId: selectedThread.id,
+          beforeThreadSeq: undefined,
+          limit: BigInt(THREAD_TIMELINE_PAGE_SIZE),
+        });
+
+    void pagePromise
       .then(page => {
         if (cancelled) return;
         setPagedThreadMessages(current => mergeRowsById(current, page.messages));
         setPagedThreadSecretEnvelopes(current =>
           mergeRowsById(current, page.secretEnvelopes)
         );
-        setThreadHistoryExhausted(
-          page.nextBeforeThreadSeq === undefined || page.messages.length === 0
-        );
+        if (!shouldLoadMissingTail) {
+          setThreadHistoryExhausted(
+            page.nextBeforeThreadSeq === undefined || page.messages.length === 0
+          );
+        }
       })
       .catch(error => {
         if (cancelled) return;
@@ -3441,7 +3526,6 @@ function AuthenticatedInboxPage() {
     liveConnection,
     selectedThread,
     selectedThreadSignal?.lastMessageSeq,
-    selectedThreadSignal?.updatedAt.microsSinceUnixEpoch,
   ]);
   useEffect(() => {
     if (!selectedThread) {
@@ -3775,16 +3859,6 @@ function AuthenticatedInboxPage() {
     });
   }, [selectedThread?.id, readStateByThreadId]);
 
-  const latestSelectedThreadSenderMessage = useMemo(
-    () =>
-      activeActor
-        ? [...selectedThreadMessages]
-            .filter(message => message.senderAgentDbId === activeActor.id)
-            .sort((left, right) => Number(right.senderSeq - left.senderSeq))[0]
-        : undefined,
-    [activeActor, selectedThreadMessages]
-  );
-
   const activeParticipant = useMemo(
     () =>
       activeActor && selectedThread
@@ -3793,10 +3867,9 @@ function AuthenticatedInboxPage() {
     [activeActor, selectedThread, selectedThreadParticipants]
   );
 
+  // senderSeq is deprecated; the participant's cached lastSent* fields are the
+  // source of truth for the sender's most recent secretVersion / membership.
   const latestSelectedThreadSenderState = useMemo<SenderSecretVersionState | undefined>(() => {
-    if (latestSelectedThreadSenderMessage) {
-      return latestSelectedThreadSenderMessage;
-    }
     if (
       !selectedThread ||
       activeParticipant?.lastSentMembershipVersion === undefined ||
@@ -3812,7 +3885,6 @@ function AuthenticatedInboxPage() {
   }, [
     activeParticipant?.lastSentMembershipVersion,
     activeParticipant?.lastSentSecretVersion,
-    latestSelectedThreadSenderMessage,
     selectedThread,
   ]);
 
@@ -3948,7 +4020,10 @@ function AuthenticatedInboxPage() {
           messageTrustStatus = 'self';
         } else {
           const observedTuple = tupleFromVisibleActor(senderActor);
-          const allowFirstContactTrust = message.threadSeq === 1n && message.senderSeq === 1n;
+          // First-contact trust auto-pin only applies to the very first
+          // message in a thread. senderSeq is deprecated (always 0n on new
+          // messages) so the gating now relies on threadSeq alone.
+          const allowFirstContactTrust = message.threadSeq === 1n;
           const comparison = allowFirstContactTrust
             ? autoPinPeerIfUnknown(senderActor.publicIdentity, observedTuple)
             : comparePinnedPeer(senderActor.publicIdentity, observedTuple);
@@ -4071,6 +4146,7 @@ function AuthenticatedInboxPage() {
               senderActorId: senderActor.id,
               senderPublicIdentity: senderActor.publicIdentity,
               senderSeq: message.senderSeq,
+              senderMessageId: message.senderMessageId,
               secretVersion: message.secretVersion,
               signingKeyVersion: message.signingKeyVersion,
               ciphertext: message.ciphertext,
@@ -4829,11 +4905,13 @@ function AuthenticatedInboxPage() {
             }
 
             const pendingThreadId = generateClientThreadId();
+            const senderMessageId = randomSenderMessageId();
             const prepared = await prepareEncryptedMessage({
               threadId: pendingThreadId,
               senderActorId: activeActor.id,
               senderPublicIdentity: activeActor.publicIdentity,
-              senderSeq: 1n,
+              senderSeq: 0n,
+              senderMessageId,
               payload: outgoingPayload,
               keyPair: actorKeyPair,
               recipients: [toActorPublicKeys(activeActor), recipientKeys],
@@ -4851,7 +4929,8 @@ function AuthenticatedInboxPage() {
                 title: composeThreadTitle.trim() || undefined,
                 secretVersion: prepared.secretVersion,
                 signingKeyVersion: prepared.signingKeyVersion,
-                senderSeq: 1n,
+                senderSeq: 0n,
+                senderMessageId,
                 ciphertext: prepared.ciphertext,
                 iv: prepared.iv,
                 cipherAlgorithm: prepared.cipherAlgorithm,
@@ -4878,11 +4957,13 @@ function AuthenticatedInboxPage() {
         }
 
         if (pendingRequest) {
+          const senderMessageId = randomSenderMessageId();
           const prepared = await prepareEncryptedMessage({
             threadId: pendingRequest.threadId,
             senderActorId: activeActor.id,
             senderPublicIdentity: activeActor.publicIdentity,
-            senderSeq: 1n,
+            senderSeq: 0n,
+            senderMessageId,
             payload: outgoingPayload,
             keyPair: actorKeyPair,
             recipients: [toActorPublicKeys(activeActor), recipientKeys],
@@ -4897,7 +4978,8 @@ function AuthenticatedInboxPage() {
               threadId: pendingRequest.threadId,
               secretVersion: prepared.secretVersion,
               signingKeyVersion: prepared.signingKeyVersion,
-              senderSeq: 1n,
+              senderSeq: 0n,
+              senderMessageId,
               ciphertext: prepared.ciphertext,
               iv: prepared.iv,
               cipherAlgorithm: prepared.cipherAlgorithm,
@@ -4939,22 +5021,18 @@ function AuthenticatedInboxPage() {
             'Current actor is not visible as a participant in the direct thread.'
           );
         }
-        const latestThreadSenderMessage =
-          selectedThread?.id === directThread.id
-            ? [...selectedThreadMessages]
-                .filter(message => message.senderAgentDbId === activeActor.id)
-                .sort((left, right) => Number(right.senderSeq - left.senderSeq))[0]
-            : undefined;
+        // senderSeq is deprecated; rely on the participant's cached
+        // lastSentSecretVersion / lastSentMembershipVersion instead of
+        // scanning thread messages to find the latest sender state.
         const latestThreadSenderState =
-          latestThreadSenderMessage ??
-          (senderParticipant.lastSentMembershipVersion !== undefined &&
+          senderParticipant.lastSentMembershipVersion !== undefined &&
           senderParticipant.lastSentSecretVersion !== undefined
             ? {
                 threadId: directThread.id,
                 membershipVersion: senderParticipant.lastSentMembershipVersion,
                 secretVersion: senderParticipant.lastSentSecretVersion,
               }
-            : undefined);
+            : undefined;
         const existingSecret = latestThreadSenderState
           ? getCachedSenderSecret(
               directThread.id,
@@ -4985,11 +5063,13 @@ function AuthenticatedInboxPage() {
           envelopes: directThreadSecretEnvelopes,
         });
 
+        const senderMessageId = randomSenderMessageId();
         const prepared = await prepareEncryptedMessage({
           threadId: directThread.id,
           senderActorId: activeActor.id,
           senderPublicIdentity: activeActor.publicIdentity,
-          senderSeq: senderParticipant.lastSentSeq + 1n,
+          senderSeq: 0n,
+          senderMessageId,
           payload: outgoingPayload,
           keyPair: actorKeyPair,
           recipients: [toActorPublicKeys(activeActor), recipientKeys],
@@ -5004,7 +5084,8 @@ function AuthenticatedInboxPage() {
             threadId: directThread.id,
             secretVersion: prepared.secretVersion,
             signingKeyVersion: prepared.signingKeyVersion,
-            senderSeq: senderParticipant.lastSentSeq + 1n,
+            senderSeq: 0n,
+            senderMessageId,
             ciphertext: prepared.ciphertext,
             iv: prepared.iv,
             cipherAlgorithm: prepared.cipherAlgorithm,
@@ -5271,11 +5352,13 @@ function AuthenticatedInboxPage() {
           )
         : null;
 
+      const senderMessageId = randomSenderMessageId();
       const prepared = await prepareEncryptedMessage({
         threadId: selectedThread.id,
         senderActorId: activeActor.id,
         senderPublicIdentity: activeActor.publicIdentity,
-        senderSeq: activeParticipant.lastSentSeq + 1n,
+        senderSeq: 0n,
+        senderMessageId,
         payload: outgoingPayload,
         keyPair: actorKeyPair,
         recipients,
@@ -5290,7 +5373,8 @@ function AuthenticatedInboxPage() {
           threadId: selectedThread.id,
           secretVersion: prepared.secretVersion,
           signingKeyVersion: prepared.signingKeyVersion,
-          senderSeq: activeParticipant.lastSentSeq + 1n,
+          senderSeq: 0n,
+          senderMessageId,
           ciphertext: prepared.ciphertext,
           iv: prepared.iv,
           cipherAlgorithm: prepared.cipherAlgorithm,

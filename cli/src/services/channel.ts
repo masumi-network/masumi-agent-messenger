@@ -4,7 +4,7 @@ import {
   verifySignedChannelMessage,
   type ChannelMessageSignatureInput,
 } from '../../../shared/channel-crypto';
-import type { AgentKeyPair } from '../../../shared/agent-crypto';
+import { randomSenderMessageId, type AgentKeyPair } from '../../../shared/agent-crypto';
 import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY } from '../../../shared/message-limits';
@@ -348,20 +348,6 @@ function normalizeChannelSlugInput(slug: string): string {
   return normalized;
 }
 
-const STALE_CHANNEL_SNAPSHOT_ERROR_PATTERNS = [
-  'senderSigningKeyVersion must match',
-  'senderSeq must be',
-] as const;
-
-function isStaleChannelSnapshotError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  return STALE_CHANNEL_SNAPSHOT_ERROR_PATTERNS.some(pattern =>
-    error.message.includes(pattern)
-  );
-}
-
 function buildTextPayload(message: string, contentType?: string): EncryptedMessagePayload {
   const normalizedContentType = contentType ? normalizeContentType(contentType) : 'text/plain';
   const body = isJsonContentType(normalizedContentType)
@@ -393,6 +379,7 @@ function toMessageSignatureInput(message: {
   channelId: bigint;
   senderPublicIdentity: string;
   senderSeq: bigint;
+  senderMessageId?: bigint;
   senderSigningKeyVersion: string;
   plaintext: string;
   replyToMessageId?: bigint | null;
@@ -401,6 +388,7 @@ function toMessageSignatureInput(message: {
     channelId: message.channelId,
     senderPublicIdentity: message.senderPublicIdentity,
     senderSeq: message.senderSeq,
+    senderMessageId: message.senderMessageId,
     senderSigningKeyVersion: message.senderSigningKeyVersion,
     plaintext: message.plaintext,
     replyToMessageId: message.replyToMessageId ?? null,
@@ -487,6 +475,7 @@ export async function verifyChannelMessages(
     senderAgentDbId?: bigint;
     senderPublicIdentity: string;
     senderSeq: bigint;
+    senderMessageId?: bigint;
     senderSigningPublicKey: string;
     senderSigningKeyVersion: string;
     plaintext: string;
@@ -1189,22 +1178,32 @@ export async function sendChannelMessage(params: {
   contentType?: string;
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
-  const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
-  let actor: Agent | null = null;
+  // No pre-send subscription: send paths only need three procedure reads
+  // (owner, channel state, then the send reducer). `senderMessageId`
+  // uniqueness is enforced server-side, so there is no client-side
+  // bookkeeping that requires a live view.
+  const { profile, session, claims } = await ensureAuthenticatedSession(params);
+  const normalizedEmail = normalizeEmail(claims.email ?? '');
+  if (!normalizedEmail) {
+    throw userError('Current OIDC session is missing an email claim.', {
+      code: 'OIDC_EMAIL_MISSING',
+    });
+  }
+  const { conn } = await connectAuthenticated({
+    host: profile.spacetimeHost,
+    databaseName: profile.spacetimeDbName,
+    sessionToken: session.idToken,
+  });
 
-  async function attemptSend(): Promise<ChannelMutationResult> {
-    if (!actor) {
-      actor = await readOwnedChannelActor({
-        conn,
-        normalizedEmail,
-        actorSlug: params.actorSlug,
-      });
-    }
-    const activeActor = actor;
+  try {
+    const actor = await readOwnedChannelActor({
+      conn,
+      normalizedEmail,
+      actorSlug: params.actorSlug,
+    });
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const channelState = await readVisibleChannelStateSnapshot(conn, {
-      actorId: activeActor.id,
+      actorId: actor.id,
       channelSlug: normalizedSlug,
     });
     const channel =
@@ -1216,62 +1215,42 @@ export async function sendChannelMessage(params: {
     }
     const membership =
       channelState.memberships.find(
-        row => row.channelId === channel.id && row.agentDbId === activeActor.id && row.active
+        row => row.channelId === channel.id && row.agentDbId === actor.id && row.active
       ) ?? null;
     if (!membership) {
       throw userError('Join the channel before sending.', {
         code: 'CHANNEL_MEMBERSHIP_REQUIRED',
       });
     }
-    const keyPair = await requireLocalKeyPair({ profile, actor: activeActor });
-    const nextSeq = membership.lastSentSeq + 1n;
+    const keyPair = await requireLocalKeyPair({ profile, actor });
+    const senderMessageId = randomSenderMessageId();
     const prepared = await prepareChannelMessage({
       channelId: channel.id,
-      senderPublicIdentity: activeActor.publicIdentity,
-      senderSeq: nextSeq,
+      senderPublicIdentity: actor.publicIdentity,
+      senderSeq: 0n,
+      senderMessageId,
       keyPair,
       payload: buildTextPayload(params.message, params.contentType),
     });
+    // The reducer's success is authoritative; no post-send poll needed.
     await conn.reducers.sendChannelMessage({
-      agentDbId: activeActor.id,
+      agentDbId: actor.id,
       channelId: channel.id,
-      senderSeq: nextSeq,
+      senderSeq: 0n,
+      senderMessageId,
       senderSigningKeyVersion: prepared.senderSigningKeyVersion,
       plaintext: prepared.plaintext,
       signature: prepared.signature,
       replyToMessageId: undefined,
     });
+    params.reporter.success(`Sent message to ${params.slug}`);
     return {
       profile: profile.name,
       slug: channel.slug,
       channelId: channel.id.toString(),
       status: 'sent',
     };
-  }
-
-  try {
-    const maxRetries = 2;
-    let result: ChannelMutationResult | undefined;
-    let lastError: unknown;
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      try {
-        result = await attemptSend();
-        break;
-      } catch (error) {
-        lastError = error;
-        if (!isStaleChannelSnapshotError(error) || attempt === maxRetries) {
-          throw error;
-        }
-        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
-      }
-    }
-    if (!result) {
-      throw lastError ?? new Error('Failed to send channel message');
-    }
-    params.reporter.success(`Sent message to ${params.slug}`);
-    return result;
   } finally {
-    subscription.unsubscribe();
     disconnectConnection(conn);
   }
 }

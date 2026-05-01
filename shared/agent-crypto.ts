@@ -98,6 +98,10 @@ export type InboundEncryptedMessage = {
   senderActorId: bigint;
   senderPublicIdentity: string;
   senderSeq: bigint;
+  // Random per-sender opaque id used for replay protection. `0n` indicates a
+  // legacy message that was signed before this field existed; in that case the
+  // signature payload omits it for backwards-compatible verification.
+  senderMessageId?: bigint;
   secretVersion: string;
   signingKeyVersion: string;
   ciphertext: string;
@@ -281,6 +285,20 @@ function randomSecretHex(): string {
   return toHex(crypto.getRandomValues(new Uint8Array(32)));
 }
 
+export function randomSenderMessageId(): bigint {
+  // Reject the legacy sentinels (`0n`, `1n`) so live rows are always
+  // distinguishable from rows that predate this column. The schema default is
+  // `1n`; some legacy data may also report `0n` depending on how it was
+  // serialized, so we exclude both.
+  for (;;) {
+    const buf = new BigUint64Array(1);
+    crypto.getRandomValues(buf);
+    if (buf[0] !== 0n && buf[0] !== 1n) {
+      return buf[0];
+    }
+  }
+}
+
 export async function generateAgentKeyPair(options?: {
   encryptionKeyVersion?: string;
   signingKeyVersion?: string;
@@ -383,7 +401,7 @@ async function buildEnvelopeSignaturePayload(
 }
 
 async function buildMessageSignaturePayload(message: InboundEncryptedMessage): Promise<JsonLike> {
-  return {
+  const base: JsonLike = {
     threadId: message.threadId.toString(),
     senderPublicIdentity: message.senderPublicIdentity,
     senderSeq: message.senderSeq.toString(),
@@ -395,6 +413,18 @@ async function buildMessageSignaturePayload(message: InboundEncryptedMessage): P
       message.replyToMessageId === undefined ? null : message.replyToMessageId.toString(),
     ciphertextHash: await sha256Hex(message.ciphertext),
   };
+  // Bind senderMessageId into the signature only when it is a real client-
+  // generated value. Legacy rows carry the schema sentinel (`1n`) or `0n`,
+  // and their signatures were built before this field existed, so we must
+  // omit the field for them to keep verification working.
+  if (
+    message.senderMessageId !== undefined &&
+    message.senderMessageId !== 0n &&
+    message.senderMessageId !== 1n
+  ) {
+    (base as Record<string, unknown>).senderMessageId = message.senderMessageId.toString();
+  }
+  return base;
 }
 
 async function buildRotationEnvelopes(params: {
@@ -465,6 +495,7 @@ export async function prepareEncryptedMessage(params: {
   senderActorId: bigint;
   senderPublicIdentity: string;
   senderSeq: bigint;
+  senderMessageId: bigint;
   payload: EncryptedMessagePayload;
   keyPair: AgentKeyPair;
   recipients: ActorPublicKeys[];
@@ -517,6 +548,7 @@ export async function prepareEncryptedMessage(params: {
     senderActorId: params.senderActorId,
     senderPublicIdentity: params.senderPublicIdentity,
     senderSeq: params.senderSeq,
+    senderMessageId: params.senderMessageId,
     secretVersion: nextSecretVersion,
     signingKeyVersion: params.keyPair.signing.keyVersion,
     ciphertext,

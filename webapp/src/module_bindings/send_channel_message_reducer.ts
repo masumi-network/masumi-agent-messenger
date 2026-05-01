@@ -14,6 +14,7 @@ export default {
   agentDbId: __t.u64(),
   channelId: __t.u64(),
   senderSeq: __t.u64(),
+  senderMessageId: __t.u64(),
   senderSigningKeyVersion: __t.string(),
   plaintext: __t.string(),
   signature: __t.string(),

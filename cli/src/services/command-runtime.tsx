@@ -38,6 +38,13 @@ type HumanSummary = {
   details: string[];
   celebration?: BirthdayCelebration;
 };
+type ErrorCauseDescription = {
+  message: string;
+  name?: string;
+  stack?: string;
+  cause?: ErrorCauseDescription;
+};
+
 type JsonEnvelope<T> =
   | {
       schemaVersion: 1;
@@ -52,6 +59,8 @@ type JsonEnvelope<T> =
         code: string;
         try: string;
         exitCode: number;
+        stack?: string;
+        cause?: ErrorCauseDescription;
       };
     };
 
@@ -630,7 +639,30 @@ function resolveTryHint(error: CliError): string {
   return error.hint?.trim() || DEFAULT_TRY_HINT;
 }
 
+function describeErrorCause(error: unknown): {
+  message: string;
+  name?: string;
+  stack?: string;
+  cause?: ReturnType<typeof describeErrorCause>;
+} | undefined {
+  if (error === undefined || error === null) return undefined;
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      name: error.name,
+      stack: error.stack,
+      cause: describeErrorCause((error as { cause?: unknown }).cause),
+    };
+  }
+  return { message: String(error) };
+}
+
 function toErrorPayload(error: CliError): JsonEnvelope<never> {
+  // Unwrap the underlying error chain so JSON consumers (and the user
+  // interactively running `--json`) can see what actually went wrong instead
+  // of the generic top-level message. Always-on; harmless for ok paths and
+  // crucial for diagnosing reducer/SDK failures.
+  const cause = describeErrorCause((error as { cause?: unknown }).cause);
   return {
     schemaVersion: JSON_SCHEMA_VERSION,
     ok: false,
@@ -639,6 +671,8 @@ function toErrorPayload(error: CliError): JsonEnvelope<never> {
       code: error.code,
       try: resolveTryHint(error),
       exitCode: error.exitCode,
+      ...(error.stack ? { stack: error.stack } : {}),
+      ...(cause ? { cause } : {}),
     },
   };
 }
