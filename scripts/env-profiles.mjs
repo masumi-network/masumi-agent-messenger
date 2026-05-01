@@ -10,7 +10,7 @@ export const PROFILES = {
   },
   dev: {
     SPACETIMEDB_HOST: 'https://maincloud.spacetimedb.com',
-    SPACETIMEDB_DB_NAME: 'masumi-messenger-dev-4f973',
+    SPACETIMEDB_DB_NAME: 'masumi-messenger-dev-hlq5a',
     MASUMI_OIDC_ISSUER: 'https://masumi-saas-dev-exyyd.ondigitalocean.app',
     MASUMI_NETWORK: 'Preprod',
   },
