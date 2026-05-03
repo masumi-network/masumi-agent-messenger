@@ -1,24 +1,26 @@
-export const SPACETIME_SUBSCRIPTION_LIMITS = {
-  publicRecentChannelMessages: 25,
-  visibleAgents: 250,
-  visibleInboxes: 1,
-  visibleThreadParticipants: 1250,
-  visibleThreadReadStates: 1250,
-  visibleThreadSecretEnvelopes: 31250,
-  visibleThreads: 25,
-  visibleContactRequests: 250,
-  visibleThreadInvites: 250,
-  visibleContactAllowlistEntries: 500,
-  visibleDevices: 100,
-  visibleDeviceShareRequests: 100,
-  visibleDeviceKeyBundles: 100,
-  visibleChannels: 250,
-  visibleChannelMemberships: 250,
-  visibleChannelJoinRequests: 250,
-} as const;
+// Allowlist of SpacetimeDB tables the client may subscribe to over the live
+// connection.
+//
+// This file does NOT cap row counts. SpacetimeDB 2.1 rejects `LIMIT` clauses in
+// subscription SQL, so server-side bounded views and paged procedures are the
+// only enforcement mechanisms. The allowlist here keeps call sites explicit
+// about which tables we subscribe to, and `prepareSpacetimeSubscriptionQuery`
+// strips trailing SQL syntax (semicolons, comments) that the SDK's query
+// builder may emit — both of which the subscription endpoint rejects.
+
+export const SPACETIME_SUBSCRIBABLE_TABLES = [
+  'visible_accounts',
+  'visible_account_change_signal',
+  'visible_device_share_requests',
+  'visible_device_key_bundles',
+  'visible_channels',
+  'visible_channel_memberships',
+] as const;
 
 export type SpacetimeSubscriptionTableName =
-  keyof typeof SPACETIME_SUBSCRIPTION_LIMITS;
+  (typeof SPACETIME_SUBSCRIBABLE_TABLES)[number];
+
+const ALLOWED_TABLE_SET: ReadonlySet<string> = new Set(SPACETIME_SUBSCRIBABLE_TABLES);
 
 type SqlLikeQuery = string | { toSql(): string };
 
@@ -40,20 +42,23 @@ function stripTrailingSqlSyntax(value: string): string {
   return sql;
 }
 
-export function spacetimeSubscriptionLimitFor(
-  tableName: SpacetimeSubscriptionTableName
-): number {
-  return SPACETIME_SUBSCRIPTION_LIMITS[tableName];
+export function isSubscribableTable(
+  name: string
+): name is SpacetimeSubscriptionTableName {
+  return ALLOWED_TABLE_SET.has(name);
 }
 
-export function limitSpacetimeSubscriptionQuery(
+// Prepare an SDK-builder SQL string for `conn.subscriptionBuilder().subscribe`.
+// Asserts the table is in the allowlist and strips trailing SQL syntax that
+// the subscription endpoint rejects. Does NOT add a LIMIT — see file header.
+export function prepareSpacetimeSubscriptionQuery(
   query: SqlLikeQuery,
   tableName: SpacetimeSubscriptionTableName
 ): string {
-  const sql = stripTrailingSqlSyntax(queryToSql(query));
-  // SpacetimeDB 2.1 rejects `LIMIT` in live subscription SQL even though the
-  // SDK query builder can emit arbitrary SQL. Keep the table allowlist wired
-  // here so call sites stay explicit, but subscribe with the supported query.
-  void spacetimeSubscriptionLimitFor(tableName);
-  return sql;
+  if (!isSubscribableTable(tableName)) {
+    throw new Error(
+      `Table ${tableName} is not in the SpacetimeDB subscription allowlist`
+    );
+  }
+  return stripTrailingSqlSyntax(queryToSql(query));
 }

@@ -2,6 +2,8 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { Key, Shield } from '@phosphor-icons/react';
 import { useLiveTable } from '@/lib/spacetime-live-table';
+import { readAllOwnedDevices } from '@/lib/spacetime-procedure-reads';
+import { useProcedureSnapshot } from '@/lib/spacetime-procedure-snapshot';
 import { KeysRecoveryContent } from '@/components/app/keys-recovery-dialog';
 import { VaultGate } from '@/components/app/vault-gate';
 import { KeyVaultDialog } from '@/components/key-vault-form';
@@ -20,7 +22,11 @@ import { buildRouteHead } from '@/lib/seo';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useKeyVault } from '@/hooks/use-key-vault';
 import { tables } from '@/module_bindings';
-import type { Device, VisibleDeviceKeyBundleRow } from '@/module_bindings/types';
+import type {
+  AccountChangeSignal,
+  Device,
+  DeviceKeyBundle,
+} from '@/module_bindings/types';
 import { useWorkspaceShell } from '@/features/workspace/use-workspace-shell';
 import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell';
 import { useWorkspaceWriteAccess } from '@/features/workspace/use-write-access';
@@ -51,20 +57,26 @@ function SecurityPage() {
   const [userRequestedVaultDialog, setUserRequestedVaultDialog] = useState(false);
   const showVaultDialog = vault.unlocked ? false : userRequestedVaultDialog;
 
-  const [devices, devicesReady, devicesError] = useLiveTable<Device>(
-    tables.visibleDevices,
-    'visibleDevices'
+  const [accountSignals] = useLiveTable<AccountChangeSignal>(
+    tables.visible_account_change_signal,
+    'visible_account_change_signal'
   );
+  const accountSignal = accountSignals[0] ?? null;
+  const [devices, devicesReady, devicesError] =
+    useProcedureSnapshot<Device>(
+      readAllOwnedDevices,
+      accountSignal?.ownedDevicesVersion.toString() ?? null
+    );
   const [deviceShareBundles, deviceShareBundlesReady, deviceShareBundlesError] =
-    useLiveTable<VisibleDeviceKeyBundleRow>(
-      tables.visibleDeviceKeyBundles,
-      'visibleDeviceKeyBundles'
+    useLiveTable<DeviceKeyBundle>(
+      tables.visible_device_key_bundles,
+      'visible_device_key_bundles'
     );
 
   const existingDefaultActor =
     workspace.status === 'ready' ? workspace.existingDefaultActor : null;
-  const normalizedEmail =
-    workspace.status === 'ready' ? workspace.normalizedEmail : '';
+  const email =
+    workspace.status === 'ready' ? workspace.email : '';
   const shellInboxSlug =
     workspace.status === 'ready' ? workspace.shellInboxSlug : null;
   const liveConnection =
@@ -76,7 +88,7 @@ function SecurityPage() {
     connected: workspace.status === 'ready' ? workspace.connected : false,
     session: workspace.status === 'ready' ? workspace.session : null,
     normalizedSessionEmail:
-      workspace.status === 'ready' ? workspace.normalizedEmail : null,
+      workspace.status === 'ready' ? workspace.email : null,
     inbox: workspace.status === 'ready' ? workspace.ownedInbox : null,
     connectionIdentity:
       workspace.status === 'ready' ? workspace.conn.identity ?? null : null,
@@ -87,7 +99,7 @@ function SecurityPage() {
     existingDefaultActor === null
       ? []
       : devices
-          .filter(device => device.inboxId === existingDefaultActor.inboxId)
+          .filter(device => device.accountId === existingDefaultActor.accountId)
           .sort((left, right) => left.deviceId.localeCompare(right.deviceId));
   const routeTablesReady =
     workspace.status === 'ready' &&
@@ -121,7 +133,7 @@ function SecurityPage() {
 
   const security = useSecurityRecovery({
     existingDefaultActor,
-    normalizedEmail,
+    email,
     liveConnection,
     canWrite: writeAccess.canWrite,
     writeReason: writeAccess.reason,
@@ -239,15 +251,15 @@ function SecurityPage() {
                         <p
                           className={`mt-2 text-sm ${
                             security.defaultKeyIssue
-                              ? ''
-                              : 'font-medium text-amber-700 dark:text-amber-300'
+                              ? 'font-medium text-amber-700 dark:text-amber-300'
+                              : 'font-medium text-emerald-700 dark:text-emerald-300'
                           }`}
                         >
                           {security.defaultKeyIssue === 'missing'
                             ? 'Missing'
                             : security.defaultKeyIssue === 'mismatch'
                               ? 'Outdated'
-                              : 'Warning: keys already exist on this device'}
+                              : 'Ready'}
                         </p>
                       </div>
                     </div>
@@ -290,7 +302,7 @@ function SecurityPage() {
                         <CardContent className="pt-6">
                           <KeysRecoveryContent
                             mode="recovery"
-                            normalizedEmail={normalizedEmail}
+                            email={email}
                             defaultKeyIssue={security.defaultKeyIssue}
                             vaultUnlocked={vault.unlocked}
                             deviceShareBusy={security.deviceShareBusy}
@@ -341,7 +353,7 @@ function SecurityPage() {
                         <CardContent className="pt-6">
                           <KeysRecoveryContent
                             mode="backups"
-                            normalizedEmail={normalizedEmail}
+                            email={email}
                             defaultKeyIssue={security.defaultKeyIssue}
                             vaultUnlocked={vault.unlocked}
                             deviceShareBusy={security.deviceShareBusy}

@@ -10,13 +10,13 @@ describe('session-owned inbox helpers', () => {
       inboxes: [
         {
           id: 1n,
-          normalizedEmail: 'agent@example.com',
+          email: 'agent@example.com',
           authIssuer: 'https://issuer.example',
           authSubject: 'old-subject',
         },
         {
           id: 2n,
-          normalizedEmail: 'agent@example.com',
+          email: 'agent@example.com',
           authIssuer: 'https://issuer.example',
           authSubject: 'current-subject',
         },
@@ -38,16 +38,16 @@ describe('session-owned inbox helpers', () => {
       [
         {
           id: 1n,
-          inboxId: 1n,
-          normalizedEmail: 'agent@example.com',
+          accountId: 1n,
+          email: 'agent@example.com',
           slug: 'legacy',
           isDefault: true,
           publicIdentity: 'did:legacy',
         },
         {
           id: 2n,
-          inboxId: 2n,
-          normalizedEmail: 'agent@example.com',
+          accountId: 2n,
+          email: 'agent@example.com',
           slug: 'current',
           isDefault: true,
           publicIdentity: 'did:current',

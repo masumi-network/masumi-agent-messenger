@@ -10,8 +10,15 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+import {
+  ContactAllowlistKind,
+} from "./types";
+
 export default {
   agentDbId: __t.u64(),
+  get kind() {
+    return ContactAllowlistKind;
+  },
   agentPublicIdentity: __t.option(__t.string()),
   email: __t.option(__t.string()),
 };

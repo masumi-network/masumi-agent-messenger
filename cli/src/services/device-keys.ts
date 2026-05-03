@@ -20,7 +20,7 @@ function buildDefaultActorIdentity(profile: ResolvedProfile): ActorIdentity | nu
   }
 
   return {
-    normalizedEmail: snapshot.inbox.normalizedEmail,
+    email: snapshot.inbox.email,
     slug: snapshot.actor.slug,
   };
 }
@@ -44,9 +44,9 @@ function dedupeArchivedKeyPairs(pairs: AgentKeyPair[]): AgentKeyPair[] {
 function cloneSharedActorKeyMaterial(actor: SharedActorKeyMaterial): SharedActorKeyMaterial {
   return {
     identity: {
-      normalizedEmail: actor.identity.normalizedEmail,
+      email: actor.identity.email,
       slug: actor.identity.slug,
-      inboxIdentifier: actor.identity.inboxIdentifier,
+      accountIdentifier: actor.identity.accountIdentifier,
     },
     current: actor.current
       ? {
@@ -61,23 +61,23 @@ function cloneSharedActorKeyMaterial(actor: SharedActorKeyMaterial): SharedActor
   };
 }
 
-function buildSnapshot(normalizedEmail: string, actors: SharedActorKeyMaterial[]): DeviceKeyShareSnapshot {
+function buildSnapshot(email: string, actors: SharedActorKeyMaterial[]): DeviceKeyShareSnapshot {
   return {
     version: 1,
-    normalizedEmail,
+    email,
     createdAt: new Date().toISOString(),
     actors,
   };
 }
 
 function mergeOverrideActors(params: {
-  normalizedEmail: string;
+  email: string;
   existingActors: SharedActorKeyMaterial[];
   overrides?: SharedActorKeyMaterial[];
 }): SharedActorKeyMaterial[] {
   const overrideBySlug = new Map(
     (params.overrides ?? [])
-      .filter(override => override.identity.normalizedEmail === params.normalizedEmail)
+      .filter(override => override.identity.email === params.email)
       .map(override => [override.identity.slug, override] as const)
   );
 
@@ -99,16 +99,16 @@ function mergeOverrideActors(params: {
 }
 
 function selectOverrideActors(overrides?: SharedActorKeyMaterial[]): SharedActorKeyMaterial[] {
-  const normalizedEmail = overrides?.find(override => {
+  const email = overrides?.find(override => {
     return Boolean(override.current) || override.archived.length > 0;
-  })?.identity.normalizedEmail;
+  })?.identity.email;
 
-  if (!normalizedEmail) {
+  if (!email) {
     return [];
   }
 
   return (overrides ?? [])
-    .filter(override => override.identity.normalizedEmail === normalizedEmail)
+    .filter(override => override.identity.email === email)
     .map(cloneSharedActorKeyMaterial);
 }
 
@@ -157,7 +157,7 @@ export async function ensureNamespaceVaultContainsDefaultActor(params: {
 
   await params.secretStore.setNamespaceKeyVault(params.profile.name, {
     version: 1,
-    normalizedEmail: identity.normalizedEmail,
+    email: identity.email,
     actors: nextActors,
   });
 }
@@ -170,9 +170,9 @@ export async function exportNamespaceKeyShareSnapshot(params: {
   const existingVault = await params.secretStore.getNamespaceKeyVault(params.profile.name);
   if (existingVault) {
     const snapshot = buildSnapshot(
-      existingVault.normalizedEmail,
+      existingVault.email,
       mergeOverrideActors({
-        normalizedEmail: existingVault.normalizedEmail,
+        email: existingVault.email,
         existingActors: existingVault.actors,
         overrides: params.overrides,
       })
@@ -184,7 +184,7 @@ export async function exportNamespaceKeyShareSnapshot(params: {
 
   const overrideActors = selectOverrideActors(params.overrides);
   if (overrideActors.length > 0) {
-    return buildSnapshot(overrideActors[0].identity.normalizedEmail, overrideActors);
+    return buildSnapshot(overrideActors[0].identity.email, overrideActors);
   }
 
   const defaultIdentity = buildDefaultActorIdentity(params.profile);
@@ -198,11 +198,11 @@ export async function exportNamespaceKeyShareSnapshot(params: {
 
   const overrideActor = (params.overrides ?? []).find(
     override =>
-      override.identity.normalizedEmail === defaultIdentity.normalizedEmail &&
+      override.identity.email === defaultIdentity.email &&
       override.identity.slug === defaultIdentity.slug
   );
 
-  return buildSnapshot(defaultIdentity.normalizedEmail, [
+  return buildSnapshot(defaultIdentity.email, [
     cloneSharedActorKeyMaterial(
       overrideActor ?? {
         identity: defaultIdentity,
@@ -220,7 +220,7 @@ export async function importNamespaceKeyShareSnapshot(params: {
 }): Promise<void> {
   const nextVault: NamespaceKeyVault = {
     version: 1,
-    normalizedEmail: params.snapshot.normalizedEmail,
+    email: params.snapshot.email,
     actors: params.snapshot.actors,
   };
   await params.secretStore.setNamespaceKeyVault(params.profile.name, nextVault);
@@ -228,7 +228,7 @@ export async function importNamespaceKeyShareSnapshot(params: {
   const preferredSlug = params.profile.bootstrapSnapshot?.actor.slug;
   const preferredActor =
     nextVault.actors.find(actor => actor.identity.slug === preferredSlug && actor.current) ??
-    nextVault.actors.find(actor => !actor.identity.inboxIdentifier && actor.current) ??
+    nextVault.actors.find(actor => !actor.identity.accountIdentifier && actor.current) ??
     nextVault.actors.find(actor => actor.current);
 
   if (preferredActor?.current) {

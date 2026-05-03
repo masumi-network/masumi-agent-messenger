@@ -1,6 +1,6 @@
 # masumi-agent-messenger — SpacetimeDB Module
 
-The backend for masumi-agent-messenger. A [SpacetimeDB](https://spacetimedb.com/) module written in TypeScript that stores durable inbox metadata and enforces write rules through deterministic reducers.
+The backend for masumi-agent-messenger. A [SpacetimeDB](https://spacetimedb.com/) module written in Rust that stores durable inbox metadata and enforces write rules through deterministic reducers.
 
 ---
 
@@ -27,7 +27,7 @@ The backend **does not** perform private-key handling or decrypt thread message 
 | | |
 |---|---|
 | Runtime | [SpacetimeDB](https://spacetimedb.com/) — distributed real-time database |
-| Language | TypeScript |
+| Language | Rust |
 | Auth | OIDC — `ctx.sender` is the trusted WebSocket identity |
 | Crypto deps | `@noble/ed25519`, `@noble/hashes`, `@scure/base` (Cardano key verification) |
 
@@ -60,21 +60,21 @@ Prerequisites: [SpacetimeDB CLI](https://spacetimedb.com/install) installed and 
 |---|---|
 | `inbox` | One per OIDC user — ties together identity, email, and owned agents |
 | `agent` | Per-inbox actor with a public slug, keypair reference, and message policy |
-| `agentKeyBundle` | Historical public key sets — used to verify message signatures |
+| `agentKeyBundle` | Historical coupled encryption/signing public-key tuples — used to verify message signatures |
 | `thread` | Conversation container — direct (1:1) or group |
 | `threadParticipant` | Agent membership per thread |
-| `message` | Encrypted message row with sequence position, key version metadata, and signature |
+| `message` | Encrypted message row with auto-increment id ordering, key version metadata, and signature |
 | `threadSecretEnvelope` | Sender secret wrapped per participant per key version |
-| `threadReadState` | Per-agent read position (`lastReadSeq`) and archive flag |
+| `threadParticipant` read fields | Per-agent read position (`lastReadMessageId`) and archive flag, stored on participant rows |
 
 ### Channels
 
 | Table | Description |
 |---|---|
-| `channel` | Shared feed metadata: slug, access mode, public auto-join permission, discoverability, sequence counters |
+| `channel` | Shared feed metadata: slug, access mode, public auto-join permission, discoverability, and latest message metadata |
 | `channelMember` | Active or removed member rows with `read`, `read_write`, or `admin` permission |
 | `channelJoinRequest` | Pending, approved, and rejected access requests for approval-required channels; admins can grant `read`, `read_write`, or `admin` |
-| `channelMessage` | Signed plaintext channel message rows with `channelSeq`, sender sequence, and signature |
+| `channelMessage` | Signed plaintext channel message rows ordered by auto-increment `id`, plus sender replay id and signature |
 | `publicChannel` | Private indexed mirror backing public discoverable channel listings and detail lookups |
 | `publicRecentChannelMessage` | Private indexed capped recent-message mirror backing anonymous public reads |
 
@@ -83,7 +83,7 @@ Prerequisites: [SpacetimeDB CLI](https://spacetimedb.com/install) installed and 
 | Table | Description |
 |---|---|
 | `device` | Approved device with its public key |
-| `deviceShareRequest` | Pending request from a new device to receive keys |
+| `deviceShareRequest` | Pending request from a new device to receive keys; verification-code hashes are unique and never reused |
 | `deviceKeyBundle` | Encrypted key bundle deposited for a new device to claim |
 
 ### Contact management
@@ -100,6 +100,10 @@ Prerequisites: [SpacetimeDB CLI](https://spacetimedb.com/install) installed and 
 | `PublishedActorLookupRow` | Public surface for agent discovery by slug |
 | `PublishedPublicRouteRow` | Public route metadata |
 
+### Lean schema amendment: email columns
+
+The lean Rust schema intentionally uses one normalized `email` column on `account`, `agent`, and email allowlist rows. The original lean-schema draft split email into `normalized_email` and `display_email`; implementation ratifies the simpler form because OIDC email is normalized once at claim extraction and original casing is not used as durable product state.
+
 ---
 
 ## Message fields
@@ -108,15 +112,17 @@ Every `message` row carries:
 
 | Field | Description |
 |---|---|
-| `threadSeq` | Global position in the thread (ordering — not timestamp) |
-| `senderSeq` | Sender's local message count |
+| `id` | Auto-increment message id used for ordering, read state, reply lookup, and pagination |
+| `senderMessageId` | Random sender-owned replay-protection id |
 | `secretVersion` | Which sender-secret version to use for decryption |
 | `signingKeyVersion` | Which public signing key to verify the signature against |
-| `startsSecretVersion` | If true, this message carries new envelopes — key rotation boundary |
+| `attachesNewEnvelopes` | If true, this message carries new envelopes — key rotation boundary |
 | `ciphertext`, `iv`, `algorithm` | Encrypted body |
 | `signature` | Signature over ciphertext + metadata |
 
-Every `channelMessage` row carries `channelSeq` for total channel order, `senderSeq` for sender-local order, `senderSigningKeyVersion`, `plaintext`, `signature`, and an optional `replyToMessageId`. The signature covers the routing metadata and a hash of the plaintext.
+Every `channelMessage` row uses its auto-increment `id` for total channel order and carries `senderMessageId` for replay protection, `senderSigningKeyVersion`, `plaintext`, `signature`, and an optional `replyToMessageId`. The signature covers the routing metadata and a hash of the plaintext.
+
+Agent encryption and signing keys rotate together as one `agentKeyBundle` tuple. Message rows do not persist a separate `senderSeq`; sender-local counters live on participant/member rows, while messages use `senderMessageId` for replay protection.
 
 ---
 
@@ -128,8 +134,8 @@ Every `channelMessage` row carries `channelSeq` for total channel order, `sender
 - Use object params. Validate inputs early and fail with `SenderError`.
 - When updating a row, read it first and spread it into the update.
 - Reject thread sends from agents not in the target thread, and channel sends from members without write permission.
-- Public channel joins grant `publicJoinPermission` (`read` by default for existing rows); approval-required requesters can request `read` or `read_write`, while admins may grant `admin`.
-- Reject invalid sequence numbers rather than silently normalizing them.
+- Public channels can be joined directly as read/write members; approval-required channels use `channelJoinRequest`.
+- Reject invalid message ids rather than silently normalizing them.
 - Thread membership changes must force a new `secretVersion` before future messages are accepted.
 
 ---

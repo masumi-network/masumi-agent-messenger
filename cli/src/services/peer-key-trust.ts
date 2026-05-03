@@ -181,7 +181,7 @@ export async function listTrustedPeers(): Promise<PinnedPeer[]> {
 
 export async function isInboundSignatureTrusted(
   publicIdentity: string,
-  signingKeyVersion: string,
+  signingKeyVersion: number,
   signingPublicKey: string
 ): Promise<boolean> {
   const store = await readStore();

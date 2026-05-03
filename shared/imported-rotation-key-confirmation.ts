@@ -1,17 +1,17 @@
-import type { ActorIdentity, AgentKeyPair } from './agent-crypto';
+import { normalizeKeyVersion, type ActorIdentity, type AgentKeyPair } from './agent-crypto';
 import type { DeviceKeyShareSnapshot, SharedActorKeyMaterial } from './device-sharing';
 import { normalizeEmail, normalizeInboxSlug } from './inbox-slug';
 
 export const IMPORTED_ROTATION_KEY_CONFIRMATION_STORE_VERSION = 1;
 
 export type ImportedRotationKeyConfirmationRecord = {
-  normalizedEmail: string;
+  email: string;
   slug: string;
-  inboxIdentifier?: string;
+  accountIdentifier?: string;
   encryptionPublicKey: string;
-  encryptionKeyVersion: string;
+  encryptionKeyVersion: number;
   signingPublicKey: string;
-  signingKeyVersion: string;
+  signingKeyVersion: number;
   importedAt: string;
   confirmedAt?: string;
 };
@@ -56,28 +56,81 @@ function requireString(record: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function requireStringFromAliases(
+  record: Record<string, unknown>,
+  keys: readonly string[]
+): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (value === undefined) {
+      continue;
+    }
+    if (typeof value !== 'string') {
+      throw new Error('Imported rotation key confirmation store is corrupt.');
+    }
+    return value;
+  }
+
+  throw new Error('Imported rotation key confirmation store is corrupt.');
+}
+
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
-  if (value === undefined) return undefined;
+  if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string') {
     throw new Error('Imported rotation key confirmation store is corrupt.');
   }
   return value;
 }
 
+function optionalStringFromAliases(
+  record: Record<string, unknown>,
+  keys: readonly string[]
+): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (typeof value !== 'string') {
+      throw new Error('Imported rotation key confirmation store is corrupt.');
+    }
+    return value;
+  }
+
+  return undefined;
+}
+
+function readKeyVersion(record: Record<string, unknown>, key: string): number {
+  const value = record[key];
+  if (
+    typeof value !== 'number' &&
+    typeof value !== 'string' &&
+    value !== undefined &&
+    value !== null
+  ) {
+    throw new Error('Imported rotation key confirmation store is corrupt.');
+  }
+  return normalizeKeyVersion(value);
+}
+
 function parseRecord(value: unknown): ImportedRotationKeyConfirmationRecord {
   if (!isRecord(value)) {
     throw new Error('Imported rotation key confirmation store is corrupt.');
   }
+  const slug = requireString(value, 'slug');
 
   return {
-    normalizedEmail: normalizeEmail(requireString(value, 'normalizedEmail')),
-    slug: normalizeInboxSlug(requireString(value, 'slug')) ?? requireString(value, 'slug'),
-    inboxIdentifier: optionalString(value, 'inboxIdentifier'),
+    email: normalizeEmail(requireStringFromAliases(value, ['email', 'normalizedEmail'])),
+    slug: normalizeInboxSlug(slug) ?? slug,
+    accountIdentifier: optionalStringFromAliases(value, [
+      'accountIdentifier',
+      'inboxIdentifier',
+    ]),
     encryptionPublicKey: requireString(value, 'encryptionPublicKey'),
-    encryptionKeyVersion: requireString(value, 'encryptionKeyVersion'),
+    encryptionKeyVersion: readKeyVersion(value, 'encryptionKeyVersion'),
     signingPublicKey: requireString(value, 'signingPublicKey'),
-    signingKeyVersion: requireString(value, 'signingKeyVersion'),
+    signingKeyVersion: readKeyVersion(value, 'signingKeyVersion'),
     importedAt: requireString(value, 'importedAt'),
     confirmedAt: optionalString(value, 'confirmedAt'),
   };
@@ -103,9 +156,9 @@ export function parseImportedRotationKeyConfirmationStore(
 }
 
 export function importedRotationActorKey(identity: ActorIdentity): string {
-  const normalizedEmailValue = normalizeEmail(identity.normalizedEmail);
+  const emailValue = normalizeEmail(identity.email);
   const slug = normalizeInboxSlug(identity.slug) ?? identity.slug.trim();
-  return `${normalizedEmailValue}:${slug}`;
+  return `${emailValue}:${slug}`;
 }
 
 export function sameAgentKeyPairPublicTuple(
@@ -116,17 +169,19 @@ export function sameAgentKeyPairPublicTuple(
     left &&
       right &&
       left.encryption.publicKey === right.encryption.publicKey &&
-      left.encryption.keyVersion === right.encryption.keyVersion &&
+      normalizeKeyVersion(left.encryption.keyVersion) ===
+        normalizeKeyVersion(right.encryption.keyVersion) &&
       left.signing.publicKey === right.signing.publicKey &&
-      left.signing.keyVersion === right.signing.keyVersion
+      normalizeKeyVersion(left.signing.keyVersion) ===
+        normalizeKeyVersion(right.signing.keyVersion)
   );
 }
 
 function normalizeIdentity(identity: ActorIdentity): ActorIdentity {
   return {
-    normalizedEmail: normalizeEmail(identity.normalizedEmail),
+    email: normalizeEmail(identity.email),
     slug: normalizeInboxSlug(identity.slug) ?? identity.slug.trim(),
-    inboxIdentifier: identity.inboxIdentifier,
+    accountIdentifier: identity.accountIdentifier,
   };
 }
 
@@ -135,7 +190,7 @@ function recordMatchesIdentity(
   identity: ActorIdentity
 ): boolean {
   const normalized = normalizeIdentity(identity);
-  return record.normalizedEmail === normalized.normalizedEmail && record.slug === normalized.slug;
+  return record.email === normalized.email && record.slug === normalized.slug;
 }
 
 function recordMatchesKeyPair(
@@ -144,9 +199,9 @@ function recordMatchesKeyPair(
 ): boolean {
   return (
     record.encryptionPublicKey === keyPair.encryption.publicKey &&
-    record.encryptionKeyVersion === keyPair.encryption.keyVersion &&
+    record.encryptionKeyVersion === normalizeKeyVersion(keyPair.encryption.keyVersion) &&
     record.signingPublicKey === keyPair.signing.publicKey &&
-    record.signingKeyVersion === keyPair.signing.keyVersion
+    record.signingKeyVersion === normalizeKeyVersion(keyPair.signing.keyVersion)
   );
 }
 
@@ -157,13 +212,13 @@ function toRecord(
 ): ImportedRotationKeyConfirmationRecord {
   const normalized = normalizeIdentity(identity);
   return {
-    normalizedEmail: normalized.normalizedEmail,
+    email: normalized.email,
     slug: normalized.slug,
-    inboxIdentifier: normalized.inboxIdentifier,
+    accountIdentifier: normalized.accountIdentifier,
     encryptionPublicKey: keyPair.encryption.publicKey,
-    encryptionKeyVersion: keyPair.encryption.keyVersion,
+    encryptionKeyVersion: normalizeKeyVersion(keyPair.encryption.keyVersion),
     signingPublicKey: keyPair.signing.publicKey,
-    signingKeyVersion: keyPair.signing.keyVersion,
+    signingKeyVersion: normalizeKeyVersion(keyPair.signing.keyVersion),
     importedAt,
   };
 }

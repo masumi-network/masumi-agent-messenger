@@ -15,7 +15,16 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["../webapp/src/*"]
+    }
   },
-  "include": ["src", "../shared/**/*.ts"]
+  "include": [
+    "src",
+    "../shared/**/*.ts",
+    "../webapp/src/lib/procedures-stub.ts",
+    "../webapp/src/module_bindings/**/*.ts"
+  ]
 }

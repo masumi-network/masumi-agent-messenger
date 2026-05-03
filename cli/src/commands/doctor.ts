@@ -6,6 +6,10 @@ import { runCommandAction, type GlobalOptions } from '../services/command-runtim
 import { loadProfile } from '../services/config-store';
 import { listDevices } from '../services/device';
 import { discoverAgents } from '../services/discover';
+import {
+  syncOwnedSaasInboxAgents,
+  type SyncOwnedSaasInboxAgentsResult,
+} from '../services/inbox-management';
 import { userError } from '../services/errors';
 import { confirmYesNo, promptChoice } from '../services/prompts';
 import {
@@ -53,6 +57,7 @@ type DoctorResult = {
   spacetimeConnected: boolean;
   spacetimeError: string | null;
   discoveryReachable: boolean | null;
+  managedImport: SyncOwnedSaasInboxAgentsResult['import'] | null;
   keyStorage: KeyStorageSummary;
   nextAction: string;
 };
@@ -149,6 +154,7 @@ export function registerDoctorCommand(program: Command): void {
         let spacetimeConnected: boolean;
         let spacetimeError: string | null = null;
         let discoveryReachable: boolean | null = null;
+        let managedImport: SyncOwnedSaasInboxAgentsResult['import'] | null = null;
 
         try {
           if (status.authenticated) {
@@ -211,6 +217,28 @@ export function registerDoctorCommand(program: Command): void {
           } catch {
             discoveryReachable = false;
           }
+
+          try {
+            managedImport = (
+              await syncOwnedSaasInboxAgents({
+                profileName: options.profile,
+                reporter,
+                apply: false,
+              })
+            ).import;
+          } catch (error) {
+            managedImport = {
+              checked: 0,
+              imported: 0,
+              synced: 0,
+              present: 0,
+              missing: 0,
+              skipped: 0,
+              successes: [],
+              warnings: [`Managed SaaS agent check failed: ${describeError(error)}`],
+              items: [],
+            };
+          }
         }
 
         const keyStorage = summarizeKeyStorage(sourcesReport.sources, sourcesReport.primary);
@@ -222,6 +250,8 @@ export function registerDoctorCommand(program: Command): void {
               ? 'masumi-agent-messenger account login'
               : !localKeysReady
                 ? 'masumi-agent-messenger account recover'
+                : managedImport && managedImport.missing > 0
+                  ? 'masumi-agent-messenger discover'
                 : !activeAgent
                   ? 'masumi-agent-messenger agent list'
                   : 'masumi-agent-messenger thread list';
@@ -244,6 +274,7 @@ export function registerDoctorCommand(program: Command): void {
           spacetimeConnected,
           spacetimeError,
           discoveryReachable,
+          managedImport,
           keyStorage,
           nextAction,
         };
@@ -274,6 +305,12 @@ export function registerDoctorCommand(program: Command): void {
                 result.discoveryReachable === null
                   ? dim('skipped')
                   : yesNo(result.discoveryReachable),
+            },
+            {
+              key: 'Managed SaaS agents',
+              value: result.managedImport
+                ? `${result.managedImport.checked.toString()} checked, ${result.managedImport.missing.toString()} missing locally`
+                : dim('skipped'),
             },
             {
               key: 'Key storage primary',
@@ -333,6 +370,9 @@ export function registerDoctorCommand(program: Command): void {
             : []),
           ...(result.spacetimeError
             ? [`${dim('SpacetimeDB error:')} ${result.spacetimeError}`]
+            : []),
+          ...(result.managedImport?.warnings.length
+            ? result.managedImport.warnings.map(warning => yellow(`Warning: ${warning}`))
             : []),
           `${dim('Next:')} ${bold(result.nextAction)}`,
         ],

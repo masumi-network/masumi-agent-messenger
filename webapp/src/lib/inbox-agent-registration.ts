@@ -1,23 +1,65 @@
 import {
   applyMasumiRegistrationMetadata,
-  createRegistrationFailedMetadata,
-  createRegistrationRequestedMetadata,
   deserializeMasumiRegistrationMetadata,
   type MasumiActorRegistrationMetadata,
+  type MasumiInboxAgentState,
   serializeMasumiRegistrationMetadata,
-  isMasumiInboxAgentState,
   type MasumiRegistrationResult,
   type SerializedMasumiInboxAgentSearchResponse,
   type SerializedMasumiActorRegistrationSubject,
   type SerializedMasumiRegistrationResponse,
 } from '../../../shared/inbox-agent-registration';
-import type { Agent } from '@/module_bindings/types';
-import type { UpsertMasumiInboxAgentRegistrationParams } from '@/module_bindings/types/reducers';
+import type { Agent, MasumiRegistrationState } from '@/module_bindings/types';
+import type { UpsertMasumiRegistrationParams } from '@/module_bindings/types/reducers';
 import type { AuthenticatedBrowserSession } from './auth-session';
+
+type UpsertMasumiInboxAgentRegistrationParams = UpsertMasumiRegistrationParams;
 
 type PersistRegistration = (
   params: UpsertMasumiInboxAgentRegistrationParams
 ) => Promise<unknown>;
+
+// The Rust schema persists a coarse 6-state Masumi enum on the agent row, while
+// the upstream Masumi API exposes 8 granular lifecycle states. Convert at the
+// boundary so callers continue to work in granular terms.
+function rowStateToGranular(
+  state: MasumiRegistrationState | undefined
+): MasumiInboxAgentState | undefined {
+  if (!state) return undefined;
+  switch (state.tag) {
+    case 'PendingRegistration':
+      return 'RegistrationRequested';
+    case 'Registered':
+      return 'RegistrationConfirmed';
+    case 'PendingDeregistration':
+      return 'DeregistrationRequested';
+    case 'Deregistered':
+      return 'DeregistrationConfirmed';
+    case 'Failed':
+      return 'RegistrationFailed';
+  }
+}
+
+function granularToRowState(
+  state: MasumiInboxAgentState | undefined
+): MasumiRegistrationState | undefined {
+  if (!state) return undefined;
+  switch (state) {
+    case 'RegistrationRequested':
+    case 'RegistrationInitiated':
+      return { tag: 'PendingRegistration' };
+    case 'RegistrationConfirmed':
+      return { tag: 'Registered' };
+    case 'RegistrationFailed':
+    case 'DeregistrationFailed':
+      return { tag: 'Failed' };
+    case 'DeregistrationRequested':
+    case 'DeregistrationInitiated':
+      return { tag: 'PendingDeregistration' };
+    case 'DeregistrationConfirmed':
+      return { tag: 'Deregistered' };
+  }
+}
 
 export function readActorRegistrationMetadata(
   actor: Agent
@@ -26,10 +68,7 @@ export function readActorRegistrationMetadata(
     masumiRegistrationNetwork: actor.masumiRegistrationNetwork ?? undefined,
     masumiInboxAgentId: actor.masumiInboxAgentId ?? undefined,
     masumiAgentIdentifier: actor.masumiAgentIdentifier ?? undefined,
-    masumiRegistrationState:
-      actor.masumiRegistrationState && isMasumiInboxAgentState(actor.masumiRegistrationState)
-        ? actor.masumiRegistrationState
-        : undefined,
+    masumiRegistrationState: rowStateToGranular(actor.masumiRegistrationState ?? undefined),
   };
 
   return Object.values(metadata).some(value => value !== undefined) ? metadata : null;
@@ -55,12 +94,12 @@ async function writeRegistrationMetadata(params: {
   persistRegistration: PersistRegistration;
   metadata: MasumiActorRegistrationMetadata | null | undefined;
 }): Promise<void> {
-  const payload = {
+  const payload: UpsertMasumiInboxAgentRegistrationParams = {
     agentDbId: params.actorId,
     masumiRegistrationNetwork: params.metadata?.masumiRegistrationNetwork,
     masumiInboxAgentId: params.metadata?.masumiInboxAgentId,
     masumiAgentIdentifier: params.metadata?.masumiAgentIdentifier,
-    masumiRegistrationState: params.metadata?.masumiRegistrationState,
+    masumiRegistrationState: granularToRowState(params.metadata?.masumiRegistrationState),
   };
 
   await params.persistRegistration(payload);
@@ -328,75 +367,47 @@ export async function registerBrowserInboxAgent(params: {
   registration: MasumiRegistrationResult;
 }> {
   const currentMetadata = readActorRegistrationMetadata(params.actor);
-  const requestedMetadata = createRegistrationRequestedMetadata({
-    current: currentMetadata,
-    preserveCurrentAgentIdentifier: true,
-  });
-  const requestedActor = applyRegistrationMetadataToActor(params.actor, requestedMetadata);
 
-  await writeRegistrationMetadata({
-    actorId: params.actor.id,
-    persistRegistration: params.persistRegistration,
-    metadata: requestedMetadata,
-  });
-
-  try {
-    const response = await fetchBrowserRegistrationApiResponse(
-      '/api/masumi/inbox-agent/register',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(buildSerializedSubject(params.actor)),
-      }
-    );
-    let payload: SerializedMasumiRegistrationResponse;
-    try {
-      payload = parseRegistrationResponse(response.payload);
-    } catch (parseError) {
-      if (
-        !response.ok &&
-        typeof response.payload === 'object' &&
-        response.payload !== null &&
-        'error' in response.payload &&
-        typeof response.payload.error === 'string'
-      ) {
-        const serverError = new Error(response.payload.error);
-        (serverError as unknown as Record<string, unknown>).cause = parseError;
-        throw serverError;
-      }
-      throw parseError;
+  const response = await fetchBrowserRegistrationApiResponse(
+    '/api/masumi/inbox-agent/register',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(buildSerializedSubject(params.actor)),
     }
-    const metadata = deserializeMasumiRegistrationMetadata(payload.metadata);
-    const nextMetadata =
-      metadata ??
-      (payload.registration.status === 'failed'
-        ? createRegistrationFailedMetadata({
-            current: currentMetadata,
-          })
-        : currentMetadata);
-
-    await persistRegistrationMetadata({
-      actor: requestedActor,
-      persistRegistration: params.persistRegistration,
-      metadata: nextMetadata,
-    });
-
-    return {
-      actor: applyRegistrationMetadataToActor(params.actor, nextMetadata),
-      registration: payload.registration,
-    };
-  } catch (error) {
-    await persistRegistrationMetadata({
-      actor: requestedActor,
-      persistRegistration: params.persistRegistration,
-      metadata: createRegistrationFailedMetadata({
-        current: currentMetadata,
-      }),
-    }).catch(() => undefined);
-    throw error;
+  );
+  let payload: SerializedMasumiRegistrationResponse;
+  try {
+    payload = parseRegistrationResponse(response.payload);
+  } catch (parseError) {
+    if (
+      !response.ok &&
+      typeof response.payload === 'object' &&
+      response.payload !== null &&
+      'error' in response.payload &&
+      typeof response.payload.error === 'string'
+    ) {
+      const serverError = new Error(response.payload.error);
+      (serverError as unknown as Record<string, unknown>).cause = parseError;
+      throw serverError;
+    }
+    throw parseError;
   }
+  const metadata = deserializeMasumiRegistrationMetadata(payload.metadata);
+  const nextMetadata = metadata ?? currentMetadata;
+
+  await persistRegistrationMetadata({
+    actor: params.actor,
+    persistRegistration: params.persistRegistration,
+    metadata: nextMetadata,
+  });
+
+  return {
+    actor: applyRegistrationMetadataToActor(params.actor, nextMetadata),
+    registration: payload.registration,
+  };
 }
 
 export async function deregisterBrowserInboxAgent(params: {

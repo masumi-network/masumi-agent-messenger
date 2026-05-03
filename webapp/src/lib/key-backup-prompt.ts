@@ -1,7 +1,7 @@
 const KEY_BACKUP_PROMPT_KEY = 'masumi-agent-messenger:key-backup-prompt';
 
 export type PendingKeyBackupPrompt = {
-  normalizedEmail: string;
+  email: string;
   slug: string;
   reason: 'created';
 };
@@ -24,7 +24,7 @@ export function queueKeyBackupPrompt(prompt: PendingKeyBackupPrompt): void {
 }
 
 export function consumeKeyBackupPrompt(match: {
-  normalizedEmail: string;
+  email: string;
   slug: string;
 }): PendingKeyBackupPrompt | null {
   const storage = getSessionStorage();
@@ -40,7 +40,7 @@ export function consumeKeyBackupPrompt(match: {
   try {
     const parsed = JSON.parse(raw) as PendingKeyBackupPrompt;
     if (
-      parsed.normalizedEmail !== match.normalizedEmail ||
+      parsed.email !== match.email ||
       parsed.slug !== match.slug
     ) {
       return null;

@@ -22,11 +22,12 @@ import {
   connectAuthenticated,
   disconnectConnection,
   readOwnedAgentRow,
+  readStatesFromVisibleThreadPage,
   readShellRows,
-  refreshInboxAuthLeaseIfBound,
-  repairOwnSenderReadStatesOnce,
+  refreshAccountAuthLeaseIfBound,
   subscribeShellTables,
   type ShellRows,
+  type VisibleThreadReadStateRow as OwnThreadParticipantRow,
 } from '../services/spacetimedb';
 import { withExistingAuthenticatedSpacetimeRuntime } from '../services/spacetime-runtime';
 import {
@@ -35,14 +36,16 @@ import {
   isPendingMasumiInboxAgentState,
   isUnavailableForChatInboxAgentState,
   type MasumiInboxAgentState,
+  type MasumiRegistrationResult,
 } from '../../../shared/inbox-agent-registration';
 import { formatRelativeTime } from '../services/format';
 import { toCliError } from '../services/errors';
 import {
-  createInboxIdentity,
+  createAgent,
   deregisterInboxAgent,
   registerInboxAgent,
   rotateInboxKeys,
+  syncOwnedSaasInboxAgents,
 } from '../services/inbox-management';
 import {
   addThreadParticipant,
@@ -56,7 +59,7 @@ import {
   createChannel,
   rejectChannelJoin,
   sendChannelMessage,
-  setChannelMemberPermission,
+  updateChannelMemberPermission,
   updateChannelSettings,
   verifyChannelMessages,
   type ChannelMemberListItem,
@@ -108,13 +111,12 @@ import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { mergeRowsById } from '../services/row-utils';
 import type { DbConnection } from '../../../webapp/src/module_bindings';
 import type {
-  ChannelMemberListRow,
-  VisibleAgentRow,
-  VisibleMessageRow,
-  VisibleThreadSecretEnvelopeRow,
-  VisibleThreadParticipantRow,
-  VisibleThreadReadStateRow,
-  VisibleThreadRow,
+  ChannelMember,
+  Agent,
+  Message,
+  ThreadSecretEnvelope as ThreadSecretEnvelopeRow,
+  ThreadParticipantPreview,
+  Thread,
 } from '../../../webapp/src/module_bindings/types';
 
 type ShellRoute =
@@ -135,8 +137,8 @@ type AccountFocus = 'security' | 'devices';
 type AgentsFocus = 'owned' | 'discover';
 type ShellFocus = 'sidebar' | 'content';
 
-const THREAD_LIST_PAGE_SIZE = 5n;
-const THREAD_MESSAGE_PAGE_SIZE = 5n;
+const THREAD_LIST_PAGE_SIZE = 5;
+const THREAD_MESSAGE_PAGE_SIZE = 5;
 const THREAD_MESSAGE_PREFETCH_ROWS = 4;
 const SHELL_RECONNECT_RETRY_DELAY_MS = 1000;
 const SHELL_LEASE_LOST_RECONNECT_DELAY_MS = 250;
@@ -145,6 +147,74 @@ const SHELL_LEASE_REFRESH_LEAD_MS = 30_000;
 const SHELL_LEASE_REFRESH_MIN_DELAY_MS = 5_000;
 const SHELL_LEASE_REFRESH_FALLBACK_DELAY_MS = 10_000;
 const SHELL_LEASE_LOST_DEBOUNCE_MS = 1500;
+const SHELL_SESSION_BORROW_REFRESH_WINDOW_MS = 2 * 60_000;
+
+function enumTag(value: { tag: string } | string | null | undefined): string {
+  if (typeof value === 'string') return value;
+  return value?.tag ?? '';
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function errorMessageForMatch(error: unknown): string | null {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  if (typeof error === 'string' && error.trim().length > 0) {
+    return error;
+  }
+  return null;
+}
+
+function isOidcTokenExpiredError(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (seen.has(current)) {
+      return false;
+    }
+    seen.add(current);
+
+    if (errorMessageForMatch(current)?.includes('OIDC token is expired')) {
+      return true;
+    }
+
+    if (!isObjectRecord(current)) {
+      return false;
+    }
+
+    if ('cause' in current && current.cause !== undefined) {
+      current = current.cause;
+      continue;
+    }
+    if ('event' in current && current.event !== undefined) {
+      current = current.event;
+      continue;
+    }
+    return false;
+  }
+
+  return false;
+}
+
+function canBorrowShellAuthenticatedConnection(auth: AuthSessionContext): boolean {
+  return auth.session.expiresAt - Date.now() > SHELL_SESSION_BORROW_REFRESH_WINDOW_MS;
+}
+
+function shouldRefreshShellAuthenticatedConnection(auth: AuthSessionContext): boolean {
+  return !canBorrowShellAuthenticatedConnection(auth);
+}
+
+function isStaleSpacetimeOperationTimeoutCode(code: string): boolean {
+  return (
+    code === 'SPACETIMEDB_AUTH_LEASE_REFRESH_TIMEOUT' ||
+    code === 'SPACETIMEDB_OPERATION_TIMEOUT'
+  );
+}
+
 type LoadingSceneLine = {
   text: string;
   color?: string;
@@ -410,7 +480,8 @@ type RootShellProps = {
 
 type LiveThreadMessage = {
   id: string;
-  threadSeq: bigint;
+  messageId: bigint;
+  senderMessageId?: bigint;
   createdAtMicros: bigint;
   senderLabel: string;
   createdAt: string;
@@ -453,15 +524,15 @@ type LiveThreadWindow = {
 
 type LiveThreadMessagesPage = {
   messages: LiveThreadMessage[];
-  nextBeforeThreadSeq: bigint | null;
+  nextBeforeMessageId: bigint | null;
 };
 
 type ThreadListPageState = {
   scopeKey: string | null;
-  threads: VisibleThreadRow[];
-  actors: VisibleAgentRow[];
-  participants: VisibleThreadParticipantRow[];
-  readStates: VisibleThreadReadStateRow[];
+  threads: Thread[];
+  actors: Agent[];
+  participants: ThreadParticipantPreview[];
+  readStates: OwnThreadParticipantRow[];
   nextAfterSortKey: string | null;
   loading: boolean;
   loaded: boolean;
@@ -484,9 +555,9 @@ type InboxSectionCountLabels = Record<InboxSectionKey, string | null>;
 
 type ChannelMessagesPageState = {
   channelId: string | null;
-  lastMessageSeq: string | null;
+  lastMessageId: string | null;
   messages: ChannelMessageItem[];
-  beforeSeqStack: Array<string | null>;
+  beforeMessageIdStack: Array<string | null>;
   pageIndex: number;
   olderExhausted: boolean;
   loading: boolean;
@@ -640,9 +711,9 @@ function createInitialInboxSectionCountLabels(): InboxSectionCountLabels {
 function createInitialChannelMessagesState(): ChannelMessagesPageState {
   return {
     channelId: null,
-    lastMessageSeq: null,
+    lastMessageId: null,
     messages: [],
-    beforeSeqStack: [null],
+    beforeMessageIdStack: [null],
     pageIndex: 0,
     olderExhausted: false,
     loading: false,
@@ -719,15 +790,20 @@ function formatTimestamp(value: string | null | undefined): string {
 
 function createOptimisticThreadMessage(params: {
   messageId: string;
-  threadSeq: string;
+  senderMessageId?: string;
   senderLabel: string;
   body: string;
   createdAt?: Date;
 }): LiveThreadMessage {
   const createdAt = params.createdAt ?? new Date();
+  const senderMessageId =
+    parseBigIntOrNull(params.senderMessageId) ??
+    parseOptimisticSenderMessageId(params.messageId) ??
+    undefined;
   return {
     id: params.messageId,
-    threadSeq: BigInt(params.threadSeq),
+    messageId: parseBigIntOrNull(params.messageId) ?? BigInt(createdAt.getTime()) * 1000n,
+    senderMessageId,
     createdAtMicros: BigInt(createdAt.getTime()) * 1000n,
     senderLabel: params.senderLabel,
     createdAt: createdAt.toISOString(),
@@ -738,6 +814,25 @@ function createOptimisticThreadMessage(params: {
     trustWarning: null,
     optimistic: true,
   };
+}
+
+function parseBigIntOrNull(value: string | undefined): bigint | null {
+  if (!value) {
+    return null;
+  }
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+function parseOptimisticSenderMessageId(messageId: string): bigint | null {
+  const parts = messageId.split(':');
+  if (parts.length !== 3 || parts[0] !== 'sent') {
+    return null;
+  }
+  return parseBigIntOrNull(parts[2]);
 }
 
 function maskValue(value: string): string {
@@ -897,11 +992,6 @@ function normalizeChannelPermissionInput(value: string): 'read' | 'read_write' |
   return null;
 }
 
-function normalizePublicJoinPermissionInput(value: string): 'read' | 'read_write' | null {
-  const normalized = normalizeChannelPermissionInput(value);
-  return normalized === 'read' || normalized === 'read_write' ? normalized : null;
-}
-
 function describeChannelPermission(permission: string): string {
   if (permission === 'read') return 'read only';
   if (permission === 'read_write') return 'read/write';
@@ -1012,13 +1102,13 @@ function describeManagedAgentRegistration(params: {
 }): string {
   switch (params.status) {
     case 'registered':
-      return `Registered managed agent for ${params.slug}.`;
+      return `Success: registered managed agent for ${params.slug}.`;
     case 'deregistered':
       return `Managed agent ${params.slug} is deregistered and cannot be used for chats.`;
     case 'already_registered_or_discovered':
-      return `Registered managed agent for ${params.slug}.`;
+      return `Success: managed agent for ${params.slug} is already registered.`;
     case 'pending':
-      return `Managed agent registration for ${params.slug} is pending.`;
+      return `Success: submitted managed agent registration for ${params.slug}.`;
     case 'insufficient_credits':
       return (
         params.error ??
@@ -1035,6 +1125,107 @@ function describeManagedAgentRegistration(params: {
     default:
       return `Managed agent status: ${params.status}.`;
   }
+}
+
+function shouldShowManagedAgentRegistrationNotice(status: string): boolean {
+  switch (status) {
+    case 'registered':
+    case 'already_registered_or_discovered':
+    case 'pending':
+    case 'skipped':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function buildManagedAgentRegistrationTaskMessage(params: {
+  slug: string;
+  status: string;
+  error?: string | null;
+}): Pick<RootShellTaskState, 'error' | 'notice'> {
+  const message = describeManagedAgentRegistration(params);
+
+  if (shouldShowManagedAgentRegistrationNotice(params.status)) {
+    return {
+      error: null,
+      notice: message,
+    };
+  }
+
+  return {
+    error: message,
+    notice: null,
+  };
+}
+
+function masumiRegistrationStateToRowState(
+  state: MasumiRegistrationResult['registrationState']
+): Agent['masumiRegistrationState'] {
+  switch (state) {
+    case 'RegistrationRequested':
+    case 'RegistrationInitiated':
+      return { tag: 'PendingRegistration' };
+    case 'RegistrationConfirmed':
+      return { tag: 'Registered' };
+    case 'DeregistrationRequested':
+    case 'DeregistrationInitiated':
+      return { tag: 'PendingDeregistration' };
+    case 'DeregistrationConfirmed':
+      return { tag: 'Deregistered' };
+    case 'RegistrationFailed':
+    case 'DeregistrationFailed':
+      return { tag: 'Failed' };
+    case null:
+    default:
+      return undefined;
+  }
+}
+
+function applyManagedAgentRegistrationToActor(
+  actor: Agent,
+  registration: MasumiRegistrationResult
+): Agent {
+  const hasRegistrationData =
+    Boolean(registration.inboxAgentId) ||
+    Boolean(registration.agentIdentifier) ||
+    Boolean(registration.registrationState);
+
+  if (!hasRegistrationData) {
+    return actor;
+  }
+
+  return {
+    ...actor,
+    masumiRegistrationNetwork: registration.network,
+    masumiInboxAgentId: registration.inboxAgentId ?? undefined,
+    masumiAgentIdentifier: registration.agentIdentifier ?? undefined,
+    masumiRegistrationState: masumiRegistrationStateToRowState(
+      registration.registrationState
+    ),
+  };
+}
+
+function describeOwnedSaasImportNotice(summary: {
+  imported: number;
+  synced: number;
+  checked: number;
+  warnings: string[];
+} | null | undefined): string | null {
+  if (!summary) {
+    return null;
+  }
+  const changed = summary.imported + summary.synced;
+  if (changed > 0) {
+    return `Managed agents synced: ${summary.imported.toString()} imported, ${summary.synced.toString()} updated.`;
+  }
+  if (summary.warnings.length > 0) {
+    return `Managed agent sync warning: ${summary.warnings[0]}`;
+  }
+  if (summary.checked > 0) {
+    return `Managed agents checked: ${summary.checked.toString()} already local.`;
+  }
+  return null;
 }
 
 function getManagedAgentPrimaryActionLabel(agent: {
@@ -1090,70 +1281,68 @@ function describeDiscoveryRegistrationState(state: MasumiInboxAgentState): strin
 
 function findOwnedActor(params: {
   rows: ShellRows;
-  normalizedEmail: string;
+  email: string;
   slug?: string | null;
-}): VisibleAgentRow | null {
-  const defaultActor = findDefaultActorByEmail(params.rows.actors, params.normalizedEmail);
+}): Agent | null {
+  const defaultActor = findDefaultActorByEmail(params.rows.actors, params.email);
   if (!defaultActor) {
     return null;
   }
 
   if (!params.slug) {
-    if (!isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState)) {
+    if (!isDeregisteringOrDeregisteredInboxAgentState(enumTag(defaultActor.masumiRegistrationState))) {
       return defaultActor;
     }
     return (
       params.rows.actors.find(
         actor =>
-          actor.inboxId === defaultActor.inboxId &&
-          !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+          actor.accountId === defaultActor.accountId &&
+          !isDeregisteringOrDeregisteredInboxAgentState(enumTag(actor.masumiRegistrationState))
       ) ?? null
     );
   }
 
   const requestedActor =
     params.rows.actors.find(actor => {
-      return actor.inboxId === defaultActor.inboxId && actor.slug === params.slug;
+      return actor.accountId === defaultActor.accountId && actor.slug === params.slug;
     }) ?? null;
   if (
     requestedActor &&
-    !isDeregisteringOrDeregisteredInboxAgentState(requestedActor.masumiRegistrationState)
+    !isDeregisteringOrDeregisteredInboxAgentState(enumTag(requestedActor.masumiRegistrationState))
   ) {
     return requestedActor;
   }
-  if (!isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState)) {
+  if (!isDeregisteringOrDeregisteredInboxAgentState(enumTag(defaultActor.masumiRegistrationState))) {
     return defaultActor;
   }
   return (
     params.rows.actors.find(
       actor =>
-        actor.inboxId === defaultActor.inboxId &&
-        !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+        actor.accountId === defaultActor.accountId &&
+        !isDeregisteringOrDeregisteredInboxAgentState(enumTag(actor.masumiRegistrationState))
     ) ?? null
   );
 }
 
-function matchesPublishedActorKeys(actor: VisibleAgentRow, keyPair: NonNullable<Awaited<ReturnType<typeof getStoredActorKeyPair>>>): boolean {
+function matchesPublishedActorKeys(actor: Agent, keyPair: NonNullable<Awaited<ReturnType<typeof getStoredActorKeyPair>>>): boolean {
   return (
-    actor.currentEncryptionPublicKey === keyPair.encryption.publicKey &&
-    actor.currentEncryptionKeyVersion === keyPair.encryption.keyVersion &&
-    actor.currentSigningPublicKey === keyPair.signing.publicKey &&
-    actor.currentSigningKeyVersion === keyPair.signing.keyVersion
+    actor.currentKeyBundleVersion === keyPair.encryption.keyVersion &&
+    actor.currentKeyBundleVersion === keyPair.signing.keyVersion
   );
 }
 
 async function inspectLocalSecurityState(params: {
   auth: AuthSessionContext;
-  actor: VisibleAgentRow;
+  actor: Agent;
 }): Promise<ShellSecurityState> {
   const secretStore = createSecretStore();
   const keyPair = await getStoredActorKeyPair({
     profile: params.auth.profile,
     secretStore,
     identity: {
-      normalizedEmail: params.actor.normalizedEmail,
+      email: params.actor.email,
       slug: params.actor.slug,
-      inboxIdentifier: params.actor.inboxIdentifier ?? undefined,
+      accountIdentifier: params.actor.slug,
     },
   });
 
@@ -1162,7 +1351,7 @@ async function inspectLocalSecurityState(params: {
       status: 'missing',
       title: 'Private keys are missing on this machine',
       description:
-        'Recover them from another device, import a backup, or rotate keys in Account.',
+        'Recover them from another device, import a backup, or reset keys in Account.',
     };
   }
 
@@ -1171,7 +1360,7 @@ async function inspectLocalSecurityState(params: {
       status: 'mismatch',
       title: 'Local keys do not match the published inbox keys',
       description:
-        'Import newer keys from another device or backup, or rotate keys here.',
+        'Import newer keys from another device or backup, or reset keys here.',
     };
   }
 
@@ -1223,7 +1412,7 @@ function createShellReporter(params: {
   };
 }
 
-function useRootShellConnection(profileName: string) {
+function useRootShellConnection(profileName: string, activeInboxSlug?: string | null) {
   const [state, setState] = useState<ShellConnectionState>({
     mode: 'loading',
     connection: 'connecting',
@@ -1231,6 +1420,9 @@ function useRootShellConnection(profileName: string) {
   });
   const [reconnectToken, setReconnectToken] = useState(0);
   const hasFailedConnectionAttemptRef = useRef(false);
+  const reconnect = useCallback(() => {
+    setReconnectToken(value => value + 1);
+  }, []);
 
   useEffect(() => {
     hasFailedConnectionAttemptRef.current = false;
@@ -1299,13 +1491,28 @@ function useRootShellConnection(profileName: string) {
           return;
         }
         activeIdToken = refreshed.session.idToken;
-        await refreshInboxAuthLeaseIfBound(conn);
+        await refreshAccountAuthLeaseIfBound(conn);
         if (cancelled) {
           return;
         }
         scheduleLeaseRefresh();
       } catch (error) {
         if (cancelled) {
+          return;
+        }
+        if (isOidcTokenExpiredError(error)) {
+          hasFailedConnectionAttemptRef.current = true;
+          setState(current => {
+            if (current.mode !== 'ready') {
+              return current;
+            }
+            return {
+              ...current,
+              connection: 'reconnecting',
+              error: 'Sign-in token expired; reconnecting.',
+            };
+          });
+          scheduleReconnect(SHELL_LEASE_LOST_RECONNECT_DELAY_MS);
           return;
         }
         const cliError = toCliError(error);
@@ -1332,7 +1539,7 @@ function useRootShellConnection(profileName: string) {
         return false;
       }
       try {
-        await refreshInboxAuthLeaseIfBound(conn);
+        await refreshAccountAuthLeaseIfBound(conn);
       } catch {
         return false;
       }
@@ -1340,7 +1547,7 @@ function useRootShellConnection(profileName: string) {
         return false;
       }
       scheduleLeaseRefresh();
-      const recovered = readShellRows(conn);
+      const recovered = await readShellRows(conn, { actorSlug: activeInboxSlug });
       return recovered.actors.length > 0;
     };
 
@@ -1412,12 +1619,16 @@ function useRootShellConnection(profileName: string) {
         activeIdToken = auth.session.idToken;
         scheduleLeaseRefresh();
 
-        const publishRows = () => {
+        const publishRows = async (changedAccessor?: Parameters<typeof readShellRows>[1] extends infer Options
+          ? Options extends { changedAccessor?: infer Accessor }
+            ? Accessor
+            : never
+          : never) => {
           if (!conn || cancelled) {
             return;
           }
 
-          const rows = readShellRows(conn);
+          const rows = await readShellRows(conn, { actorSlug: activeInboxSlug, changedAccessor });
           if (rows.actors.length > 0 && leaseLostDebounceTimeout) {
             clearTimeout(leaseLostDebounceTimeout);
             leaseLostDebounceTimeout = null;
@@ -1425,15 +1636,15 @@ function useRootShellConnection(profileName: string) {
           if (hadVisibleActors && rows.actors.length === 0) {
             if (!leaseLostDebounceTimeout) {
               leaseLostDebounceTimeout = setTimeout(() => {
-                leaseLostDebounceTimeout = null;
-                if (cancelled || !conn) {
-                  return;
-                }
-                const recheck = readShellRows(conn);
-                if (recheck.actors.length > 0) {
-                  return;
-                }
                 void (async () => {
+                  leaseLostDebounceTimeout = null;
+                  if (cancelled || !conn) {
+                    return;
+                  }
+                  const recheck = await readShellRows(conn, { actorSlug: activeInboxSlug });
+                  if (recheck.actors.length > 0) {
+                    return;
+                  }
                   const recovered = await tryInPlaceLeaseRecovery();
                   if (cancelled) {
                     return;
@@ -1472,7 +1683,9 @@ function useRootShellConnection(profileName: string) {
         };
 
         const subscription = await subscribeShellTables(conn, {
-          onUpdate: publishRows,
+          onUpdate: changedAccessor => {
+            void publishRows(changedAccessor);
+          },
           onError: errorMessage => {
             if (cancelled) {
               return;
@@ -1549,11 +1762,11 @@ function useRootShellConnection(profileName: string) {
         disconnectConnection(conn);
       }
     };
-  }, [profileName, reconnectToken]);
+  }, [activeInboxSlug, profileName, reconnectToken]);
 
   return {
     state,
-    reconnect: () => setReconnectToken(value => value + 1),
+    reconnect,
   };
 }
 
@@ -1576,7 +1789,7 @@ function threadSummaryMatchesInboxList(params: {
     return false;
   }
 
-  if (params.threadFilter === 'direct' && params.thread.kind !== 'direct') {
+  if (params.threadFilter === 'direct' && enumTag(params.thread.kind) !== 'Direct') {
     return false;
   }
   if (params.threadFilter === 'unread') {
@@ -1732,24 +1945,11 @@ function threadListPageScopeKey(params: {
   ].join(':');
 }
 
-function threadListProcedureFilter(params: {
-  inboxSection: InboxSectionKey;
-  threadFilter: ShellThreadFilter;
-}): 'active' | 'latest' | 'archived' {
-  if (params.inboxSection === 'archived') {
-    return 'archived';
-  }
-  if (params.threadFilter === 'unread') {
-    return 'latest';
-  }
-  return 'active';
-}
-
 function findThreadReadState(params: {
-  readStates: VisibleThreadReadStateRow[];
+  readStates: OwnThreadParticipantRow[];
   actorId: bigint;
   threadId: bigint;
-}): VisibleThreadReadStateRow | null {
+}): OwnThreadParticipantRow | null {
   return (
     params.readStates.find(
       readState =>
@@ -1759,9 +1959,9 @@ function findThreadReadState(params: {
 }
 
 function threadMatchesRenderedThreadList(params: {
-  thread: VisibleThreadRow;
+  thread: Thread;
   actorId: bigint;
-  readStates: VisibleThreadReadStateRow[];
+  readStates: OwnThreadParticipantRow[];
   inboxSection: InboxSectionKey;
   threadFilter: ShellThreadFilter;
 }): boolean {
@@ -1779,21 +1979,22 @@ function threadMatchesRenderedThreadList(params: {
     return false;
   }
 
-  if (params.threadFilter === 'direct' && params.thread.kind !== 'direct') {
+  if (params.threadFilter === 'direct' && enumTag(params.thread.kind) !== 'Direct') {
     return false;
   }
   if (params.threadFilter === 'unread') {
     if (archived) {
       return false;
     }
-    return params.thread.lastMessageSeq > (readState?.lastReadThreadSeq ?? 0n);
+    const lastAssigned = params.thread.lastMessageId;
+    return lastAssigned > (readState?.lastReadMessageId ?? 0n);
   }
   return true;
 }
 
 function listRenderedThreadItemIds(params: {
-  threads: VisibleThreadRow[];
-  readStates: VisibleThreadReadStateRow[];
+  threads: Thread[];
+  readStates: OwnThreadParticipantRow[];
   actorId: bigint;
   inboxSection: InboxSectionKey;
   threadFilter: ShellThreadFilter;
@@ -1815,8 +2016,8 @@ function listRenderedThreadItemIds(params: {
 }
 
 function findNextRenderedThreadItemId(params: {
-  threads: VisibleThreadRow[];
-  readStates: VisibleThreadReadStateRow[];
+  threads: Thread[];
+  readStates: OwnThreadParticipantRow[];
   actorId: bigint;
   inboxSection: InboxSectionKey;
   threadFilter: ShellThreadFilter;
@@ -1899,14 +2100,14 @@ function mergeThreadPageRows(rows: ShellRows, pageState: ThreadListPageState): S
 
   return {
     ...rows,
-    actors: mergeRowsById(rows.actors, pageState.actors),
-    participants: mergeRowsById(rows.participants, pageState.participants),
-    readStates: mergeRowsById(rows.readStates, pageState.readStates),
-    threads: mergeRowsById(rows.threads, pageState.threads),
+    actors: mergeRowsById(pageState.actors, rows.actors),
+    participants: mergeRowsById(pageState.participants, rows.participants),
+    readStates: mergeRowsById(pageState.readStates, rows.readStates),
+    threads: mergeRowsById(pageState.threads, rows.threads),
   };
 }
 
-function compareVisibleThreadsForList(left: VisibleThreadRow, right: VisibleThreadRow): number {
+function compareVisibleThreadsForList(left: Thread, right: Thread): number {
   if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch) {
     return -1;
   }
@@ -1922,13 +2123,13 @@ function compareVisibleThreadsForList(left: VisibleThreadRow, right: VisibleThre
   return 0;
 }
 
-function mergeThreadListRows(...rowGroups: VisibleThreadRow[][]): VisibleThreadRow[] {
+function mergeThreadListRows(...rowGroups: Thread[][]): Thread[] {
   return mergeRowsById(...rowGroups).sort(compareVisibleThreadsForList);
 }
 
-function compareVisibleThreadMessages(left: VisibleMessageRow, right: VisibleMessageRow): number {
-  if (left.threadSeq < right.threadSeq) return -1;
-  if (left.threadSeq > right.threadSeq) return 1;
+function compareVisibleThreadMessages(left: Message, right: Message): number {
+  if (left.id < right.id) return -1;
+  if (left.id > right.id) return 1;
   if (left.createdAt.microsSinceUnixEpoch < right.createdAt.microsSinceUnixEpoch) return -1;
   if (left.createdAt.microsSinceUnixEpoch > right.createdAt.microsSinceUnixEpoch) return 1;
   if (left.id < right.id) return -1;
@@ -1937,8 +2138,8 @@ function compareVisibleThreadMessages(left: VisibleMessageRow, right: VisibleMes
 }
 
 function compareLiveThreadMessages(left: LiveThreadMessage, right: LiveThreadMessage): number {
-  if (left.threadSeq < right.threadSeq) return -1;
-  if (left.threadSeq > right.threadSeq) return 1;
+  if (left.messageId < right.messageId) return -1;
+  if (left.messageId > right.messageId) return 1;
   if (left.createdAtMicros < right.createdAtMicros) return -1;
   if (left.createdAtMicros > right.createdAtMicros) return 1;
   if (left.id < right.id) return -1;
@@ -1951,10 +2152,21 @@ function mergeLiveThreadMessages(params: {
   optimisticMessages: LiveThreadMessage[];
 }): LiveThreadMessage[] {
   const byId = new Map(params.liveMessages.map(message => [message.id, message] as const));
-  const syncedThreadSeqs = new Set(params.liveMessages.map(message => message.threadSeq.toString()));
+  const syncedMessageIds = new Set(params.liveMessages.map(message => message.messageId.toString()));
+  const syncedSenderMessageIds = new Set(
+    params.liveMessages
+      .map(message => message.senderMessageId?.toString() ?? null)
+      .filter((id): id is string => id !== null)
+  );
 
   for (const message of params.optimisticMessages) {
-    if (syncedThreadSeqs.has(message.threadSeq.toString())) {
+    if (syncedMessageIds.has(message.messageId.toString())) {
+      continue;
+    }
+    if (
+      message.senderMessageId !== undefined &&
+      syncedSenderMessageIds.has(message.senderMessageId.toString())
+    ) {
       continue;
     }
     if (!byId.has(message.id)) {
@@ -1967,21 +2179,21 @@ function mergeLiveThreadMessages(params: {
 
 function resolveThreadMessageRefreshCursor(params: {
   hadLoadedMessages: boolean;
-  currentNextBeforeThreadSeq: bigint | null;
-  refreshedNextBeforeThreadSeq: bigint | null;
+  currentNextBeforeMessageId: bigint | null;
+  refreshedNextBeforeMessageId: bigint | null;
 }): bigint | null {
   if (!params.hadLoadedMessages) {
-    return params.refreshedNextBeforeThreadSeq;
+    return params.refreshedNextBeforeMessageId;
   }
-  if (params.currentNextBeforeThreadSeq === null) {
+  if (params.currentNextBeforeMessageId === null) {
     return null;
   }
-  if (params.refreshedNextBeforeThreadSeq === null) {
+  if (params.refreshedNextBeforeMessageId === null) {
     return null;
   }
-  return params.currentNextBeforeThreadSeq < params.refreshedNextBeforeThreadSeq
-    ? params.currentNextBeforeThreadSeq
-    : params.refreshedNextBeforeThreadSeq;
+  return params.currentNextBeforeMessageId < params.refreshedNextBeforeMessageId
+    ? params.currentNextBeforeMessageId
+    : params.refreshedNextBeforeMessageId;
 }
 
 function buildThreadMessageRenderRows(params: {
@@ -2055,7 +2267,7 @@ function buildChannelMessageRenderRows(params: {
     const body = message.text ?? message.error ?? 'Unable to read message.';
     const header = `From ${message.sender} · ${
       message.createdAt ? formatTimestamp(message.createdAt) : 'time unavailable'
-    } · #${message.channelSeq}${message.status === 'failed' ? ' · verification failed' : ''}`;
+    } · #${message.messageId}${message.status === 'failed' ? ' · verification failed' : ''}`;
     const rows: ChannelMessageRenderRow[] = [
       {
         key: `${message.id}:header`,
@@ -2086,10 +2298,10 @@ function buildChannelMessageRenderRows(params: {
 }
 
 function compareChannelMessageItems(left: ChannelMessageItem, right: ChannelMessageItem): number {
-  const leftSeq = BigInt(left.channelSeq);
-  const rightSeq = BigInt(right.channelSeq);
-  if (leftSeq < rightSeq) return -1;
-  if (leftSeq > rightSeq) return 1;
+  const leftId = BigInt(left.messageId);
+  const rightId = BigInt(right.messageId);
+  if (leftId < rightId) return -1;
+  if (leftId > rightId) return 1;
   return left.id.localeCompare(right.id);
 }
 
@@ -2103,17 +2315,22 @@ function mergeChannelMessageItems(...messageGroups: ChannelMessageItem[][]): Cha
   return [...byId.values()].sort(compareChannelMessageItems);
 }
 
-function channelMemberRowToListItem(member: ChannelMemberListRow): ChannelMemberListItem {
+function channelMemberRowToListItem(member: ChannelMember): ChannelMemberListItem {
   return {
     id: member.id.toString(),
     channelId: member.channelId.toString(),
     agentDbId: member.agentDbId.toString(),
-    agentPublicIdentity: member.agentPublicIdentity,
-    agentSlug: member.agentSlug,
-    agentDisplayName: member.agentDisplayName ?? null,
-    agentCurrentEncryptionPublicKey: member.agentCurrentEncryptionPublicKey,
-    agentCurrentEncryptionKeyVersion: member.agentCurrentEncryptionKeyVersion,
-    permission: member.permission,
+    agentPublicIdentity: '',
+    agentSlug: `agent:${member.agentDbId.toString()}`,
+    agentDisplayName: null,
+    agentCurrentEncryptionPublicKey: '',
+    agentCurrentKeyBundleVersion: '',
+    permission:
+      member.permission.tag === 'ReadWrite'
+        ? 'read_write'
+        : member.permission.tag === 'Admin'
+          ? 'admin'
+          : 'read',
     active: member.active,
     lastSentSeq: member.lastSentSeq.toString(),
   };
@@ -2123,22 +2340,22 @@ async function buildLiveThreadMessages(params: {
   conn: DbConnection;
   rows: ShellRows;
   auth: AuthSessionContext;
-  normalizedEmail: string;
+  email: string;
   activeInboxSlug: string | null;
   threadId: string;
-  beforeThreadSeq?: bigint;
-  fromThreadSeq?: bigint;
-  toThreadSeq?: bigint;
+  beforeMessageId?: bigint;
+  fromMessageId?: bigint;
+  toMessageId?: bigint;
 }): Promise<LiveThreadMessagesPage> {
   const actor = findOwnedActor({
     rows: params.rows,
-    normalizedEmail: params.normalizedEmail,
+    email: params.email,
     slug: params.activeInboxSlug,
   });
   if (!actor) {
     return {
       messages: [],
-      nextBeforeThreadSeq: null,
+      nextBeforeMessageId: null,
     };
   }
 
@@ -2148,54 +2365,30 @@ async function buildLiveThreadMessages(params: {
     profile: params.auth.profile,
     secretStore,
     identity: {
-      normalizedEmail: actor.normalizedEmail,
+      email: actor.email,
       slug: actor.slug,
-      inboxIdentifier: actor.inboxIdentifier ?? actor.slug,
+      accountIdentifier: actor.slug,
     },
   });
   const actorsById = new Map(params.rows.actors.map(row => [row.id, row] as const));
   const ownActorIds = new Set(
     params.rows.actors
-      .filter(row => row.inboxId === actor.inboxId)
+      .filter(row => row.accountId === actor.accountId)
       .map(row => row.id)
   );
 
-  let messageRows: VisibleMessageRow[] = [];
-  let secretEnvelopes: VisibleThreadSecretEnvelopeRow[] = [];
-  let nextBeforeThreadSeq: bigint | null = null;
-
-  if (params.fromThreadSeq !== undefined && params.toThreadSeq !== undefined) {
-    for (
-      let threadSeq = params.fromThreadSeq;
-      threadSeq <= params.toThreadSeq;
-      threadSeq += 1n
-    ) {
-      const page = await params.conn.procedures.listThreadMessages({
-        agentDbId: actor.id,
-        threadId: requestedThreadId,
-        beforeThreadSeq: threadSeq + 1n,
-        limit: 1n,
-      });
-      const exactMessage = page.messages.find(message => {
-        return message.threadId === requestedThreadId && message.threadSeq === threadSeq;
-      });
-      if (!exactMessage) {
-        continue;
-      }
-      messageRows = mergeRowsById(messageRows, [exactMessage]);
-      secretEnvelopes = mergeRowsById(secretEnvelopes, page.secretEnvelopes);
-    }
-  } else {
-    const page = await params.conn.procedures.listThreadMessages({
-      agentDbId: actor.id,
-      threadId: requestedThreadId,
-      beforeThreadSeq: params.beforeThreadSeq,
-      limit: THREAD_MESSAGE_PAGE_SIZE,
-    });
-    messageRows = page.messages;
-    secretEnvelopes = page.secretEnvelopes;
-    nextBeforeThreadSeq = page.nextBeforeThreadSeq ?? null;
-  }
+  const page = await params.conn.procedures.listThreadMessages({
+    agentDbId: actor.id,
+    threadId: requestedThreadId,
+    beforeMessageId:
+      params.fromMessageId !== undefined && params.toMessageId !== undefined
+        ? undefined
+        : params.beforeMessageId,
+    limit: THREAD_MESSAGE_PAGE_SIZE,
+  });
+  const messageRows: Message[] = page.messages;
+  const secretEnvelopes: ThreadSecretEnvelopeRow[] = page.secretEnvelopes;
+  const nextBeforeMessageId: bigint | null = page.nextBeforeMessageId ?? null;
 
   const threadMessages = messageRows.sort(compareVisibleThreadMessages);
   const publicKeysByActorId = buildPublicKeysByActorId(
@@ -2207,6 +2400,7 @@ async function buildLiveThreadMessages(params: {
       actorsById,
     })
   );
+  const thread = params.rows.threads.find(row => row.id === requestedThreadId) ?? null;
 
   const messages = await Promise.all(
     threadMessages.map(async message => {
@@ -2219,11 +2413,13 @@ async function buildLiveThreadMessages(params: {
         ownActorIds,
         secretEnvelopes,
         recipientKeyPair,
+        allowFirstContactTrust: thread?.messageCount === 1n && thread.lastMessageId === message.id,
       });
 
       return {
         id: message.id.toString(),
-        threadSeq: message.threadSeq,
+        messageId: message.id,
+        senderMessageId: message.senderMessageId,
         createdAtMicros: message.createdAt.microsSinceUnixEpoch,
         senderLabel: sender?.displayName?.trim() || sender?.slug || 'unknown',
         createdAt: message.createdAt.toDate().toISOString(),
@@ -2240,33 +2436,34 @@ async function buildLiveThreadMessages(params: {
 
   return {
     messages,
-    nextBeforeThreadSeq,
+    nextBeforeMessageId,
   };
 }
 
 function useLiveThreadMessages(params: {
   connectionState: ShellConnectionState;
   rows: ShellRows | null;
-  normalizedEmail: string;
+  email: string;
   activeInboxSlug: string | null;
   routeType: ShellRoute['type'];
   selectedInboxItem: LiveInboxSectionItem | null;
-  selectedThreadLastMessageSeq: string | null;
+  selectedThreadLastMessageId: string | null;
   optimisticMessages: LiveThreadMessage[];
   securityRefreshToken: number;
   inboxFocus: InboxFocus;
   messageWidth: number;
   messageMaxRows: number;
+  onAuthSessionRefreshed: (message: string) => void;
 }) {
   const [threadMessages, setThreadMessages] = useState<LiveThreadMessage[]>([]);
   const [threadMessagesError, setThreadMessagesError] = useState<string | null>(null);
   const [threadMessagesLoading, setThreadMessagesLoading] = useState(false);
   const [olderThreadMessagesLoading, setOlderThreadMessagesLoading] = useState(false);
-  const [nextBeforeThreadSeq, setNextBeforeThreadSeq] = useState<bigint | null>(null);
+  const [nextBeforeMessageId, setNextBeforeMessageId] = useState<bigint | null>(null);
   const [rowScrollOffset, setRowScrollOffset] = useState(0);
   const threadMessagesRequestRef = useRef(0);
   const threadMessagesRef = useRef<LiveThreadMessage[]>([]);
-  const nextBeforeThreadSeqRef = useRef<bigint | null>(null);
+  const nextBeforeMessageIdRef = useRef<bigint | null>(null);
   const latestRowsRef = useRef<ShellRows | null>(params.rows);
   const visibleThreadRowsRef = useRef<LiveThreadRenderRow[]>([]);
   const threadMessageMaxRowsRef = useRef(params.messageMaxRows);
@@ -2289,9 +2486,9 @@ function useLiveThreadMessages(params: {
     []
   );
 
-  const setNextBeforeThreadSeqWithRef = useCallback((value: bigint | null) => {
-    nextBeforeThreadSeqRef.current = value;
-    setNextBeforeThreadSeq(value);
+  const setNextBeforeMessageIdWithRef = useCallback((value: bigint | null) => {
+    nextBeforeMessageIdRef.current = value;
+    setNextBeforeMessageId(value);
   }, []);
 
   useEffect(() => {
@@ -2304,11 +2501,11 @@ function useLiveThreadMessages(params: {
     setThreadMessagesError(null);
     setThreadMessagesLoading(false);
     setOlderThreadMessagesLoading(false);
-    setNextBeforeThreadSeqWithRef(null);
+    setNextBeforeMessageIdWithRef(null);
     setRowScrollOffset(0);
   }, [
     params.selectedInboxItem?.threadId,
-    setNextBeforeThreadSeqWithRef,
+    setNextBeforeMessageIdWithRef,
     setThreadMessagesWithRef,
   ]);
 
@@ -2325,34 +2522,34 @@ function useLiveThreadMessages(params: {
     ) {
       setThreadMessagesWithRef([]);
       setThreadMessagesError(null);
-      setNextBeforeThreadSeqWithRef(null);
+      setNextBeforeMessageIdWithRef(null);
       setRowScrollOffset(0);
       return;
     }
 
     let cancelled = false;
     const currentMessages = threadMessagesRef.current;
-    const latestLoadedThreadSeq = currentMessages.reduce(
-      (latest, message) => (message.threadSeq > latest ? message.threadSeq : latest),
+    const latestLoadedMessageId = currentMessages.reduce(
+      (latest, message) => (message.messageId > latest ? message.messageId : latest),
       0n
     );
-    const latestVisibleThreadSeq =
-      params.selectedThreadLastMessageSeq === null
+    const latestVisibleMessageId =
+      params.selectedThreadLastMessageId === null
         ? null
-        : BigInt(params.selectedThreadLastMessageSeq);
+        : BigInt(params.selectedThreadLastMessageId);
     const securityRefreshChanged =
       lastSecurityRefreshTokenRef.current !== params.securityRefreshToken;
     lastSecurityRefreshTokenRef.current = params.securityRefreshToken;
     const shouldLoadMissingTail =
       !securityRefreshChanged &&
       currentMessages.length > 0 &&
-      latestVisibleThreadSeq !== null &&
-      latestVisibleThreadSeq > latestLoadedThreadSeq;
+      latestVisibleMessageId !== null &&
+      latestVisibleMessageId > latestLoadedMessageId;
     if (
       !securityRefreshChanged &&
       currentMessages.length > 0 &&
-      latestVisibleThreadSeq !== null &&
-      latestVisibleThreadSeq <= latestLoadedThreadSeq
+      latestVisibleMessageId !== null &&
+      latestVisibleMessageId <= latestLoadedMessageId
     ) {
       setThreadMessagesLoading(false);
       return () => {
@@ -2368,16 +2565,16 @@ function useLiveThreadMessages(params: {
       conn: readyConn,
       rows,
       auth: readyAuth,
-      normalizedEmail: params.normalizedEmail,
+      email: params.email,
       activeInboxSlug: params.activeInboxSlug,
       threadId: params.selectedInboxItem.threadId,
-      fromThreadSeq: shouldLoadMissingTail ? latestLoadedThreadSeq + 1n : undefined,
-      toThreadSeq: shouldLoadMissingTail ? latestVisibleThreadSeq : undefined,
+      fromMessageId: shouldLoadMissingTail ? latestLoadedMessageId + 1n : undefined,
+      toMessageId: shouldLoadMissingTail ? latestVisibleMessageId : undefined,
     })
       .then(result => {
         if (!cancelled && threadMessagesRequestRef.current === requestId) {
           const hadLoadedMessages = threadMessagesRef.current.length > 0;
-          const currentNextBeforeThreadSeq = nextBeforeThreadSeqRef.current;
+          const currentNextBeforeMessageId = nextBeforeMessageIdRef.current;
           setThreadMessagesWithRef(current =>
             mergeLiveThreadMessages({
               liveMessages: [...current, ...result.messages],
@@ -2385,11 +2582,11 @@ function useLiveThreadMessages(params: {
             })
           );
           if (!shouldLoadMissingTail) {
-            setNextBeforeThreadSeqWithRef(
+            setNextBeforeMessageIdWithRef(
               resolveThreadMessageRefreshCursor({
                 hadLoadedMessages,
-                currentNextBeforeThreadSeq,
-                refreshedNextBeforeThreadSeq: result.nextBeforeThreadSeq,
+                currentNextBeforeMessageId,
+                refreshedNextBeforeMessageId: result.nextBeforeMessageId,
               })
             );
           }
@@ -2401,9 +2598,16 @@ function useLiveThreadMessages(params: {
         if (!cancelled && threadMessagesRequestRef.current === requestId) {
           if (!shouldLoadMissingTail) {
             setThreadMessagesWithRef([]);
-            setNextBeforeThreadSeqWithRef(null);
+            setNextBeforeMessageIdWithRef(null);
           }
-          setThreadMessagesError(toCliError(error).message);
+          if (isOidcTokenExpiredError(error)) {
+            params.onAuthSessionRefreshed(
+              'OIDC session expired; refreshing and reconnecting to SpacetimeDB.'
+            );
+            setThreadMessagesError(null);
+          } else {
+            setThreadMessagesError(toCliError(error).message);
+          }
           setThreadMessagesLoading(false);
         }
       });
@@ -2413,16 +2617,17 @@ function useLiveThreadMessages(params: {
     };
   }, [
     params.activeInboxSlug,
-    params.normalizedEmail,
+    params.email,
     params.securityRefreshToken,
-    params.selectedThreadLastMessageSeq,
+    params.selectedThreadLastMessageId,
     params.routeType,
     params.selectedInboxItem?.threadId,
+    params.onAuthSessionRefreshed,
     params.inboxFocus,
     readyAuth,
     readyConn,
     rowsReady,
-    setNextBeforeThreadSeqWithRef,
+    setNextBeforeMessageIdWithRef,
     setThreadMessagesWithRef,
   ]);
 
@@ -2433,7 +2638,7 @@ function useLiveThreadMessages(params: {
       !readyAuth ||
       !rows ||
       !params.selectedInboxItem?.threadId ||
-      nextBeforeThreadSeq === null ||
+      nextBeforeMessageId === null ||
       olderThreadMessagesLoading
     ) {
       return;
@@ -2447,10 +2652,10 @@ function useLiveThreadMessages(params: {
         conn: readyConn,
         rows,
         auth: readyAuth,
-        normalizedEmail: params.normalizedEmail,
+        email: params.email,
         activeInboxSlug: params.activeInboxSlug,
         threadId: params.selectedInboxItem.threadId,
-        beforeThreadSeq: nextBeforeThreadSeq,
+        beforeMessageId: nextBeforeMessageId,
       });
 
       if (threadMessagesRequestRef.current !== requestId) {
@@ -2486,14 +2691,21 @@ function useLiveThreadMessages(params: {
           optimisticMessages: [],
         })
       );
-      setNextBeforeThreadSeqWithRef(result.nextBeforeThreadSeq);
+      setNextBeforeMessageIdWithRef(result.nextBeforeMessageId);
       setThreadMessagesError(null);
       if (anchoredRowScrollOffset !== null) {
         setRowScrollOffset(anchoredRowScrollOffset);
       }
     } catch (error) {
       if (threadMessagesRequestRef.current === requestId) {
-        setThreadMessagesError(toCliError(error).message);
+        if (isOidcTokenExpiredError(error)) {
+          params.onAuthSessionRefreshed(
+            'OIDC session expired; refreshing and reconnecting to SpacetimeDB.'
+          );
+          setThreadMessagesError(null);
+        } else {
+          setThreadMessagesError(toCliError(error).message);
+        }
       }
     } finally {
       if (threadMessagesRequestRef.current === requestId) {
@@ -2501,16 +2713,17 @@ function useLiveThreadMessages(params: {
       }
     }
   }, [
-    nextBeforeThreadSeq,
+    nextBeforeMessageId,
     olderThreadMessagesLoading,
     params.activeInboxSlug,
     params.messageMaxRows,
     params.messageWidth,
-    params.normalizedEmail,
+    params.email,
     params.selectedInboxItem?.threadId,
+    params.onAuthSessionRefreshed,
     readyAuth,
     readyConn,
-    setNextBeforeThreadSeqWithRef,
+    setNextBeforeMessageIdWithRef,
     setThreadMessagesWithRef,
   ]);
 
@@ -2558,10 +2771,10 @@ function useLiveThreadMessages(params: {
       totalRows: allRows.length,
       rowWindowStart,
       rowWindowEnd,
-      canScrollOlder: rowWindowStart > 0 || nextBeforeThreadSeq !== null,
+      canScrollOlder: rowWindowStart > 0 || nextBeforeMessageId !== null,
       canScrollNewer: rowWindowEnd < allRows.length,
     };
-  }, [allMessages, allRows, nextBeforeThreadSeq, params.messageMaxRows, rowScrollOffset]);
+  }, [allMessages, allRows, nextBeforeMessageId, params.messageMaxRows, rowScrollOffset]);
 
   useEffect(() => {
     visibleThreadRowsRef.current = window.visibleRows;
@@ -2569,7 +2782,7 @@ function useLiveThreadMessages(params: {
   }, [params.messageMaxRows, window.visibleRows]);
 
   const startLoadingOlderThreadMessages = useCallback(() => {
-    if (nextBeforeThreadSeqRef.current === null || olderThreadMessagesLoading) {
+    if (nextBeforeMessageIdRef.current === null || olderThreadMessagesLoading) {
       return;
     }
     void loadOlderMessages();
@@ -2580,7 +2793,7 @@ function useLiveThreadMessages(params: {
     threadMessagesError,
     threadMessagesLoading,
     olderThreadMessagesLoading,
-    hasMoreOlderThreadMessages: nextBeforeThreadSeq !== null,
+    hasMoreOlderThreadMessages: nextBeforeMessageId !== null,
     firstThreadMessage: window.firstMessage,
     totalThreadMessages: window.totalMessages,
     threadWindowStart: window.windowStart,
@@ -3196,10 +3409,13 @@ export function RootShell({
   const contentListMaxRows = Math.max(3, terminalSize.rows - 12);
   const inboxListMaxRows = Math.max(1, terminalSize.rows - 17);
   const threadMessageMaxRows = Math.max(3, terminalSize.rows - 15);
-  const { state: connectionState, reconnect } = useRootShellConnection(options.profile);
   const [route, setRoute] = useState<ShellRoute>(initialSnapshot?.route ?? { type: 'auth' });
   const [activeInboxSlug, setActiveInboxSlug] = useState<string | null>(
     initialSnapshot?.activeInboxSlug ?? null
+  );
+  const { state: connectionState, reconnect } = useRootShellConnection(
+    options.profile,
+    activeInboxSlug
   );
   const [inboxSection, setInboxSection] = useState<InboxSectionKey>(
     initialSnapshot?.inboxSection ?? 'threads'
@@ -3213,7 +3429,7 @@ export function RootShell({
   const [selectedChannelSlug, setSelectedChannelSlug] = useState<string | null>(
     initialSnapshot?.selectedChannelSlug ?? null
   );
-  const [exactActiveActorRow, setExactActiveActorRow] = useState<VisibleAgentRow | null>(null);
+  const [exactActiveActorRow, setExactActiveActorRow] = useState<Agent | null>(null);
   const [channelMode, setChannelMode] = useState<ChannelMode>(
     initialSnapshot?.channelMode ?? 'overview'
   );
@@ -3261,6 +3477,68 @@ export function RootShell({
     error: null,
     notice: null,
   });
+  const backgroundOidcRefreshInFlightRef = useRef(false);
+  const refreshShellOidcSessionInBackground = useCallback(
+    () => {
+      if (backgroundOidcRefreshInFlightRef.current) {
+        return;
+      }
+      backgroundOidcRefreshInFlightRef.current = true;
+      void ensureAuthenticatedSession({
+        profileName: options.profile,
+        reporter: silentReporter(),
+      })
+        .then(() => {
+          reconnect();
+        })
+        .catch(error => {
+          const cliError = toCliError(error);
+          setTask(current => ({
+            ...current,
+            error: cliError.message,
+            notice: null,
+            logs: pushLog(current.logs, cliError.message),
+          }));
+          if (cliError.code === 'AUTH_REQUIRED') {
+            setRoute({ type: 'auth' });
+          }
+        })
+        .finally(() => {
+          backgroundOidcRefreshInFlightRef.current = false;
+        });
+    },
+    [options.profile, reconnect]
+  );
+  const refreshShellOidcSessionAndReconnect = useCallback(
+    (message: string) => {
+      setTask(current => ({
+        ...current,
+        error: null,
+        notice: message,
+        logs: pushLog(current.logs, message),
+      }));
+      void ensureAuthenticatedSession({
+        profileName: options.profile,
+        reporter: silentReporter(),
+      })
+        .then(() => {
+          reconnect();
+        })
+        .catch(error => {
+          const cliError = toCliError(error);
+          setTask(current => ({
+            ...current,
+            error: cliError.message,
+            notice: null,
+            logs: pushLog(current.logs, cliError.message),
+          }));
+          if (cliError.code === 'AUTH_REQUIRED') {
+            setRoute({ type: 'auth' });
+          }
+        });
+    },
+    [options.profile, reconnect]
+  );
   const [securityState, setSecurityState] = useState<ShellSecurityState>(DEFAULT_SECURITY_STATE);
   const [securityRefreshToken, setSecurityRefreshToken] = useState(0);
   const [pendingBackupPrompt, setPendingBackupPrompt] = useState<string | null>(null);
@@ -3288,6 +3566,7 @@ export function RootShell({
     createInitialInboxSectionCountLabels
   );
   const agentDiscoveryRequestRef = useRef(0);
+  const ownedAgentsRouteSyncKeyRef = useRef<string | null>(null);
   const channelMessagesRequestRef = useRef(0);
   const channelMessagesStateRef = useRef<ChannelMessagesPageState>(channelMessagesState);
   const visibleChannelMessageRowsRef = useRef<ChannelMessageRenderRow[]>([]);
@@ -3302,7 +3581,7 @@ export function RootShell({
   const initialSetupPublicDescriptionRef = useRef<string | null>(null);
   const [inboxListScrollOffset, setInboxListScrollOffset] = useState(0);
 
-  const normalizedEmail =
+  const email =
     connectionState.mode === 'ready'
       ? normalizeEmail(connectionState.auth.claims.email ?? '')
       : '';
@@ -3312,7 +3591,7 @@ export function RootShell({
   const loadingStep = SHELL_LOADING_STEPS[loadingStepIndex] ?? SHELL_LOADING_STEPS[0];
 
   useEffect(() => {
-    if (connectionState.mode !== 'ready' || !normalizedEmail) {
+    if (connectionState.mode !== 'ready' || !email) {
       setExactActiveActorRow(null);
       return;
     }
@@ -3325,7 +3604,7 @@ export function RootShell({
 
     let cancelled = false;
     void readOwnedAgentRow(connectionState.conn, {
-      normalizedEmail,
+      email,
       actorSlug: normalizedSlug,
     })
       .then(actor => {
@@ -3346,7 +3625,7 @@ export function RootShell({
     activeInboxSlug,
     connectionState.mode,
     connectionState.mode === 'ready' ? connectionState.conn : null,
-    normalizedEmail,
+    email,
   ]);
 
   const exactConnectionRows = useMemo<ShellRows | null>(() => {
@@ -3356,6 +3635,16 @@ export function RootShell({
     if (!exactActiveActorRow) {
       return connectionState.rows;
     }
+    const subscribedActor = connectionState.rows.actors.find(
+      actor => actor.id === exactActiveActorRow.id
+    );
+    if (
+      subscribedActor &&
+      subscribedActor.updatedAt.microsSinceUnixEpoch >
+        exactActiveActorRow.updatedAt.microsSinceUnixEpoch
+    ) {
+      return connectionState.rows;
+    }
     return {
       ...connectionState.rows,
       actors: mergeRowsById(connectionState.rows.actors, [exactActiveActorRow]),
@@ -3363,16 +3652,16 @@ export function RootShell({
   }, [connectionState, exactActiveActorRow]);
 
   const activeActorRow = useMemo(() => {
-    if (connectionState.mode !== 'ready' || !normalizedEmail || !exactConnectionRows) {
+    if (connectionState.mode !== 'ready' || !email || !exactConnectionRows) {
       return null;
     }
 
     return findOwnedActor({
       rows: exactConnectionRows,
-      normalizedEmail,
+      email,
       slug: activeInboxSlug,
     });
-  }, [activeInboxSlug, connectionState.mode, exactConnectionRows, normalizedEmail]);
+  }, [activeInboxSlug, connectionState.mode, exactConnectionRows, email]);
 
   useEffect(() => {
     if (connectionState.mode === 'signed_out') {
@@ -3458,24 +3747,6 @@ export function RootShell({
     setInboxSectionCountLabels(createInitialInboxSectionCountLabels());
   }, [activeActorRow?.id, threadFilter]);
 
-  useEffect(() => {
-    if (connectionState.mode !== 'ready' || !activeActorRow) {
-      return;
-    }
-
-    void repairOwnSenderReadStatesOnce(connectionState.conn, {
-      profileName: connectionState.auth.profile.name,
-      actorId: activeActorRow.id,
-    }).catch(() => {
-      // Best-effort migration; future sends also advance sender read state.
-    });
-  }, [
-    activeActorRow?.id,
-    connectionState.mode,
-    connectionState.mode === 'ready' ? connectionState.auth.profile.name : null,
-    connectionState.mode === 'ready' ? connectionState.conn : null,
-  ]);
-
   const shellRows = useMemo<ShellRows | null>(() => {
     if (connectionState.mode !== 'ready' || !exactConnectionRows) {
       return null;
@@ -3516,8 +3787,8 @@ export function RootShell({
       cancelled = true;
     };
   }, [
-    activeActorRow?.currentEncryptionKeyVersion,
-    activeActorRow?.currentSigningKeyVersion,
+    activeActorRow?.currentKeyBundleVersion,
+    activeActorRow?.currentKeyBundleVersion,
     activeActorRow?.id,
     connectionState.mode,
     connectionState.mode === 'ready' ? connectionState.auth.profile.name : null,
@@ -3525,13 +3796,13 @@ export function RootShell({
   ]);
 
   const model = useMemo<RootShellViewModel | null>(() => {
-    if (connectionState.mode !== 'ready' || !shellRows || !normalizedEmail) {
+    if (connectionState.mode !== 'ready' || !shellRows || !email) {
       return null;
     }
 
     return buildRootShellViewModel({
       rows: shellRows,
-      normalizedEmail,
+      email,
       activeInboxSlug,
       securityState,
       connectionHealth: connectionState.connection as RootShellConnectionHealth,
@@ -3540,7 +3811,7 @@ export function RootShell({
   }, [
     activeInboxSlug,
     connectionState,
-    normalizedEmail,
+    email,
     pendingBackupPrompt,
     securityState,
     shellRows,
@@ -3591,6 +3862,17 @@ export function RootShell({
     }
     return model.inboxes.threads.filter(thread => thread.participants.includes(selectedDiscoveryResult.slug));
   }, [model, selectedDiscoveryResult]);
+
+  const updateExactActiveActorRegistration = useCallback(
+    (params: { slug: string; registration: MasumiRegistrationResult }) => {
+      setExactActiveActorRow(current =>
+        current?.slug === params.slug
+          ? applyManagedAgentRegistrationToActor(current, params.registration)
+          : current
+      );
+    },
+    []
+  );
   const pendingRequestsWithDiscoveredAgent = useMemo(() => {
     if (!model || !selectedDiscoveryResult) {
       return [];
@@ -3746,7 +4028,7 @@ export function RootShell({
       .map(thread =>
         [
           thread.id.toString(),
-          thread.lastMessageSeq.toString(),
+          thread.lastMessageId.toString(),
           thread.updatedAt.microsSinceUnixEpoch.toString(),
           thread.lastMessageAt.microsSinceUnixEpoch.toString(),
         ].join(':')
@@ -3776,11 +4058,11 @@ export function RootShell({
   } = useLiveThreadMessages({
     connectionState,
     rows: shellRows,
-    normalizedEmail,
+    email,
     activeInboxSlug: model?.activeInbox.slug ?? null,
     routeType: route.type,
     selectedInboxItem,
-    selectedThreadLastMessageSeq: selectedThread?.lastMessageSeq ?? null,
+    selectedThreadLastMessageId: selectedThread?.lastMessageId ?? null,
     optimisticMessages:
       selectedInboxItem?.threadId
         ? optimisticThreadMessagesByThreadId[selectedInboxItem.threadId] ?? []
@@ -3789,6 +4071,7 @@ export function RootShell({
     inboxFocus,
     messageWidth: contentListWidth,
     messageMaxRows: threadMessageMaxRows,
+    onAuthSessionRefreshed: refreshShellOidcSessionAndReconnect,
   });
 
   const selectedInboxItemKind = selectedInboxItem?.kind ?? null;
@@ -3862,32 +4145,30 @@ export function RootShell({
     let nextAfterSortKey: string | null = null;
     let exhausted = false;
     let nextItemId: string | null = null;
-    const loadedActors: VisibleAgentRow[] = [];
-    const loadedParticipants: VisibleThreadParticipantRow[] = [];
-    const loadedReadStates: VisibleThreadReadStateRow[] = [];
-    const loadedThreads: VisibleThreadRow[] = [];
+    const loadedActors: Agent[] = [];
+    const loadedParticipants: ThreadParticipantPreview[] = [];
+    const loadedReadStates: OwnThreadParticipantRow[] = [];
+    const loadedThreads: Thread[] = [];
 
     try {
-      await repairOwnSenderReadStatesOnce(connectionState.conn, {
-        profileName: connectionState.auth.profile.name,
-        actorId: activeActorRow.id,
-      });
-      const maxPageAttempts = threadFilter === 'all' ? 1 : 5;
+      const targetRenderedRows = Math.max(THREAD_LIST_PAGE_SIZE, inboxListMaxRows);
+      const visiblePageAttempts = Math.max(
+        1,
+        Math.ceil(targetRenderedRows / THREAD_LIST_PAGE_SIZE)
+      );
+      const maxPageAttempts =
+        threadFilter === 'all' ? visiblePageAttempts : Math.max(visiblePageAttempts, 5);
+      const requestedSelectionAfterId = params?.selectAfterItemId ?? null;
       for (let attempt = 0; attempt < maxPageAttempts; attempt += 1) {
         const page = await connectionState.conn.procedures.listVisibleThreads({
           agentDbId: activeActorRow.id,
           afterSortKey,
-          filter: threadListProcedureFilter({
-            inboxSection,
-            threadFilter,
-          }),
-          query: undefined,
           limit: THREAD_LIST_PAGE_SIZE,
         });
 
         loadedActors.push(...page.actors);
-        loadedParticipants.push(...page.participants);
-        loadedReadStates.push(...page.readStates);
+        loadedParticipants.push(...page.participantPreviews);
+        loadedReadStates.push(...readStatesFromVisibleThreadPage(page));
         loadedThreads.push(...page.threads);
         const pageNextAfterSortKey = page.nextAfterSortKey ?? null;
         nextAfterSortKey = pageNextAfterSortKey;
@@ -3896,16 +4177,25 @@ export function RootShell({
 
         const candidateThreads = mergeThreadListRows(currentPageState.threads, loadedThreads);
         const candidateReadStates = mergeRowsById(currentPageState.readStates, loadedReadStates);
+        const renderedItemIds = listRenderedThreadItemIds({
+          threads: candidateThreads,
+          readStates: candidateReadStates,
+          actorId: activeActorRow.id,
+          inboxSection,
+          threadFilter,
+        });
         nextItemId = findNextRenderedThreadItemId({
           threads: candidateThreads,
           readStates: candidateReadStates,
           actorId: activeActorRow.id,
           inboxSection,
           threadFilter,
-          afterItemId: params?.selectAfterItemId ?? null,
+          afterItemId: requestedSelectionAfterId,
         });
 
-        if (nextItemId || exhausted) {
+        const filledVisibleWindow =
+          requestedSelectionAfterId === null && renderedItemIds.length >= targetRenderedRows;
+        if ((requestedSelectionAfterId !== null && nextItemId) || filledVisibleWindow || exhausted) {
           break;
         }
       }
@@ -3969,6 +4259,7 @@ export function RootShell({
     activeActorRow,
     connectionState,
     currentThreadListScopeKey,
+    inboxListMaxRows,
     inboxSection,
     shellRows,
     threadFilter,
@@ -3997,23 +4288,12 @@ export function RootShell({
       if (cancelled) {
         return;
       }
-      void repairOwnSenderReadStatesOnce(connectionState.conn, {
-          profileName: connectionState.auth.profile.name,
-          actorId: activeActorRow.id,
+      void connectionState.conn.procedures
+        .listVisibleThreads({
+          agentDbId: activeActorRow.id,
+          afterSortKey: undefined,
+          limit: THREAD_LIST_PAGE_SIZE,
         })
-        .catch(() => undefined)
-        .then(() =>
-          connectionState.conn.procedures.listVisibleThreads({
-            agentDbId: activeActorRow.id,
-            afterSortKey: undefined,
-            filter: threadListProcedureFilter({
-              inboxSection,
-              threadFilter,
-            }),
-            query: undefined,
-            limit: THREAD_LIST_PAGE_SIZE,
-          })
-        )
         .then(page => {
           if (cancelled) {
             return;
@@ -4031,8 +4311,8 @@ export function RootShell({
               ...base,
               scopeKey: currentThreadListScopeKey,
               actors: mergeRowsById(base.actors, page.actors),
-              participants: mergeRowsById(base.participants, page.participants),
-              readStates: mergeRowsById(base.readStates, page.readStates),
+              participants: mergeRowsById(base.participants, page.participantPreviews),
+              readStates: mergeRowsById(base.readStates, readStatesFromVisibleThreadPage(page)),
               threads: mergeThreadListRows(base.threads, page.threads),
               nextAfterSortKey: refreshedCursor.nextAfterSortKey,
               loaded: true,
@@ -4074,6 +4354,67 @@ export function RootShell({
     threadListPageState.loaded,
     threadListPageState.scopeKey,
     threadSignalSignature,
+  ]);
+
+  useEffect(() => {
+    if (
+      connectionState.mode !== 'ready' ||
+      !exactConnectionRows ||
+      !activeActorRow ||
+      !currentThreadListScopeKey ||
+      inboxSection === 'pending' ||
+      threadListPageState.scopeKey !== currentThreadListScopeKey
+    ) {
+      return;
+    }
+
+    const snapshotThreads =
+      exactConnectionRows.threadSignals.length > 0
+        ? exactConnectionRows.threadSignals
+        : exactConnectionRows.threads;
+    if (snapshotThreads.length === 0) {
+      return;
+    }
+
+    const hasAllSnapshotThreads = snapshotThreads.every(snapshotThread =>
+      threadListPageState.threads.some(thread => thread.id === snapshotThread.id)
+    );
+    if (threadListPageState.loaded && !threadListPageState.loading && hasAllSnapshotThreads) {
+      return;
+    }
+
+    threadListPageRequestRef.current += 1;
+    threadListPageLoadingRef.current = false;
+    setThreadListPageState(current => {
+      if (current.scopeKey !== currentThreadListScopeKey) {
+        return current;
+      }
+      const nextPageState = {
+        ...current,
+        scopeKey: currentThreadListScopeKey,
+        actors: mergeRowsById(current.actors, exactConnectionRows.actors),
+        participants: mergeRowsById(current.participants, exactConnectionRows.participants),
+        readStates: mergeRowsById(current.readStates, exactConnectionRows.readStates),
+        threads: mergeThreadListRows(current.threads, snapshotThreads),
+        nextAfterSortKey: null,
+        loading: false,
+        loaded: true,
+        exhausted: true,
+        error: null,
+      };
+      threadListPageStateRef.current = nextPageState;
+      return nextPageState;
+    });
+  }, [
+    activeActorRow,
+    connectionState.mode,
+    currentThreadListScopeKey,
+    exactConnectionRows,
+    inboxSection,
+    threadListPageState.loaded,
+    threadListPageState.loading,
+    threadListPageState.scopeKey,
+    threadListPageState.threads,
   ]);
 
   useEffect(() => {
@@ -4226,8 +4567,8 @@ export function RootShell({
       },
       {
         id: 'rotate-keys',
-        label: 'Rotate agent keys',
-        description: 'Rotate keys and optionally share or revoke devices.',
+        label: 'Reset agent keys',
+        description: 'Reset keys and optionally share or revoke devices.',
       },
       {
         id: 'inspect-key-sources',
@@ -4595,20 +4936,47 @@ export function RootShell({
       return await run();
     }
 
+    const auth = connectionState.auth;
+    if (shouldRefreshShellAuthenticatedConnection(auth)) {
+      refreshShellOidcSessionInBackground();
+    }
+
     return await withExistingAuthenticatedSpacetimeRuntime(
       {
         conn: connectionState.conn,
-        auth: connectionState.auth,
+        auth,
         reporter,
       },
       () => run()
     );
   };
 
+  const syncOwnedSaasForShell = async (params?: {
+    announce?: boolean;
+  }): Promise<string | null> => {
+    const importResult = await runWithShellConnection(() =>
+      syncOwnedSaasInboxAgents({
+        profileName: options.profile,
+        reporter: params?.announce
+          ? createShellReporter({
+              setTask,
+              verbose: options.verbose,
+            })
+          : silentReporter(),
+        apply: true,
+      })
+    );
+    if (importResult.import.imported > 0 || importResult.import.synced > 0) {
+      reconnect();
+    }
+    return describeOwnedSaasImportNotice(importResult.import);
+  };
+
   const loadAgentDiscovery = async (params?: {
     query?: string;
     page?: number;
     announce?: boolean;
+    syncOwnedSaas?: boolean;
   }): Promise<void> => {
     if (connectionState.mode !== 'ready') {
       return;
@@ -4628,7 +4996,11 @@ export function RootShell({
       error: null,
     }));
 
+    let importNotice: string | null = null;
     try {
+      if (params?.syncOwnedSaas) {
+        importNotice = await syncOwnedSaasForShell({ announce: params.announce });
+      }
       const result = await runWithShellConnection(() =>
         discoverAgents({
           profileName: options.profile,
@@ -4661,13 +5033,14 @@ export function RootShell({
         setTask(current => ({
           ...current,
           notice:
-            result.total > 0
+            importNotice ??
+            (result.total > 0
               ? result.mode === 'search'
                 ? `Found ${result.total} verified agent${result.total === 1 ? '' : 's'}.`
                 : `Loaded ${result.total} registered agent${result.total === 1 ? '' : 's'}.`
               : result.mode === 'search'
                 ? `No verified agents matched ${query}.`
-                : 'No registered agents found on this page.',
+                : 'No registered agents found on this page.'),
         }));
       }
     } catch (error) {
@@ -4732,6 +5105,8 @@ export function RootShell({
     void loadAgentDiscovery({
       query: agentDiscovery.query,
       page: agentDiscovery.page,
+      announce: true,
+      syncOwnedSaas: true,
     });
   }, [
     agentDiscovery.loaded,
@@ -4741,6 +5116,47 @@ export function RootShell({
     connectionState.mode,
     route.type,
   ]);
+
+  useEffect(() => {
+    if (connectionState.mode !== 'ready' || route.type !== 'agents' || !email) {
+      return;
+    }
+
+    const syncKey = `${options.profile}:${email}`;
+    if (ownedAgentsRouteSyncKeyRef.current === syncKey) {
+      return;
+    }
+    ownedAgentsRouteSyncKeyRef.current = syncKey;
+
+    void syncOwnedSaasForShell({ announce: true })
+      .then(notice => {
+        if (!notice) {
+          return;
+        }
+        setTask(current =>
+          current.busy || current.banner || current.active
+            ? current
+            : {
+                ...current,
+                error: null,
+                notice,
+              }
+        );
+      })
+      .catch(error => {
+        if (ownedAgentsRouteSyncKeyRef.current === syncKey) {
+          ownedAgentsRouteSyncKeyRef.current = null;
+        }
+        setTask(current =>
+          current.busy || current.banner || current.active
+            ? current
+            : {
+                ...current,
+                error: toCliError(error).message,
+              }
+        );
+      });
+  }, [connectionState.mode, email, options.profile, route.type]);
 
   const performTask = async <T,>(
     label: string,
@@ -4765,8 +5181,7 @@ export function RootShell({
       verbose: options.verbose,
     });
 
-    try {
-      const result = await runWithShellConnection(() => runner(reporter), reporter);
+    const finishSuccess = (result: T) => {
       setTask(current => ({
         ...current,
         busy: false,
@@ -4774,8 +5189,40 @@ export function RootShell({
         error: null,
       }));
       onSuccess?.(result);
+    };
+
+    try {
+      const result = await runWithShellConnection(() => runner(reporter), reporter);
+      finishSuccess(result);
     } catch (error) {
+      if (isOidcTokenExpiredError(error)) {
+        refreshShellOidcSessionInBackground();
+        setTask(current => ({
+          ...current,
+          busy: false,
+          active: null,
+          error: null,
+          notice: 'Sign-in token expired; refreshing in the background.',
+          logs: pushLog(current.logs, 'Sign-in token expired; refreshing in the background.'),
+        }));
+        return;
+      }
       const cliError = toCliError(error);
+      if (isStaleSpacetimeOperationTimeoutCode(cliError.code)) {
+        reconnect();
+      }
+      if (cliError.code === 'AUTH_REQUIRED') {
+        setTask(current => ({
+          ...current,
+          busy: false,
+          active: null,
+          error: cliError.message,
+          notice: null,
+          logs: pushLog(current.logs, cliError.message),
+        }));
+        setRoute({ type: 'auth' });
+        return;
+      }
       setTask(current => ({
         ...current,
         busy: false,
@@ -4787,7 +5234,7 @@ export function RootShell({
   };
 
   const loadSelectedChannelMessages = async (params?: {
-    beforeSeq?: string | null;
+    beforeMessageId?: string | null;
     preserveRowScroll?: boolean;
     prependOlder?: boolean;
   }): Promise<void> => {
@@ -4797,13 +5244,13 @@ export function RootShell({
 
     const requestId = channelMessagesRequestRef.current + 1;
     channelMessagesRequestRef.current = requestId;
-    const beforeSeq = params?.beforeSeq ?? null;
+    const beforeMessageId = params?.beforeMessageId ?? null;
     const loadingOlder = params?.prependOlder === true;
 
     setChannelMessagesState(current => ({
       ...current,
       channelId: selectedChannel.id,
-      lastMessageSeq: selectedChannel.lastMessageSeq,
+      lastMessageId: selectedChannel.messageCount,
       loading: loadingOlder ? current.loading : true,
       loadingOlder: loadingOlder ? true : current.loadingOlder,
       error: null,
@@ -4811,15 +5258,13 @@ export function RootShell({
 
     try {
       const rows = await connectionState.conn.procedures.listChannelMessages({
-        agentDbId: activeActorRow.id,
         channelId: BigInt(selectedChannel.id),
-        channelSlug: undefined,
-        beforeChannelSeq: beforeSeq === null ? undefined : BigInt(beforeSeq),
-        limit: BigInt(CHANNEL_MESSAGE_PAGE_SIZE),
+        beforeMessageId: beforeMessageId === null ? undefined : BigInt(beforeMessageId),
+        limit: CHANNEL_MESSAGE_PAGE_SIZE,
       });
       const sortedRows = [...rows].sort((left, right) => {
-        if (left.channelSeq < right.channelSeq) return -1;
-        if (left.channelSeq > right.channelSeq) return 1;
+        if (left.id < right.id) return -1;
+        if (left.id > right.id) return 1;
         return Number(left.id - right.id);
       });
       const messages = await verifyChannelMessages(connectionState.conn, sortedRows);
@@ -4857,9 +5302,9 @@ export function RootShell({
 
         return {
           channelId: selectedChannel.id,
-          lastMessageSeq: selectedChannel.lastMessageSeq,
+          lastMessageId: selectedChannel.messageCount,
           messages: merged,
-          beforeSeqStack: current.beforeSeqStack,
+          beforeMessageIdStack: current.beforeMessageIdStack,
           pageIndex: current.pageIndex,
           olderExhausted:
             params?.prependOlder === true && messages.length === 0
@@ -4885,7 +5330,7 @@ export function RootShell({
       setChannelMessagesState(current => ({
         ...current,
         channelId: selectedChannel.id,
-        lastMessageSeq: selectedChannel.lastMessageSeq,
+        lastMessageId: selectedChannel.messageCount,
         loading: false,
         loadingOlder: false,
         loaded: true,
@@ -4901,7 +5346,7 @@ export function RootShell({
 
     if (direction < 0) {
       await loadSelectedChannelMessages({
-        beforeSeq: null,
+        beforeMessageId: null,
         preserveRowScroll: true,
       });
       return;
@@ -4911,9 +5356,9 @@ export function RootShell({
     if (!firstMessage || selectedChannelMessageItems.length < CHANNEL_MESSAGE_PAGE_SIZE) {
       return;
     }
-    const nextBeforeSeq = firstMessage.channelSeq;
+    const nextBeforeMessageId = firstMessage.messageId;
     await loadSelectedChannelMessages({
-      beforeSeq: nextBeforeSeq,
+      beforeMessageId: nextBeforeMessageId,
       preserveRowScroll: true,
       prependOlder: true,
     });
@@ -4928,7 +5373,7 @@ export function RootShell({
       return;
     }
     void loadSelectedChannelMessages({
-      beforeSeq: firstMessage.channelSeq,
+      beforeMessageId: firstMessage.messageId,
       preserveRowScroll: true,
       prependOlder: true,
     });
@@ -4981,11 +5426,9 @@ export function RootShell({
 
     try {
       const rows = await connectionState.conn.procedures.listChannelMembers({
-        agentDbId: activeActorRow.id,
         channelId: BigInt(selectedChannel.id),
-        channelSlug: undefined,
-        afterMemberId: afterMemberId === null ? undefined : BigInt(afterMemberId),
-        limit: BigInt(CHANNEL_MEMBER_PAGE_SIZE),
+        afterId: afterMemberId === null ? undefined : BigInt(afterMemberId),
+        limit: CHANNEL_MEMBER_PAGE_SIZE,
       });
 
       if (channelMembersRequestRef.current !== requestId) {
@@ -5069,25 +5512,25 @@ export function RootShell({
       !stateMatchesChannel ||
       (!channelMessagesState.loading &&
         channelMessagesState.pageIndex === 0 &&
-        channelMessagesState.lastMessageSeq !== selectedChannel.lastMessageSeq) ||
+        channelMessagesState.lastMessageId !== selectedChannel.messageCount) ||
       (!channelMessagesState.loading && !channelMessagesState.loaded);
     if (!shouldLoadSelectedChannel) {
       return;
     }
     void loadSelectedChannelMessages({
-      beforeSeq: null,
+      beforeMessageId: null,
       preserveRowScroll: stateMatchesChannel && channelMessagesState.loaded,
     });
   }, [
     channelMessagesState.channelId,
-    channelMessagesState.lastMessageSeq,
+    channelMessagesState.lastMessageId,
     channelMessagesState.loaded,
     channelMessagesState.loading,
     channelMode,
     channelTab,
     route.type,
     selectedChannel?.id,
-    selectedChannel?.lastMessageSeq,
+    selectedChannel?.messageCount,
   ]);
 
   useEffect(() => {
@@ -5111,6 +5554,13 @@ export function RootShell({
   ]);
 
   const openTaskPanel = (panel: Omit<TaskPanelState, 'stepIndex'>) => {
+    setTask(current => ({
+      ...current,
+      active: null,
+      banner: null,
+      error: null,
+      notice: null,
+    }));
     setTaskLookup({
       fieldKey: null,
       query: '',
@@ -5128,7 +5578,7 @@ export function RootShell({
   };
 
   const promptDefaultSlugForInitialSetup = (params: {
-    normalizedEmail: string;
+    email: string;
     suggestedSlug: string;
   }): Promise<{
     slug: string;
@@ -5146,7 +5596,7 @@ export function RootShell({
 
       openTaskPanel({
         title: 'Confirm public slug',
-        help: `Use the generated slug for ${params.normalizedEmail}, or edit it before continuing.`,
+        help: `Use the generated slug for ${params.email}, or edit it before continuing.`,
         submitLabel: 'Use slug',
         fields: [
           {
@@ -5191,6 +5641,25 @@ export function RootShell({
     setSidebarNavIndex(toSidebarSelectionIndex(type));
     setRoute({ type });
     setShellFocus('content');
+    if (type === 'discover') {
+      setAgentDiscovery(current => ({
+        ...current,
+        loaded: false,
+        error: null,
+      }));
+    }
+    if (type === 'agents') {
+      ownedAgentsRouteSyncKeyRef.current = null;
+    }
+    setTask(current =>
+      current.busy || current.banner || current.active
+        ? current
+        : {
+            ...current,
+            error: null,
+            notice: null,
+          }
+    );
   };
 
   const cycleActiveInbox = (direction: 1 | -1) => {
@@ -5328,7 +5797,7 @@ export function RootShell({
                     ...(current[result.threadId] ?? []),
                     createOptimisticThreadMessage({
                       messageId: result.messageId,
-                      threadSeq: result.threadSeq,
+                      senderMessageId: result.senderMessageId,
                       senderLabel: model.activeInbox.displayName?.trim() || model.activeInbox.slug,
                       body: values.message.trim(),
                     }),
@@ -5569,21 +6038,6 @@ export function RootShell({
               : 'Use public or approval_required.',
         },
         {
-          key: 'publicJoinPermission',
-          label: 'Public join',
-          value: 'read',
-          placeholder: 'read or read_write',
-          choices: [
-            { value: 'read', label: 'Read only' },
-            { value: 'read_write', label: 'Read/write' },
-          ],
-          validate: (value, values) =>
-            normalizeChannelAccessModeInput(values.accessMode) === 'public' &&
-            !normalizePublicJoinPermissionInput(value)
-              ? 'Use read or read_write.'
-              : null,
-        },
-        {
           key: 'discoverable',
           label: 'Discoverable',
           value: 'yes',
@@ -5598,14 +6052,11 @@ export function RootShell({
           return;
         }
         const accessMode = normalizeChannelAccessModeInput(values.accessMode);
-        const publicJoinPermission = normalizePublicJoinPermissionInput(
-          values.publicJoinPermission
-        );
         const discoverable = parseYesNoInput(values.discoverable, true);
-        if (!accessMode || !publicJoinPermission || discoverable === null) {
+        if (!accessMode || discoverable === null) {
           setTask(current => ({
             ...current,
-            error: 'Channel access, public join permission, or discoverability is invalid.',
+            error: 'Channel access or discoverability is invalid.',
           }));
           return;
         }
@@ -5619,7 +6070,6 @@ export function RootShell({
               title: values.title || undefined,
               description: values.description || undefined,
               accessMode,
-              publicJoinPermission,
               discoverable,
               reporter,
             }),
@@ -5653,7 +6103,7 @@ export function RootShell({
 
     openTaskPanel({
       title: `Edit /${selectedChannel.slug}`,
-      help: 'Update channel access, public join defaults, and discovery visibility.',
+      help: 'Update channel access and discovery visibility.',
       submitLabel: 'Save',
       fields: [
         {
@@ -5670,18 +6120,6 @@ export function RootShell({
               : 'Use public or approval_required.',
         },
         {
-          key: 'publicJoinPermission',
-          label: 'Public join',
-          value:
-            normalizePublicJoinPermissionInput(selectedChannel.publicJoinPermission) ?? 'read',
-          choices: [
-            { value: 'read', label: 'Read only' },
-            { value: 'read_write', label: 'Read/write' },
-          ],
-          validate: value =>
-            normalizePublicJoinPermissionInput(value) ? null : 'Use read or read_write.',
-        },
-        {
           key: 'discoverable',
           label: 'Discoverable',
           value: selectedChannel.discoverable ? 'yes' : 'no',
@@ -5696,14 +6134,11 @@ export function RootShell({
           return;
         }
         const accessMode = normalizeChannelAccessModeInput(values.accessMode);
-        const publicJoinPermission = normalizePublicJoinPermissionInput(
-          values.publicJoinPermission
-        );
         const discoverable = parseYesNoInput(values.discoverable, true);
-        if (!accessMode || !publicJoinPermission || discoverable === null) {
+        if (!accessMode || discoverable === null) {
           setTask(current => ({
             ...current,
-            error: 'Channel access, public join permission, or discoverability is invalid.',
+            error: 'Channel access or discoverability is invalid.',
           }));
           return;
         }
@@ -5715,7 +6150,6 @@ export function RootShell({
               actorSlug: model.activeInbox.slug,
               slug: selectedChannel.slug,
               accessMode,
-              publicJoinPermission,
               discoverable,
               reporter,
             }),
@@ -5780,7 +6214,7 @@ export function RootShell({
             }),
           result => {
             void loadSelectedChannelMessages({
-              beforeSeq: null,
+              beforeMessageId: null,
             });
             setTask(current => ({
               ...current,
@@ -5831,7 +6265,6 @@ export function RootShell({
               profileName: options.profile,
               actorSlug: model.activeInbox.slug,
               requestId: approval.id,
-              permission,
               reporter,
             }),
           () => {
@@ -5886,7 +6319,7 @@ export function RootShell({
         await performTask(
           `Updating ${member.agentSlug} in /${selectedChannel.slug}`,
           reporter =>
-            setChannelMemberPermission({
+            updateChannelMemberPermission({
               profileName: options.profile,
               actorSlug: model.activeInbox.slug,
               slug: selectedChannel.slug,
@@ -5947,7 +6380,7 @@ export function RootShell({
         await performTask(
           `Creating inbox ${values.slug}`,
           reporter =>
-            createInboxIdentity({
+            createAgent({
               profileName: options.profile,
               slug: values.slug,
               displayName: values.displayName || undefined,
@@ -5974,16 +6407,20 @@ export function RootShell({
             setPendingBackupPrompt(
               'New local keys were created. Export a backup from Account.'
             );
+            const registrationMessage =
+              result.registration.status === 'skipped'
+                ? {
+                    error: null,
+                    notice: `Created agent ${result.actor.slug}. Press Enter to register it or N to skip.`,
+                  }
+                : buildManagedAgentRegistrationTaskMessage({
+                    slug: result.actor.slug,
+                    status: result.registration.status,
+                    error: result.registration.error,
+                  });
             setTask(current => ({
               ...current,
-              notice:
-                result.registration.status === 'skipped'
-                  ? `Created agent ${result.actor.slug}. Press Enter to register it or N to skip.`
-                  : describeManagedAgentRegistration({
-                      slug: result.actor.slug,
-                      status: result.registration.status,
-                      error: result.registration.error,
-                    }),
+              ...registrationMessage,
             }));
           }
         );
@@ -6208,9 +6645,13 @@ export function RootShell({
           desiredPublicDescription: selectedAgent.publicDescription ?? undefined,
         }),
       result => {
+        updateExactActiveActorRegistration({
+          slug: result.actor.slug,
+          registration: result.registration,
+        });
         setTask(current => ({
           ...current,
-          notice: describeManagedAgentRegistration({
+          ...buildManagedAgentRegistrationTaskMessage({
             slug: result.actor.slug,
             status: result.registration.status,
             error: result.registration.error,
@@ -6277,6 +6718,10 @@ export function RootShell({
             setChannelTab('messages');
             setChannelMessagesState(createInitialChannelMessagesState());
             setChannelMembersState(createInitialChannelMembersState());
+            updateExactActiveActorRegistration({
+              slug: result.actor.slug,
+              registration: result.registration,
+            });
             setTask(current => ({
               ...current,
               notice:
@@ -6328,7 +6773,7 @@ export function RootShell({
 
   const openBackupExportTask = () => {
     const defaultPath = defaultBackupFilePath(
-      model?.activeInbox.publicIdentity ? normalizedEmail : normalizedEmail
+      model?.activeInbox.publicIdentity ? email : email
     );
 
     openTaskPanel({
@@ -6410,7 +6855,7 @@ export function RootShell({
               filePath: values.filePath,
               passphrase: values.passphrase,
               reporter,
-              expectedNormalizedEmail: normalizedEmail || undefined,
+              expectedNormalizedEmail: email || undefined,
             }),
           result => {
             setSecurityRefreshToken(token => token + 1);
@@ -6437,9 +6882,9 @@ export function RootShell({
         .join(', ') || 'no approved devices';
 
     openTaskPanel({
-      title: 'Rotate agent keys',
-      help: `Rotated keys sync to approved devices listed below by default. Remove ids to leave devices unsynced, or move ids to revoke them. Approved: ${approvedDeviceIds}`,
-      submitLabel: 'Rotate',
+      title: 'Reset agent keys',
+      help: `Reset keys sync to approved devices listed below by default. Remove ids to leave devices unsynced, or move ids to revoke them. Approved: ${approvedDeviceIds}`,
+      submitLabel: 'Reset',
       fields: [
         {
           key: 'shareDeviceIds',
@@ -6459,9 +6904,9 @@ export function RootShell({
           key: 'confirmation',
           label: 'Confirm',
           value: '',
-          placeholder: 'type ROTATE',
+          placeholder: 'type RESET',
           validate: value =>
-            value !== 'ROTATE' ? 'Type ROTATE to confirm key rotation.' : null,
+            value !== 'RESET' ? 'Type RESET to confirm key reset.' : null,
         },
       ],
       onSubmit: async values => {
@@ -6470,7 +6915,7 @@ export function RootShell({
           return;
         }
         await performTask(
-          `Rotating agent keys for ${model.activeInbox.slug}`,
+          `Resetting agent keys for ${model.activeInbox.slug}`,
           reporter =>
             rotateInboxKeys({
               profileName: options.profile,
@@ -6481,15 +6926,15 @@ export function RootShell({
             }),
           result => {
             setPendingBackupPrompt(
-              `Keys for ${result.actor.slug} were rotated. Export a new backup from Account > Security.`
+              `Keys for ${result.actor.slug} were reset. Export a new backup from Account > Security.`
             );
             setSecurityRefreshToken(token => token + 1);
             setTask(current => ({
               ...current,
               notice:
                 result.sharedDeviceIds.length > 0 || result.revokedDeviceIds.length > 0
-                  ? `Keys rotated. Shared to ${result.sharedDeviceIds.length.toString()} device(s) and revoked ${result.revokedDeviceIds.length.toString()} device(s).`
-                  : 'Keys rotated successfully.',
+                  ? `Keys reset. Shared to ${result.sharedDeviceIds.length.toString()} device(s) and revoked ${result.revokedDeviceIds.length.toString()} device(s).`
+                  : 'Keys reset successfully.',
             }));
           }
         );
@@ -6726,9 +7171,13 @@ export function RootShell({
               desiredPublicDescription,
             }),
           result => {
+            updateExactActiveActorRegistration({
+              slug: result.actor.slug,
+              registration: result.registration,
+            });
             setTask(current => ({
               ...current,
-              notice: describeManagedAgentRegistration({
+              ...buildManagedAgentRegistrationTaskMessage({
                 slug: result.actor.slug,
                 status: result.registration.status,
                 error: result.registration.error,
@@ -6895,14 +7344,17 @@ export function RootShell({
         }
 
         if (taskPanel.stepIndex < taskPanel.fields.length - 1) {
+          const nextStepIndex = taskPanel.stepIndex + 1;
+          const nextField = taskPanel.fields[nextStepIndex] ?? null;
           setTaskPanel(current =>
             current
               ? {
                   ...current,
-                  stepIndex: current.stepIndex + 1,
+                  stepIndex: nextStepIndex,
                 }
               : current
           );
+          setTaskCursorIndex(nextField?.value.length ?? 0);
           return;
         }
 
@@ -7034,6 +7486,7 @@ export function RootShell({
             return sendMessageToThreadFromLiveSnapshot({
               profileName: options.profile,
               actorSlug: model.activeInbox.slug,
+              auth: readyConnectionState.auth,
               conn: readyConnectionState.conn,
               snapshot: {
                 actors: snapshotRows.actors,
@@ -7066,7 +7519,7 @@ export function RootShell({
                 ...(current[selectedThread.id] ?? []),
                 createOptimisticThreadMessage({
                   messageId: result.messageId,
-                  threadSeq: result.threadSeq,
+                  senderMessageId: result.senderMessageId,
                   senderLabel: model.activeInbox.displayName?.trim() || model.activeInbox.slug,
                   body: currentDraft.trim(),
                 }),
@@ -7192,6 +7645,36 @@ export function RootShell({
           },
           result => {
             reconnect();
+            if (result.agentRegistration.status !== 'skipped') {
+              updateExactActiveActorRegistration({
+                slug: result.actor.slug,
+                registration: result.agentRegistration,
+              });
+            }
+            const importNotice = describeOwnedSaasImportNotice(result.ownedAgentImport);
+            const registrationMessage = result.recoveryRequired
+              ? {
+                  error: null,
+                  notice:
+                    'Authenticated. Recover private keys from another device or backup before sending messages. Press [U] for Account security now.',
+                }
+              : importNotice
+                ? {
+                    error: null,
+                    notice: importNotice,
+                  }
+              : result.agentRegistration.status === 'skipped'
+                ? {
+                    error: null,
+                    notice:
+                      'Authenticated and account synced. Press Enter to register the managed agent or N to skip.',
+                  }
+                : buildManagedAgentRegistrationTaskMessage({
+                    slug: result.actor.slug,
+                    status: result.agentRegistration.status,
+                    error: result.agentRegistration.error,
+                  });
+
             setPendingRegistrationPrompt(
               result.agentRegistration.status === 'skipped'
                 ? {
@@ -7202,15 +7685,7 @@ export function RootShell({
             );
             setTask(current => ({
               ...current,
-              notice: result.recoveryRequired
-                ? 'Authenticated. Recover private keys from another device or backup before sending messages. Press [U] for Account security now.'
-                : result.agentRegistration.status === 'skipped'
-                  ? 'Authenticated and account synced. Press Enter to register the managed agent or N to skip.'
-                  : describeManagedAgentRegistration({
-                      slug: result.actor.slug,
-                      status: result.agentRegistration.status,
-                      error: result.agentRegistration.error,
-                    }),
+              ...registrationMessage,
             }));
             setRoute(result.recoveryRequired ? { type: 'account' } : { type: 'inboxes' });
           }
@@ -8432,13 +8907,18 @@ export function RootShell({
   }
 
   if (connectionState.mode === 'signed_out' || route.type === 'auth') {
+    const showAuthIntro = !taskPanel && !task.busy && !task.banner && !task.active;
     return (
       <Box flexDirection="column" height={terminalSize.rows} overflow="hidden">
-        <Text color="gray" dimColor>{'─'.repeat(fullRuleWidth)}</Text>
-        <Text> </Text>
-        <Text color="yellow">You are signed out.</Text>
-        <Text color="gray">Sign in to sync, recover keys, and manage devices.</Text>
-        <Text> </Text>
+        {showAuthIntro ? (
+          <>
+            <Text color="gray" dimColor>{'─'.repeat(fullRuleWidth)}</Text>
+            <Text> </Text>
+            <Text color="yellow">You are signed out.</Text>
+            <Text color="gray">Sign in to sync, recover keys, and manage devices.</Text>
+            <Text> </Text>
+          </>
+        ) : null}
         {statusBar}
         <ModeBar mode={footerMode} width={fullContentWidth} />
       </Box>
@@ -8448,21 +8928,21 @@ export function RootShell({
   if (!model) {
     const readyRows = connectionState.mode === 'ready' ? connectionState.rows : null;
     const defaultActor =
-      readyRows && normalizedEmail
+      readyRows && email
         ? readyRows.actors.find(
-            actor => actor.isDefault && actor.normalizedEmail === normalizedEmail
+            actor => actor.isDefault && actor.email === email
           ) ?? null
         : null;
     const ownedActors =
       readyRows && defaultActor
         ? readyRows.actors
-            .filter(actor => actor.inboxId === defaultActor.inboxId)
+            .filter(actor => actor.accountId === defaultActor.accountId)
             .sort((left, right) => left.slug.localeCompare(right.slug))
         : [];
     const allOwnedActorsDeregistered =
       ownedActors.length > 0 &&
       ownedActors.every(actor =>
-        isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+        isDeregisteringOrDeregisteredInboxAgentState(enumTag(actor.masumiRegistrationState))
       );
 
     if (allOwnedActorsDeregistered) {
@@ -8478,7 +8958,7 @@ export function RootShell({
             {ownedActors.map(actor => (
               <FixedLine
                 key={actor.id.toString()}
-                text={`${actor.slug} · ${actor.masumiRegistrationState ?? 'unknown'}`}
+                text={`${actor.slug} · ${enumTag(actor.masumiRegistrationState) || 'unknown'}`}
                 width={fullContentWidth}
               />
             ))}
@@ -8616,11 +9096,19 @@ export function RootShell({
                 )}
                 {threadListPageState.scopeKey === currentThreadListScopeKey &&
                 threadListPageState.loading ? (
-                  <Text color="gray">Loading new threads...</Text>
+                  <FixedLine
+                    text="Loading new threads..."
+                    width={contentListWidth}
+                    color="gray"
+                  />
                 ) : null}
                 {threadListPageState.scopeKey === currentThreadListScopeKey &&
                 threadListPageState.error ? (
-                  <Text color="red">✗ {threadListPageState.error}</Text>
+                  <FixedLine
+                    text={`✗ ${threadListPageState.error}`}
+                    width={contentListWidth}
+                    color="red"
+                  />
                 ) : null}
               </Box>
             ) : null}
@@ -8658,15 +9146,23 @@ export function RootShell({
                     </Box>
                   ) : selectedRequest.direction === 'outgoing' ? (
                     <Box marginTop={1} flexDirection="column">
-                      <Text color="yellow">
-                        ⏳ Awaiting approval from {selectedRequest.targetDisplayName ?? selectedRequest.targetSlug}.
-                      </Text>
-                      <Text color="gray">
-                        They must accept the contact request on their side before messages can be exchanged.
-                      </Text>
+                      <FixedLine
+                        text={`⏳ Awaiting approval from ${selectedRequest.targetDisplayName ?? selectedRequest.targetSlug}.`}
+                        width={contentListWidth}
+                        color="yellow"
+                      />
+                      <FixedLine
+                        text="They must accept the contact request on their side before messages can be exchanged."
+                        width={contentListWidth}
+                        color="gray"
+                      />
                     </Box>
                   ) : (
-                    <Text color="gray">No visible message preview yet.</Text>
+                    <FixedLine
+                      text="No visible message preview yet."
+                      width={contentListWidth}
+                      color="gray"
+                    />
                   )}
                 </Box>
                 ) : selectedThread ? (
@@ -8706,7 +9202,11 @@ export function RootShell({
                       </Box>
                     ) : inboxFocus === 'navigator' ? (
                       <Box marginTop={1}>
-                        <Text color="gray">Press Enter to open this thread.</Text>
+                        <FixedLine
+                          text="Press Enter to open this thread."
+                          width={contentListWidth}
+                          color="gray"
+                        />
                       </Box>
                     ) : (
                       <>
@@ -8808,7 +9308,11 @@ export function RootShell({
                     )}
                   </Box>
               ) : (
-                <Text color="gray">Select a thread or pending request to see details here.</Text>
+                <FixedLine
+                  text="Select a thread or pending request to see details here."
+                  width={contentListWidth}
+                  color="gray"
+                />
               )}
             </Box>
           </Box>
@@ -8829,9 +9333,7 @@ export function RootShell({
                       const labels = [
                         channel.permission,
                         channel.canSend ? 'can send' : null,
-                        channel.accessMode === 'public'
-                          ? `join ${describeChannelPermission(channel.publicJoinPermission)}`
-                          : null,
+                        channel.accessMode === 'public' ? 'public' : 'approval required',
                         channel.pendingApprovals > 0
                           ? `${channel.pendingApprovals.toString()} pending`
                           : null,
@@ -8857,13 +9359,7 @@ export function RootShell({
                         selectedChannel.accessMode === 'approval_required'
                           ? 'approval required'
                           : selectedChannel.accessMode
-                      }${
-                        selectedChannel.accessMode === 'public'
-                          ? ` · join ${describeChannelPermission(
-                              selectedChannel.publicJoinPermission
-                            )}`
-                          : ''
-                      } · messages ${selectedChannel.lastMessageSeq} · last ${formatTimestamp(selectedChannel.lastMessageAt)}`}
+                      } · messages ${selectedChannel.messageCount} · last ${formatTimestamp(selectedChannel.lastMessageAt)}`}
                       width={contentListWidth}
                       color="gray"
                     />
@@ -8899,7 +9395,7 @@ export function RootShell({
                   text={`${model.activeInbox.slug} has ${selectedChannel.permission}${
                     canSendSelectedChannel ? ' · can send' : ''
                   }${selectedChannel.isAdmin ? ' · admin' : ''} · messages ${
-                    selectedChannel.lastMessageSeq
+                    selectedChannel.messageCount
                   }`}
                   width={contentListWidth}
                   color="gray"
@@ -8909,12 +9405,6 @@ export function RootShell({
                     selectedChannel.accessMode === 'approval_required'
                       ? 'approval required'
                       : selectedChannel.accessMode
-                  }${
-                    selectedChannel.accessMode === 'public'
-                      ? ` · join ${describeChannelPermission(
-                          selectedChannel.publicJoinPermission
-                        )}`
-                      : ''
                   } · ${selectedChannel.discoverable ? 'discoverable' : 'hidden'}`}
                   width={contentListWidth}
                   color="gray"

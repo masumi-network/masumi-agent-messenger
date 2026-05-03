@@ -12,7 +12,7 @@ import {
 } from './env';
 import { userError } from './errors';
 
-const CONFIG_VERSION = 1;
+const CONFIG_VERSION = 2;
 const DEFAULT_PROFILE_NAME = 'default';
 const CONFIG_DIRECTORY_NAME = 'masumi-agent-messenger';
 const LEGACY_SPACETIMEDB_DB_NAME_ALIASES = new Set([
@@ -29,8 +29,7 @@ const BootstrapSnapshotSchema = z.object({
   spacetimeIdentity: z.string(),
   inbox: z.object({
     id: z.string(),
-    normalizedEmail: z.string(),
-    displayEmail: z.string(),
+    email: z.string(),
   }),
   actor: z.object({
     id: z.string(),
@@ -43,18 +42,18 @@ const BootstrapSnapshotSchema = z.object({
     masumiRegistrationState: z.string().optional(),
   }),
   keyVersions: z.object({
-    encryption: z.string(),
-    signing: z.string(),
+    encryption: z.number().int().nonnegative(),
+    signing: z.number().int().nonnegative(),
   }),
   actorKeys: z
     .object({
       encryption: z.object({
         publicKey: z.string(),
-        keyVersion: z.string(),
+        keyVersion: z.number().int().nonnegative(),
       }),
       signing: z.object({
         publicKey: z.string(),
-        keyVersion: z.string(),
+        keyVersion: z.number().int().nonnegative(),
       }),
     })
     .optional(),
@@ -67,7 +66,6 @@ const StoredProfileSchema = z.object({
   redirectUri: z.string().optional(),
   oidcScope: z.string(),
   activeAgentSlug: z.string().optional(),
-  completedMigrations: z.record(z.string(), z.string()).optional(),
   lastAuthenticatedAt: z.string().optional(),
   lastBootstrapAt: z.string().optional(),
   bootstrapSnapshot: BootstrapSnapshotSchema.optional(),
@@ -212,6 +210,10 @@ function parseStoredConfig(raw: string): StoredConfig {
   }
 
   const configRecord = parsed as Record<string, unknown>;
+  if (configRecord.version !== CONFIG_VERSION) {
+    return defaultStoredConfig();
+  }
+
   const rawProfiles =
     typeof configRecord.profiles === 'object' &&
     configRecord.profiles !== null &&
@@ -233,8 +235,7 @@ function parseStoredConfig(raw: string): StoredConfig {
   );
 
   return StoredConfigSchema.parse({
-    version:
-      configRecord.version === CONFIG_VERSION ? CONFIG_VERSION : CONFIG_VERSION,
+    version: CONFIG_VERSION,
     activeProfile:
       typeof configRecord.activeProfile === 'string' && configRecord.activeProfile.trim()
         ? configRecord.activeProfile
@@ -256,12 +257,26 @@ function parseStoredConfig(raw: string): StoredConfig {
   });
 }
 
+function shouldReplaceStoredConfig(raw: string): boolean {
+  const parsed = JSON.parse(raw) as unknown;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return false;
+  }
+
+  return (parsed as Record<string, unknown>).version !== CONFIG_VERSION;
+}
+
 async function readStoredConfig(): Promise<StoredConfig> {
   const configPath = resolveConfigFilePath();
 
   try {
     const raw = await readFile(configPath, 'utf8');
-    return parseStoredConfig(raw);
+    const shouldReplace = shouldReplaceStoredConfig(raw);
+    const config = parseStoredConfig(raw);
+    if (shouldReplace) {
+      await writeStoredConfig(config);
+    }
+    return config;
   } catch (error) {
     if (
       error instanceof Error &&
@@ -391,29 +406,6 @@ export async function saveActiveAgentSlug(
   return mutateProfile(profileName, profile => ({
     ...profile,
     activeAgentSlug: activeAgentSlug?.trim() || undefined,
-  }));
-}
-
-export async function hasCompletedProfileMigration(
-  profileName: string | undefined,
-  migrationKey: string
-): Promise<boolean> {
-  const normalizedProfileName = normalizeProfileName(profileName);
-  const config = await readStoredConfig();
-  const profile = mergeProfile(config.profiles[normalizedProfileName]);
-  return Boolean(profile.completedMigrations?.[migrationKey]);
-}
-
-export async function markProfileMigrationComplete(
-  profileName: string | undefined,
-  migrationKey: string
-): Promise<ResolvedProfile> {
-  return mutateProfile(profileName, profile => ({
-    ...profile,
-    completedMigrations: {
-      ...(profile.completedMigrations ?? {}),
-      [migrationKey]: new Date().toISOString(),
-    },
   }));
 }
 

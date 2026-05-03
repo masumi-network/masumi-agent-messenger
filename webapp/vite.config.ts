@@ -8,24 +8,24 @@ import { fileURLToPath } from 'node:url';
 const webappRoot = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(webappRoot, '..');
 
-function resolvePublicChannelIdEnv(mode: string): string {
+function resolvePublicChannelSlugEnv(mode: string): string {
   const webappEnv = loadEnv(mode, webappRoot, ['VITE_', 'PUBLIC_']);
   const workspaceEnv = loadEnv(mode, workspaceRoot, ['VITE_', 'PUBLIC_']);
   return (
-    process.env.VITE_PUBLIC_CHANNEL_ID ??
-    webappEnv.VITE_PUBLIC_CHANNEL_ID ??
-    workspaceEnv.VITE_PUBLIC_CHANNEL_ID ??
-    process.env.PUBLIC_CHANNEL_ID ??
-    webappEnv.PUBLIC_CHANNEL_ID ??
-    workspaceEnv.PUBLIC_CHANNEL_ID ??
+    process.env.VITE_PUBLIC_CHANNEL_SLUG ??
+    webappEnv.VITE_PUBLIC_CHANNEL_SLUG ??
+    workspaceEnv.VITE_PUBLIC_CHANNEL_SLUG ??
+    process.env.PUBLIC_CHANNEL_SLUG ??
+    webappEnv.PUBLIC_CHANNEL_SLUG ??
+    workspaceEnv.PUBLIC_CHANNEL_SLUG ??
     ''
   );
 }
 
 export default defineConfig(({ mode }) => ({
   define: {
-    'import.meta.env.VITE_PUBLIC_CHANNEL_ID': JSON.stringify(
-      resolvePublicChannelIdEnv(mode)
+    'import.meta.env.VITE_PUBLIC_CHANNEL_SLUG': JSON.stringify(
+      resolvePublicChannelSlugEnv(mode)
     ),
   },
   server: {

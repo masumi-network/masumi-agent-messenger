@@ -5,7 +5,7 @@ import {
   type MasumiActorRegistrationMetadata,
   type MasumiRegistrationResult,
 } from '../../../shared/inbox-agent-registration';
-import type { VisibleAgentRow } from '../../../webapp/src/module_bindings/types';
+import type { Agent } from '../../../webapp/src/module_bindings/types';
 import { ensureAuthenticatedSession } from './auth';
 import type { TaskReporter } from './command-runtime';
 import { connectivityError, isCliError, userError } from './errors';
@@ -16,7 +16,7 @@ import {
 import {
   connectAuthenticated,
   disconnectConnection,
-  readInboxRows,
+  readAccounts,
   subscribeInboxTables,
 } from './spacetimedb';
 
@@ -39,48 +39,67 @@ export type OwnedInboxAgentsResult = {
   agents: OwnedInboxAgent[];
 };
 
-function sortOwnedAgentRows(left: VisibleAgentRow, right: VisibleAgentRow): number {
+function sortOwnedAgentRows(left: Agent, right: Agent): number {
   if (left.isDefault !== right.isDefault) {
     return left.isDefault ? -1 : 1;
   }
   return left.slug.localeCompare(right.slug);
 }
 
+function rowStateTagToGranular(
+  state: Agent['masumiRegistrationState']
+): string | undefined {
+  if (!state) return undefined;
+  switch (state.tag) {
+    case 'PendingRegistration':
+      return 'RegistrationRequested';
+    case 'Registered':
+      return 'RegistrationConfirmed';
+    case 'PendingDeregistration':
+      return 'DeregistrationRequested';
+    case 'Deregistered':
+      return 'DeregistrationConfirmed';
+    case 'Failed':
+      return 'RegistrationFailed';
+    default:
+      return undefined;
+  }
+}
+
 function readActorRegistrationMetadata(
-  actor: VisibleAgentRow
+  actor: Agent
 ): MasumiActorRegistrationMetadata | null {
+  const granularState = rowStateTagToGranular(actor.masumiRegistrationState);
   const metadata: MasumiActorRegistrationMetadata = {
     masumiRegistrationNetwork: actor.masumiRegistrationNetwork ?? undefined,
     masumiInboxAgentId: actor.masumiInboxAgentId ?? undefined,
     masumiAgentIdentifier: actor.masumiAgentIdentifier ?? undefined,
     masumiRegistrationState:
-      actor.masumiRegistrationState && isMasumiInboxAgentState(actor.masumiRegistrationState)
-        ? actor.masumiRegistrationState
-        : undefined,
+      granularState && isMasumiInboxAgentState(granularState) ? granularState : undefined,
   };
 
   return Object.values(metadata).some(value => value !== undefined) ? metadata : null;
 }
 
 function selectOwnedActorRows(
-  actors: VisibleAgentRow[],
-  normalizedEmail: string
-): VisibleAgentRow[] {
+  actors: Agent[],
+  email: string
+): Agent[] {
   const defaultActor = actors.find(
-    actor => actor.normalizedEmail === normalizedEmail && actor.isDefault
+    actor => actor.email === email && actor.isDefault
   );
-  const ownInboxId = defaultActor?.inboxId ?? null;
+  const ownInboxId = defaultActor?.accountId ?? null;
 
   return actors
     .filter(actor =>
       ownInboxId !== null
-        ? actor.inboxId === ownInboxId
-        : actor.normalizedEmail === normalizedEmail
+        ? actor.accountId === ownInboxId
+        : actor.email === email
     )
     .sort(sortOwnedAgentRows);
 }
 
-function toOwnedInboxAgent(actor: VisibleAgentRow): OwnedInboxAgent {
+function toOwnedInboxAgent(actor: Agent): OwnedInboxAgent {
   const metadata = readActorRegistrationMetadata(actor);
   const registration = registrationResultFromMetadata(metadata);
   return {
@@ -90,16 +109,16 @@ function toOwnedInboxAgent(actor: VisibleAgentRow): OwnedInboxAgent {
     isDefault: actor.isDefault,
     managed: metadata !== null,
     agentIdentifier: actor.masumiAgentIdentifier ?? null,
-    registrationState: actor.masumiRegistrationState ?? null,
+    registrationState: actor.masumiRegistrationState?.tag ?? null,
     registration,
   };
 }
 
 export function buildOwnedInboxAgents(
-  actors: VisibleAgentRow[],
-  normalizedEmail: string
+  actors: Agent[],
+  email: string
 ): OwnedInboxAgent[] {
-  return selectOwnedActorRows(actors, normalizedEmail).map(toOwnedInboxAgent);
+  return selectOwnedActorRows(actors, email).map(toOwnedInboxAgent);
 }
 
 export async function listOwnedInboxAgents(params: {
@@ -107,8 +126,8 @@ export async function listOwnedInboxAgents(params: {
   reporter: TaskReporter;
 }): Promise<OwnedInboxAgentsResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -127,9 +146,9 @@ export async function listOwnedInboxAgents(params: {
     const subscription = await subscribeInboxTables(conn);
 
     try {
-      const { actors } = readInboxRows(conn);
-      const ownedRows = selectOwnedActorRows(actors, normalizedEmail);
-      const refreshedRows: VisibleAgentRow[] = [];
+      const { actors } = await readAccounts(conn);
+      const ownedRows = selectOwnedActorRows(actors, email);
+      const refreshedRows: Agent[] = [];
 
       for (const actor of ownedRows) {
         const syncedRegistration = await syncMasumiInboxAgentRegistration({

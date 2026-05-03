@@ -1,6 +1,7 @@
 import { argon2id } from 'hash-wasm';
 import {
   canonicalJsonStringify,
+  normalizeKeyVersion,
   type ActorIdentity,
   type AgentKeyPair,
   type StoredKeyPair,
@@ -13,6 +14,10 @@ import {
   DEVICE_SHARE_REQUEST_EXPIRY_MS,
   DEVICE_VERIFICATION_CODE_CONTEXT,
 } from './device-share-constants';
+import {
+  ensureDeviceBundleCiphertextBytes,
+  ensureDeviceBundleIvBytes,
+} from './message-limits';
 
 const DEVICE_ENCRYPTION_ALGORITHM = 'ecdh-p256-device-v1';
 const DEVICE_SHARE_CIPHER_ALGORITHM = 'aes-gcm-256-device-share-v1';
@@ -108,14 +113,14 @@ export type SharedActorKeyMaterial = {
 
 export type DeviceKeyShareSnapshot = {
   version: 1;
-  normalizedEmail: string;
+  email: string;
   createdAt: string;
   actors: SharedActorKeyMaterial[];
 };
 
 export type CreatedDeviceShareBundle = {
   sourceEncryptionPublicKey: string;
-  sourceEncryptionKeyVersion: string;
+  sourceEncryptionKeyVersion: number;
   sourceEncryptionAlgorithm: string;
   bundleCiphertext: string;
   bundleIv: string;
@@ -238,14 +243,6 @@ function sixBitValuesToBytes(values: readonly number[]): Uint8Array {
   return bytes;
 }
 
-function normalizeVersion(version: string | undefined, prefix: string): string {
-  if (!version) return `${prefix}1`;
-  const suffix = version.startsWith(prefix) ? version.slice(prefix.length) : '';
-  const parsed = Number.parseInt(suffix, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) return `${prefix}1`;
-  return `${prefix}${parsed}`;
-}
-
 function normalizeCodeInput(value: string): string {
   return value.replace(/\s+/gu, '');
 }
@@ -366,6 +363,13 @@ function requireRecord(value: unknown, context: string): Record<string, unknown>
   return value as Record<string, unknown>;
 }
 
+function requirePositiveInteger(value: unknown, context: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 1 || !Number.isInteger(value)) {
+    throw new Error(`Invalid device key share snapshot: ${context} must be a positive integer`);
+  }
+  return value;
+}
+
 function requireNonEmptyString(value: unknown, context: string): string {
   if (typeof value !== 'string') {
     throw new Error(`Invalid device key share snapshot: ${context} must be a string`);
@@ -386,11 +390,11 @@ function requireOptionalNonEmptyString(value: unknown, context: string): string 
 }
 
 function requireNormalizedEmail(value: unknown, context: string): string {
-  const normalizedEmail = normalizeSharedEmail(requireNonEmptyString(value, context));
-  if (!/^[^\s@]+@[^\s@]+$/u.test(normalizedEmail)) {
+  const email = normalizeSharedEmail(requireNonEmptyString(value, context));
+  if (!/^[^\s@]+@[^\s@]+$/u.test(email)) {
     throw new Error(`Invalid device key share snapshot: ${context} must be a valid email`);
   }
-  return normalizedEmail;
+  return email;
 }
 
 function requireSlug(value: unknown, context: string): string {
@@ -449,7 +453,7 @@ function parseStoredKeyPair(params: {
       context: `${params.context}.privateKey`,
       privateKey: true,
     }),
-    keyVersion: requireNonEmptyString(record.keyVersion, `${params.context}.keyVersion`),
+    keyVersion: requirePositiveInteger(record.keyVersion, `${params.context}.keyVersion`),
     algorithm,
   };
 }
@@ -472,15 +476,15 @@ function parseAgentKeyPair(value: unknown, context: string): AgentKeyPair {
 
 function parseActorIdentity(value: unknown, context: string): ActorIdentity {
   const record = requireRecord(value, context);
-  const inboxIdentifier = requireOptionalNonEmptyString(
-    record.inboxIdentifier,
-    `${context}.inboxIdentifier`
+  const accountIdentifier = requireOptionalNonEmptyString(
+    record.accountIdentifier,
+    `${context}.accountIdentifier`
   );
 
   return {
-    normalizedEmail: requireNormalizedEmail(record.normalizedEmail, `${context}.normalizedEmail`),
+    email: requireNormalizedEmail(record.email, `${context}.email`),
     slug: requireSlug(record.slug, `${context}.slug`),
-    ...(inboxIdentifier === undefined ? {} : { inboxIdentifier }),
+    ...(accountIdentifier === undefined ? {} : { accountIdentifier }),
   };
 }
 
@@ -492,9 +496,9 @@ function parseSharedActorKeyMaterial(params: {
   const context = `actors[${params.index}]`;
   const record = requireRecord(params.value, context);
   const identity = parseActorIdentity(record.identity, `${context}.identity`);
-  if (identity.normalizedEmail !== params.expectedEmail) {
+  if (identity.email !== params.expectedEmail) {
     throw new Error(
-      `Invalid device key share snapshot: ${context}.identity.normalizedEmail must match snapshot.normalizedEmail`
+      `Invalid device key share snapshot: ${context}.identity.email must match snapshot.email`
     );
   }
 
@@ -578,16 +582,16 @@ export function parseDeviceKeyShareSnapshot(parsed: unknown): DeviceKeyShareSnap
   const snapshot = requireRecord(parsed, 'snapshot');
   if (
     snapshot.version !== 1 ||
-    typeof snapshot.normalizedEmail !== 'string' ||
+    typeof snapshot.email !== 'string' ||
     typeof snapshot.createdAt !== 'string' ||
     !Array.isArray(snapshot.actors)
   ) {
     throw new Error('Invalid device key share snapshot');
   }
 
-  const normalizedEmail = requireNormalizedEmail(
-    snapshot.normalizedEmail,
-    'snapshot.normalizedEmail'
+  const email = requireNormalizedEmail(
+    snapshot.email,
+    'snapshot.email'
   );
   const createdAt = requireNonEmptyString(snapshot.createdAt, 'snapshot.createdAt');
   if (!Number.isFinite(Date.parse(createdAt))) {
@@ -599,12 +603,12 @@ export function parseDeviceKeyShareSnapshot(parsed: unknown): DeviceKeyShareSnap
     const parsedActor = parseSharedActorKeyMaterial({
       value: actor,
       index,
-      expectedEmail: normalizedEmail,
+      expectedEmail: email,
     });
     const identityKey = [
-      parsedActor.identity.normalizedEmail,
+      parsedActor.identity.email,
       parsedActor.identity.slug,
-      parsedActor.identity.inboxIdentifier ?? '',
+      parsedActor.identity.accountIdentifier ?? '',
     ].join(':');
     if (seenActors.has(identityKey)) {
       throw new Error(`Invalid device key share snapshot: duplicate actor identity ${identityKey}`);
@@ -615,7 +619,7 @@ export function parseDeviceKeyShareSnapshot(parsed: unknown): DeviceKeyShareSnap
 
   return {
     version: 1,
-    normalizedEmail,
+    email,
     createdAt,
     actors,
   };
@@ -680,7 +684,7 @@ export async function verifyDeviceVerificationCodeMatchesPublicKey(
 }
 
 export async function generateDeviceKeyPair(options?: {
-  keyVersion?: string;
+  keyVersion?: number;
 }): Promise<DeviceKeyPair> {
   const keyPair = await crypto.subtle.generateKey(
     { name: 'ECDH', namedCurve: 'P-256' },
@@ -691,8 +695,20 @@ export async function generateDeviceKeyPair(options?: {
   return {
     publicKey: await exportPublicKey(keyPair.publicKey),
     privateKey: await exportPrivateKey(keyPair.privateKey),
-    keyVersion: normalizeVersion(options?.keyVersion, 'device-enc-v'),
+    keyVersion: normalizeKeyVersion(options?.keyVersion),
     algorithm: DEVICE_ENCRYPTION_ALGORITHM,
+  };
+}
+
+export function normalizeDeviceKeyPairVersion(keyPair: DeviceKeyPair): DeviceKeyPair {
+  const keyVersion = normalizeKeyVersion(keyPair.keyVersion);
+  if (keyPair.keyVersion === keyVersion) {
+    return keyPair;
+  }
+
+  return {
+    ...keyPair,
+    keyVersion,
   };
 }
 
@@ -707,25 +723,26 @@ export async function createDeviceShareBundle(params: {
     peerPublicKey: params.targetPublicKey,
     context: params.context,
   });
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
+  const iv = ensureDeviceBundleIvBytes(crypto.getRandomValues(new Uint8Array(12)));
+  const ciphertextBuffer = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: toBufferSource(iv) },
     shareKey,
     toBufferSource(utf8(canonicalJsonStringify(params.snapshot)))
   );
+  const ciphertextBytes = ensureDeviceBundleCiphertextBytes(new Uint8Array(ciphertextBuffer));
 
   return {
     sourceEncryptionPublicKey: params.sourceKeyPair.publicKey,
     sourceEncryptionKeyVersion: params.sourceKeyPair.keyVersion,
     sourceEncryptionAlgorithm: params.sourceKeyPair.algorithm,
-    bundleCiphertext: toHex(new Uint8Array(ciphertext)),
+    bundleCiphertext: toHex(ciphertextBytes),
     bundleIv: toHex(iv),
     bundleAlgorithm: DEVICE_SHARE_CIPHER_ALGORITHM,
   };
 }
 
-export function buildDeviceShareContext(normalizedEmail: string, deviceId: string): string {
-  return `${normalizedEmail}:${deviceId}`;
+export function buildDeviceShareContext(email: string, deviceId: string): string {
+  return `${email}:${deviceId}`;
 }
 
 export function deviceShareRequestExpiresAt(clientCreatedAt: Date | number | string): Date {

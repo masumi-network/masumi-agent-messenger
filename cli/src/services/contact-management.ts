@@ -1,10 +1,10 @@
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { timestampToISOString } from '../../../shared/spacetime-time';
 import type {
-  VisibleAgentRow,
-  VisibleContactRequestRow,
-  VisibleContactAllowlistEntryRow,
-  VisibleThreadInviteRow,
+  Agent,
+  ContactRequest,
+  ContactAllowlistEntry,
+  ThreadInvite,
 } from '../../../webapp/src/module_bindings/types';
 import { ensureAuthenticatedSession } from './auth';
 import type { TaskReporter } from './command-runtime';
@@ -18,10 +18,10 @@ import {
 } from './spacetimedb';
 
 function requireDefaultOwnedActor(
-  actors: VisibleAgentRow[],
-  normalizedEmail: string
-): VisibleAgentRow {
-  const actor = actors.find(row => row.isDefault && row.normalizedEmail === normalizedEmail);
+  actors: Agent[],
+  email: string
+): Agent {
+  const actor = actors.find(row => row.isDefault && row.email === email);
   if (!actor) {
     throw userError('No default agent found. Run `masumi-agent-messenger account sync` first.', {
       code: 'INBOX_BOOTSTRAP_REQUIRED',
@@ -31,11 +31,11 @@ function requireDefaultOwnedActor(
 }
 
 function resolveOwnedActorBySlug(params: {
-  actors: VisibleAgentRow[];
-  normalizedEmail: string;
+  actors: Agent[];
+  email: string;
   actorSlug?: string;
-}): VisibleAgentRow {
-  const defaultActor = requireDefaultOwnedActor(params.actors, params.normalizedEmail);
+}): Agent {
+  const defaultActor = requireDefaultOwnedActor(params.actors, params.email);
   if (!params.actorSlug) {
     return defaultActor;
   }
@@ -48,7 +48,7 @@ function resolveOwnedActorBySlug(params: {
   }
 
   const actor = params.actors.find(
-    row => row.inboxId === defaultActor.inboxId && row.slug === normalizedSlug
+    row => row.accountId === defaultActor.accountId && row.slug === normalizedSlug
   );
   if (!actor) {
     throw userError(`No owned inbox actor found for slug \`${normalizedSlug}\`.`, {
@@ -59,15 +59,15 @@ function resolveOwnedActorBySlug(params: {
 }
 
 function resolveContactRequestTargetActor(params: {
-  actors: VisibleAgentRow[];
-  normalizedEmail: string;
-  request: VisibleContactRequestRow;
+  actors: Agent[];
+  email: string;
+  request: ContactRequest;
   actorSlug?: string;
-}): VisibleAgentRow {
+}): Agent {
   if (params.actorSlug) {
     const actor = resolveOwnedActorBySlug({
       actors: params.actors,
-      normalizedEmail: params.normalizedEmail,
+      email: params.email,
       actorSlug: params.actorSlug,
     });
     if (params.request.targetAgentDbId !== actor.id) {
@@ -78,10 +78,10 @@ function resolveContactRequestTargetActor(params: {
     return actor;
   }
 
-  const defaultActor = requireDefaultOwnedActor(params.actors, params.normalizedEmail);
+  const defaultActor = requireDefaultOwnedActor(params.actors, params.email);
   const targetActor = params.actors.find(
     actor =>
-      actor.inboxId === defaultActor.inboxId && actor.id === params.request.targetAgentDbId
+      actor.accountId === defaultActor.accountId && actor.id === params.request.targetAgentDbId
   );
   if (!targetActor) {
     throw userError('This request does not belong to any owned agent in this inbox.', {
@@ -90,6 +90,40 @@ function resolveContactRequestTargetActor(params: {
   }
 
   return targetActor;
+}
+
+function resolveContactRequestRequesterActor(params: {
+  actors: Agent[];
+  email: string;
+  request: ContactRequest;
+  actorSlug?: string;
+}): Agent {
+  if (params.actorSlug) {
+    const actor = resolveOwnedActorBySlug({
+      actors: params.actors,
+      email: params.email,
+      actorSlug: params.actorSlug,
+    });
+    if (params.request.requesterAgentDbId !== actor.id) {
+      throw userError('This request does not belong to the selected agent.', {
+        code: 'CONTACT_REQUEST_REQUESTER_INVALID',
+      });
+    }
+    return actor;
+  }
+
+  const defaultActor = requireDefaultOwnedActor(params.actors, params.email);
+  const requesterActor = params.actors.find(
+    actor =>
+      actor.accountId === defaultActor.accountId && actor.id === params.request.requesterAgentDbId
+  );
+  if (!requesterActor) {
+    throw userError('This request does not belong to any owned agent in this inbox.', {
+      code: 'CONTACT_REQUEST_REQUESTER_INVALID',
+    });
+  }
+
+  return requesterActor;
 }
 
 function parseRequestId(value: string): bigint {
@@ -108,9 +142,9 @@ function parseRequestId(value: string): bigint {
 }
 
 function findRequestById(
-  requests: VisibleContactRequestRow[],
+  requests: ContactRequest[],
   requestId: bigint
-): VisibleContactRequestRow {
+): ContactRequest {
   const request = requests.find(row => row.id === requestId);
   if (!request) {
     throw userError(`Contact request ${requestId.toString()} is not visible.`, {
@@ -120,10 +154,29 @@ function findRequestById(
   return request;
 }
 
+async function findCancelableContactRequestById(params: {
+  requests: ContactRequest[];
+  requestId: bigint;
+  lookup: (input: { requestId: bigint }) => Promise<ContactRequest | undefined>;
+}): Promise<ContactRequest> {
+  const visibleRequest = params.requests.find(row => row.id === params.requestId);
+  if (visibleRequest) {
+    return visibleRequest;
+  }
+
+  const request = await params.lookup({ requestId: params.requestId });
+  if (!request) {
+    throw userError(`Contact request ${params.requestId.toString()} is not visible.`, {
+      code: 'CONTACT_REQUEST_NOT_FOUND',
+    });
+  }
+  return request;
+}
+
 function findThreadInviteById(
-  invites: VisibleThreadInviteRow[],
+  invites: ThreadInvite[],
   inviteId: bigint
-): VisibleThreadInviteRow {
+): ThreadInvite {
   const invite = invites.find(row => row.id === inviteId);
   if (!invite) {
     throw userError(`Thread invite ${inviteId.toString()} is not visible.`, {
@@ -133,26 +186,79 @@ function findThreadInviteById(
   return invite;
 }
 
+function enumTag(value: { tag: string } | string | null | undefined): string {
+  if (typeof value === 'string') return value;
+  return value?.tag ?? '';
+}
+
+function contactRequestStatus(
+  status: ContactRequest['status'] | undefined
+): ContactRequestListItem['status'] | null {
+  const tag = enumTag(status);
+  if (tag === 'Pending' || tag === 'pending') return 'pending';
+  if (tag === 'Approved' || tag === 'approved') return 'approved';
+  if (tag === 'Rejected' || tag === 'rejected') return 'rejected';
+  return null;
+}
+
+function threadInviteStatus(
+  status: ThreadInvite['status'] | undefined
+): ThreadInviteListItem['status'] | null {
+  const tag = enumTag(status);
+  if (tag === 'Pending' || tag === 'pending') return 'pending';
+  if (tag === 'Accepted' || tag === 'accepted') return 'accepted';
+  if (tag === 'Declined' || tag === 'declined' || tag === 'rejected') return 'rejected';
+  return null;
+}
+
+function allowlistKind(kind: ContactAllowlistEntry['kind']): 'agent' | 'email' {
+  const tag = enumTag(kind);
+  return tag === 'Agent' || tag === 'agent' ? 'agent' : 'email';
+}
+
+function contactRequestDirection(
+  request: ContactRequest,
+  ownedActorIds: ReadonlySet<bigint>
+): 'incoming' | 'outgoing' | null {
+  if (ownedActorIds.has(request.targetAgentDbId)) return 'incoming';
+  if (ownedActorIds.has(request.requesterAgentDbId)) return 'outgoing';
+  return null;
+}
+
+function actorLabel(actor: Agent | undefined, fallbackSlug: string): {
+  slug: string;
+  displayName: string | null;
+  publicIdentity: string;
+  email: string;
+} {
+  return {
+    slug: actor?.slug ?? fallbackSlug,
+    displayName: actor?.displayName ?? null,
+    publicIdentity: actor?.publicIdentity ?? '',
+    email: actor?.email ?? '',
+  };
+}
+
 function waitForRequestStatus(params: {
   read: () => ReturnType<typeof readContactRows>;
   requestId: bigint;
   status: 'approved' | 'rejected';
-  deletedFallback?: VisibleContactRequestRow;
+  deletedFallback?: ContactRequest;
   timeoutMs?: number;
-}): Promise<VisibleContactRequestRow> {
+}): Promise<ContactRequest> {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   return new Promise((resolve, reject) => {
-    const poll = () => {
-      const request = params.read().contactRequests.find(row => row.id === params.requestId);
-      if (request?.status === params.status) {
+    const poll = async () => {
+      const request = (await params.read()).contactRequests.find(row => row.id === params.requestId);
+      if (request && contactRequestStatus(request.status) === params.status) {
         resolve(request);
         return;
       }
       if (!request && params.status === 'rejected' && params.deletedFallback) {
         resolve({
           ...params.deletedFallback,
-          status: 'rejected',
+          status: { tag: 'Rejected' },
         });
         return;
       }
@@ -164,10 +270,34 @@ function waitForRequestStatus(params: {
         );
         return;
       }
-      setTimeout(poll, 100);
+      setTimeout(() => {
+        void poll().catch(reject);
+      }, 100);
     };
 
-    poll();
+    void poll().catch(reject);
+  });
+}
+
+async function waitForContactRequestCancellation(params: {
+  read: () => ReturnType<typeof readContactRows>;
+  requestId: bigint;
+  lookup: (input: { requestId: bigint }) => Promise<ContactRequest | undefined>;
+  timeoutMs?: number;
+}): Promise<void> {
+  const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
+
+  while (Date.now() < timeoutAt) {
+    const visibleRequest = (await params.read()).contactRequests.find(row => row.id === params.requestId);
+    const request = visibleRequest ?? (await params.lookup({ requestId: params.requestId }));
+    if (!request) {
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  throw connectivityError('Timed out waiting for the contact request to be canceled.', {
+    code: 'CONTACT_REQUEST_SYNC_TIMEOUT',
   });
 }
 
@@ -176,13 +306,13 @@ function waitForThreadInviteStatus(params: {
   inviteId: bigint;
   status: 'accepted' | 'rejected';
   timeoutMs?: number;
-}): Promise<VisibleThreadInviteRow> {
+}): Promise<ThreadInvite> {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   return new Promise((resolve, reject) => {
-    const poll = () => {
-      const invite = params.read().threadInvites.find(row => row.id === params.inviteId);
-      if (invite?.status === params.status) {
+    const poll = async () => {
+      const invite = (await params.read()).threadInvites.find(row => row.id === params.inviteId);
+      if (invite && threadInviteStatus(invite.status) === params.status) {
         resolve(invite);
         return;
       }
@@ -194,25 +324,27 @@ function waitForThreadInviteStatus(params: {
         );
         return;
       }
-      setTimeout(poll, 100);
+      setTimeout(() => {
+        void poll().catch(reject);
+      }, 100);
     };
 
-    poll();
+    void poll().catch(reject);
   });
 }
 
 function waitForAllowlistEntry(
   params: {
     read: () => ReturnType<typeof readContactRows>;
-    matcher: (entry: VisibleContactAllowlistEntryRow) => boolean;
+    matcher: (entry: ContactAllowlistEntry) => boolean;
     timeoutMs?: number;
   }
-): Promise<VisibleContactAllowlistEntryRow> {
+): Promise<ContactAllowlistEntry> {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   return new Promise((resolve, reject) => {
-    const poll = () => {
-      const entry = params.read().allowlistEntries.find(params.matcher);
+    const poll = async () => {
+      const entry = (await params.read()).allowlistEntries.find(params.matcher);
       if (entry) {
         resolve(entry);
         return;
@@ -225,10 +357,12 @@ function waitForAllowlistEntry(
         );
         return;
       }
-      setTimeout(poll, 100);
+      setTimeout(() => {
+        void poll().catch(reject);
+      }, 100);
     };
 
-    poll();
+    void poll().catch(reject);
   });
 }
 
@@ -240,8 +374,8 @@ function waitForAllowlistRemoval(params: {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   return new Promise((resolve, reject) => {
-    const poll = () => {
-      const stillExists = params.read().allowlistEntries.some(row => row.id === params.entryId);
+    const poll = async () => {
+      const stillExists = (await params.read()).allowlistEntries.some(row => row.id === params.entryId);
       if (!stillExists) {
         resolve();
         return;
@@ -254,10 +388,12 @@ function waitForAllowlistRemoval(params: {
         );
         return;
       }
-      setTimeout(poll, 100);
+      setTimeout(() => {
+        void poll().catch(reject);
+      }, 100);
     };
 
-    poll();
+    void poll().catch(reject);
   });
 }
 
@@ -324,8 +460,8 @@ export async function listContactRequests(params: {
   outgoing?: boolean;
 }): Promise<ContactRequestListResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -349,60 +485,72 @@ export async function listContactRequests(params: {
   try {
     const subscription = await subscribeContactTables(conn);
     try {
-      const snapshot = readContactRows(conn);
-      const defaultActor = requireDefaultOwnedActor(snapshot.actors, normalizedEmail);
+      const snapshot = await readContactRows(conn);
+      const defaultActor = requireDefaultOwnedActor(snapshot.actors, email);
       const ownedActorIds = new Set(
         snapshot.actors
-          .filter(actor => actor.inboxId === defaultActor.inboxId)
+          .filter(actor => actor.accountId === defaultActor.accountId)
           .map(actor => actor.id)
       );
+      const actorById = new Map(snapshot.actors.map(actor => [actor.id, actor] as const));
       const incomingOnly = Boolean(params.incoming && !params.outgoing);
       const outgoingOnly = Boolean(params.outgoing && !params.incoming);
 
       const requests = snapshot.contactRequests
-        .filter(request =>
-          request.direction === 'incoming'
-            ? ownedActorIds.has(request.targetAgentDbId)
-            : ownedActorIds.has(request.requesterAgentDbId)
+        .map(request => {
+          const direction = contactRequestDirection(request, ownedActorIds);
+          return direction ? { request, direction } : null;
+        })
+        .filter((entry): entry is { request: ContactRequest; direction: 'incoming' | 'outgoing' } =>
+          entry !== null
         )
-        .filter(request => (incomingOnly ? request.direction === 'incoming' : true))
-        .filter(request => (outgoingOnly ? request.direction === 'outgoing' : true))
-        .filter(request => {
+        .filter(entry => (incomingOnly ? entry.direction === 'incoming' : true))
+        .filter(entry => (outgoingOnly ? entry.direction === 'outgoing' : true))
+        .filter(entry => {
           if (!normalizedSlug) return true;
-          return request.direction === 'incoming'
-            ? request.targetSlug === normalizedSlug
-            : request.requesterSlug === normalizedSlug;
+          return entry.direction === 'incoming'
+            ? entry.request.targetSlug === normalizedSlug
+            : entry.request.requesterSlug === normalizedSlug;
         })
         .sort((left, right) => {
           return (
-            Number(right.updatedAt.microsSinceUnixEpoch - left.updatedAt.microsSinceUnixEpoch) ||
-            Number(right.id - left.id)
+            Number(
+              right.request.updatedAt.microsSinceUnixEpoch -
+                left.request.updatedAt.microsSinceUnixEpoch
+            ) || Number(right.request.id - left.request.id)
           );
         })
-        .map(
-          request =>
-            ({
-              id: request.id.toString(),
-              threadId: request.threadId.toString(),
-              direction: request.direction as ContactRequestListItem['direction'],
-              status: request.status as ContactRequestListItem['status'],
-              messageCount: request.messageCount.toString(),
-              requester: {
-                slug: request.requesterSlug,
-                displayName: request.requesterDisplayName ?? null,
-                publicIdentity: request.requesterPublicIdentity,
-                email: request.requesterDisplayEmail,
-              },
-              target: {
-                slug: request.targetSlug,
-                displayName: request.targetDisplayName ?? null,
-                publicIdentity: request.targetPublicIdentity,
-              },
-              createdAt: timestampToISOString(request.createdAt),
-              updatedAt: timestampToISOString(request.updatedAt),
-              resolvedAt: request.resolvedAt ? timestampToISOString(request.resolvedAt) : null,
-            }) satisfies ContactRequestListItem
-        );
+        .map(entry => {
+          const requester = actorLabel(
+            actorById.get(entry.request.requesterAgentDbId),
+            entry.request.requesterSlug
+          );
+          const target = actorLabel(
+            actorById.get(entry.request.targetAgentDbId),
+            entry.request.targetSlug
+          );
+          return {
+            id: entry.request.id.toString(),
+            threadId: entry.request.threadId.toString(),
+            direction: entry.direction,
+            status: contactRequestStatus(entry.request.status) ?? 'pending',
+            messageCount: '0',
+            requester: {
+              ...requester,
+              publicIdentity: entry.request.requesterPublicIdentity,
+            },
+            target: {
+              slug: target.slug,
+              displayName: target.displayName,
+              publicIdentity: entry.request.targetPublicIdentity,
+            },
+            createdAt: timestampToISOString(entry.request.createdAt),
+            updatedAt: timestampToISOString(entry.request.updatedAt),
+            resolvedAt: entry.request.resolvedAt
+              ? timestampToISOString(entry.request.resolvedAt)
+              : null,
+          } satisfies ContactRequestListItem;
+        });
 
       return {
         profile: profile.name,
@@ -425,8 +573,8 @@ export async function listThreadInvites(params: {
   outgoing?: boolean;
 }): Promise<ThreadInviteListResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -450,13 +598,14 @@ export async function listThreadInvites(params: {
   try {
     const subscription = await subscribeContactTables(conn);
     try {
-      const snapshot = readContactRows(conn);
-      const defaultActor = requireDefaultOwnedActor(snapshot.actors, normalizedEmail);
+      const snapshot = await readContactRows(conn);
+      const defaultActor = requireDefaultOwnedActor(snapshot.actors, email);
       const ownedActorIds = new Set(
         snapshot.actors
-          .filter(actor => actor.inboxId === defaultActor.inboxId)
+          .filter(actor => actor.accountId === defaultActor.accountId)
           .map(actor => actor.id)
       );
+      const actorById = new Map(snapshot.actors.map(actor => [actor.id, actor] as const));
       const incomingOnly = Boolean(params.incoming && !params.outgoing);
       const outgoingOnly = Boolean(params.outgoing && !params.incoming);
 
@@ -469,16 +618,18 @@ export async function listThreadInvites(params: {
               : null;
           return direction ? { invite, direction } : null;
         })
-        .filter((entry): entry is { invite: VisibleThreadInviteRow; direction: 'incoming' | 'outgoing' } =>
+        .filter((entry): entry is { invite: ThreadInvite; direction: 'incoming' | 'outgoing' } =>
           entry !== null
         )
         .filter(entry => (incomingOnly ? entry.direction === 'incoming' : true))
         .filter(entry => (outgoingOnly ? entry.direction === 'outgoing' : true))
         .filter(entry => {
           if (!normalizedSlug) return true;
+          const inviteeSlug = actorById.get(entry.invite.inviteeAgentDbId)?.slug;
+          const inviterSlug = actorById.get(entry.invite.inviterAgentDbId)?.slug;
           return entry.direction === 'incoming'
-            ? entry.invite.inviteeSlug === normalizedSlug
-            : entry.invite.inviterSlug === normalizedSlug;
+            ? inviteeSlug === normalizedSlug
+            : inviterSlug === normalizedSlug;
         })
         .sort((left, right) => {
           return (
@@ -488,31 +639,38 @@ export async function listThreadInvites(params: {
             ) || Number(right.invite.id - left.invite.id)
           );
         })
-        .map(
-          entry =>
-            ({
-              id: entry.invite.id.toString(),
-              threadId: entry.invite.threadId.toString(),
-              direction: entry.direction,
-              status: entry.invite.status as ThreadInviteListItem['status'],
-              inviter: {
-                slug: entry.invite.inviterSlug,
-                displayName: entry.invite.inviterDisplayName ?? null,
-                publicIdentity: entry.invite.inviterPublicIdentity,
-              },
-              invitee: {
-                slug: entry.invite.inviteeSlug,
-                displayName: entry.invite.inviteeDisplayName ?? null,
-                publicIdentity: entry.invite.inviteePublicIdentity,
-              },
-              threadTitle: entry.invite.threadTitle ?? null,
-              createdAt: timestampToISOString(entry.invite.createdAt),
-              updatedAt: timestampToISOString(entry.invite.updatedAt),
-              resolvedAt: entry.invite.resolvedAt
-                ? timestampToISOString(entry.invite.resolvedAt)
-                : null,
-            }) satisfies ThreadInviteListItem
-        );
+        .map(entry => {
+          const inviter = actorLabel(
+            actorById.get(entry.invite.inviterAgentDbId),
+            `agent:${entry.invite.inviterAgentDbId.toString()}`
+          );
+          const invitee = actorLabel(
+            actorById.get(entry.invite.inviteeAgentDbId),
+            `agent:${entry.invite.inviteeAgentDbId.toString()}`
+          );
+          return {
+            id: entry.invite.id.toString(),
+            threadId: entry.invite.threadId.toString(),
+            direction: entry.direction,
+            status: threadInviteStatus(entry.invite.status) ?? 'pending',
+            inviter: {
+              slug: inviter.slug,
+              displayName: inviter.displayName,
+              publicIdentity: inviter.publicIdentity,
+            },
+            invitee: {
+              slug: invitee.slug,
+              displayName: invitee.displayName,
+              publicIdentity: invitee.publicIdentity,
+            },
+            threadTitle: `Thread #${entry.invite.threadId.toString()}`,
+            createdAt: timestampToISOString(entry.invite.createdAt),
+            updatedAt: timestampToISOString(entry.invite.updatedAt),
+            resolvedAt: entry.invite.resolvedAt
+              ? timestampToISOString(entry.invite.resolvedAt)
+              : null,
+          } satisfies ThreadInviteListItem;
+        });
 
       return {
         profile: profile.name,
@@ -540,8 +698,8 @@ export async function resolveContactRequest(params: {
   slug: string;
 }> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -560,16 +718,22 @@ export async function resolveContactRequest(params: {
     const subscription = await subscribeContactTables(conn);
     try {
       const read = () => readContactRows(conn);
-      const snapshot = read();
+      const snapshot = await read();
       const request = findRequestById(snapshot.contactRequests, parsedRequestId);
-      if (request.direction !== 'incoming') {
+      const defaultActor = requireDefaultOwnedActor(snapshot.actors, email);
+      const ownedActorIds = new Set(
+        snapshot.actors
+          .filter(actor => actor.accountId === defaultActor.accountId)
+          .map(actor => actor.id)
+      );
+      if (contactRequestDirection(request, ownedActorIds) !== 'incoming') {
         throw userError('Only incoming contact requests can be resolved from this inbox.', {
           code: 'CONTACT_REQUEST_DIRECTION_INVALID',
         });
       }
       const selectedActor = resolveContactRequestTargetActor({
         actors: snapshot.actors,
-        normalizedEmail,
+        email,
         request,
         actorSlug: params.actorSlug,
       });
@@ -596,8 +760,92 @@ export async function resolveContactRequest(params: {
       return {
         profile: profile.name,
         requestId: resolved.id.toString(),
-        status: resolved.status as 'approved' | 'rejected',
+        status: (contactRequestStatus(resolved.status) ?? 'rejected') as 'approved' | 'rejected',
         slug: resolved.targetSlug,
+      };
+    } finally {
+      subscription.unsubscribe();
+    }
+  } finally {
+    disconnectConnection(conn);
+  }
+}
+
+export async function cancelContactRequest(params: {
+  profileName: string;
+  reporter: TaskReporter;
+  requestId: string;
+  actorSlug?: string;
+}): Promise<{
+  profile: string;
+  requestId: string;
+  status: 'canceled';
+  slug: string;
+}> {
+  const { profile, session, claims } = await ensureAuthenticatedSession(params);
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
+    throw userError('Current OIDC session is missing an email claim.', {
+      code: 'OIDC_EMAIL_MISSING',
+    });
+  }
+
+  const parsedRequestId = parseRequestId(params.requestId);
+  params.reporter.verbose?.('Connecting to SpacetimeDB');
+  const { conn } = await connectAuthenticated({
+    host: profile.spacetimeHost,
+    databaseName: profile.spacetimeDbName,
+    sessionToken: session.idToken,
+  });
+  params.reporter.verbose?.('Connected to SpacetimeDB');
+
+  try {
+    const subscription = await subscribeContactTables(conn);
+    try {
+      const read = () => readContactRows(conn);
+      const snapshot = await read();
+      const lookupContactRequest = async (input: { requestId: bigint }) => {
+        const rows = await conn.procedures.readContactRequest(input);
+        return rows[0];
+      };
+      const request = await findCancelableContactRequestById({
+        requests: snapshot.contactRequests,
+        requestId: parsedRequestId,
+        lookup: lookupContactRequest,
+      });
+      const defaultActor = requireDefaultOwnedActor(snapshot.actors, email);
+      const ownedActorIds = new Set(
+        snapshot.actors
+          .filter(actor => actor.accountId === defaultActor.accountId)
+          .map(actor => actor.id)
+      );
+      if (contactRequestDirection(request, ownedActorIds) !== 'outgoing') {
+        throw userError('Only outgoing contact requests can be canceled from this inbox.', {
+          code: 'CONTACT_REQUEST_DIRECTION_INVALID',
+        });
+      }
+      const selectedActor = resolveContactRequestRequesterActor({
+        actors: snapshot.actors,
+        email,
+        request,
+        actorSlug: params.actorSlug,
+      });
+
+      await conn.reducers.cancelContactRequest({
+        agentDbId: selectedActor.id,
+        requestId: parsedRequestId,
+      });
+      await waitForContactRequestCancellation({
+        read,
+        requestId: parsedRequestId,
+        lookup: lookupContactRequest,
+      });
+
+      return {
+        profile: profile.name,
+        requestId: request.id.toString(),
+        status: 'canceled',
+        slug: request.targetSlug,
       };
     } finally {
       subscription.unsubscribe();
@@ -621,8 +869,8 @@ export async function resolveThreadInvite(params: {
   threadId: string;
 }> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -641,14 +889,14 @@ export async function resolveThreadInvite(params: {
     const subscription = await subscribeContactTables(conn);
     try {
       const read = () => readContactRows(conn);
-      const snapshot = read();
+      const snapshot = await read();
       const selectedActor = params.actorSlug
         ? resolveOwnedActorBySlug({
             actors: snapshot.actors,
-            normalizedEmail,
+            email,
             actorSlug: params.actorSlug,
           })
-        : requireDefaultOwnedActor(snapshot.actors, normalizedEmail);
+        : requireDefaultOwnedActor(snapshot.actors, email);
       const invite = findThreadInviteById(snapshot.threadInvites, parsedInviteId);
       if (invite.inviteeAgentDbId !== selectedActor.id) {
         throw userError('Only incoming thread invites can be resolved from this agent.', {
@@ -662,7 +910,7 @@ export async function resolveThreadInvite(params: {
           inviteId: parsedInviteId,
         });
       } else {
-        await conn.reducers.rejectThreadInvite({
+        await conn.reducers.declineThreadInvite({
           agentDbId: invite.inviteeAgentDbId,
           inviteId: parsedInviteId,
         });
@@ -677,8 +925,10 @@ export async function resolveThreadInvite(params: {
       return {
         profile: profile.name,
         inviteId: resolved.id.toString(),
-        status: resolved.status as 'accepted' | 'rejected',
-        slug: resolved.inviteeSlug,
+        status: (threadInviteStatus(resolved.status) ?? 'rejected') as 'accepted' | 'rejected',
+        slug:
+          snapshot.actors.find(actor => actor.id === resolved.inviteeAgentDbId)?.slug ??
+          `agent:${resolved.inviteeAgentDbId.toString()}`,
         threadId: resolved.threadId.toString(),
       };
     } finally {
@@ -707,8 +957,8 @@ export async function listContactAllowlist(params: {
   actorSlug?: string;
 }): Promise<ContactAllowlistListResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -723,30 +973,30 @@ export async function listContactAllowlist(params: {
   try {
     const subscription = await subscribeContactTables(conn);
     try {
-      const snapshot = readContactRows(conn);
+      const snapshot = await readContactRows(conn);
       const actor = params.actorSlug
         ? resolveOwnedActorBySlug({
             actors: snapshot.actors,
-            normalizedEmail,
+            email,
             actorSlug: params.actorSlug,
           })
-        : requireDefaultOwnedActor(snapshot.actors, normalizedEmail);
+        : requireDefaultOwnedActor(snapshot.actors, email);
       const entries = snapshot.allowlistEntries
-        .filter(entry => entry.inboxId === actor.inboxId)
+        .filter(entry => entry.accountId === actor.accountId)
         .sort((left, right) => Number(right.createdAt.microsSinceUnixEpoch - left.createdAt.microsSinceUnixEpoch))
-        .map(entry => ({
-          id: entry.id.toString(),
-          kind: entry.kind as 'agent' | 'email',
-          value:
-            entry.kind === 'agent'
-              ? (entry.agentPublicIdentity ?? '')
-              : (entry.displayEmail ?? entry.normalizedEmail ?? ''),
-          label:
-            entry.kind === 'agent'
-              ? entry.agentDisplayName ?? entry.agentSlug ?? null
-              : entry.displayEmail ?? null,
-          createdAt: timestampToISOString(entry.createdAt),
-        }));
+        .map(entry => {
+          const kind = allowlistKind(entry.kind);
+          return {
+            id: entry.id.toString(),
+            kind,
+            value:
+              kind === 'agent'
+                ? (entry.agentPublicIdentity ?? '')
+                : (entry.email ?? ''),
+            label: kind === 'agent' ? entry.agentSlug ?? null : entry.email ?? null,
+            createdAt: timestampToISOString(entry.createdAt),
+          };
+        });
 
       return {
         profile: profile.name,
@@ -780,8 +1030,8 @@ export async function addContactAllowlist(params: {
   }
 
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -797,20 +1047,25 @@ export async function addContactAllowlist(params: {
     const subscription = await subscribeContactTables(conn);
     try {
       const read = () => readContactRows(conn);
-      const snapshot = read();
+      const snapshot = await read();
       const actor = params.actorSlug
         ? resolveOwnedActorBySlug({
             actors: snapshot.actors,
-            normalizedEmail,
+            email,
             actorSlug: params.actorSlug,
           })
-        : requireDefaultOwnedActor(snapshot.actors, normalizedEmail);
+        : requireDefaultOwnedActor(snapshot.actors, email);
 
       if (params.agent) {
         const resolved = await resolvePublishedActorLookup({
           identifier: params.agent,
           lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-          lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+          lookupByEmail: input =>
+            conn.procedures.lookupPublishedAgentsByEmailPage({
+              ...input,
+              afterId: undefined,
+              limit: undefined,
+            }),
           invalidMessage: 'Inbox slug is invalid.',
           invalidCode: 'INVALID_AGENT_IDENTIFIER',
           notFoundCode: 'ACTOR_NOT_FOUND',
@@ -819,12 +1074,14 @@ export async function addContactAllowlist(params: {
         const publicIdentity = resolved.selected.publicIdentity;
         await conn.reducers.addContactAllowlistEntry({
           agentDbId: actor.id,
+          kind: { tag: 'Agent' },
           agentPublicIdentity: publicIdentity,
           email: undefined,
         });
         const entry = await waitForAllowlistEntry({
           read,
-          matcher: row => row.kind === 'agent' && row.agentPublicIdentity === publicIdentity,
+          matcher: row =>
+            allowlistKind(row.kind) === 'agent' && row.agentPublicIdentity === publicIdentity,
         });
         return {
           profile: profile.name,
@@ -837,18 +1094,19 @@ export async function addContactAllowlist(params: {
       const normalizedTargetEmail = requireNonEmptyEmail(params.email);
       await conn.reducers.addContactAllowlistEntry({
         agentDbId: actor.id,
+        kind: { tag: 'Email' },
         agentPublicIdentity: undefined,
         email: normalizedTargetEmail,
       });
       const entry = await waitForAllowlistEntry({
         read,
-        matcher: row => row.kind === 'email' && row.normalizedEmail === normalizedTargetEmail,
+        matcher: row => allowlistKind(row.kind) === 'email' && row.email === normalizedTargetEmail,
       });
       return {
         profile: profile.name,
         entryId: entry.id.toString(),
         kind: 'email',
-        value: entry.displayEmail ?? entry.normalizedEmail ?? normalizedTargetEmail,
+        value: entry.email ?? normalizedTargetEmail,
       };
     } finally {
       subscription.unsubscribe();
@@ -887,8 +1145,8 @@ export async function removeContactAllowlist(params: {
   }
 
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -904,27 +1162,35 @@ export async function removeContactAllowlist(params: {
     const subscription = await subscribeContactTables(conn);
     try {
       const read = () => readContactRows(conn);
-      const snapshot = read();
+      const snapshot = await read();
       const actor = params.actorSlug
         ? resolveOwnedActorBySlug({
             actors: snapshot.actors,
-            normalizedEmail,
+            email,
             actorSlug: params.actorSlug,
           })
-        : requireDefaultOwnedActor(snapshot.actors, normalizedEmail);
+        : requireDefaultOwnedActor(snapshot.actors, email);
 
       if (params.agent) {
         const resolved = await resolvePublishedActorLookup({
           identifier: params.agent,
           lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-          lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+          lookupByEmail: input =>
+            conn.procedures.lookupPublishedAgentsByEmailPage({
+              ...input,
+              afterId: undefined,
+              limit: undefined,
+            }),
           invalidMessage: 'Inbox slug is invalid.',
           invalidCode: 'INVALID_AGENT_IDENTIFIER',
           notFoundCode: 'ACTOR_NOT_FOUND',
           fallbackMessage: 'Unable to resolve inbox slug.',
         });
         const entry = snapshot.allowlistEntries.find(
-          row => row.kind === 'agent' && row.agentPublicIdentity === resolved.selected.publicIdentity
+          row =>
+            row.accountId === actor.accountId &&
+            allowlistKind(row.kind) === 'agent' &&
+            row.agentPublicIdentity === resolved.selected.publicIdentity
         );
         if (!entry) {
           throw userError('That agent is not in the agent allowlist.', {
@@ -933,7 +1199,6 @@ export async function removeContactAllowlist(params: {
         }
 
         await conn.reducers.removeContactAllowlistEntry({
-          agentDbId: actor.id,
           entryId: entry.id,
         });
         await waitForAllowlistRemoval({ read, entryId: entry.id });
@@ -947,7 +1212,10 @@ export async function removeContactAllowlist(params: {
 
       const normalizedTargetEmail = requireNonEmptyEmail(params.email);
       const entry = snapshot.allowlistEntries.find(
-        row => row.kind === 'email' && row.normalizedEmail === normalizedTargetEmail
+        row =>
+          row.accountId === actor.accountId &&
+          allowlistKind(row.kind) === 'email' &&
+          row.email === normalizedTargetEmail
       );
       if (!entry) {
         throw userError('That email is not in the agent allowlist.', {
@@ -956,7 +1224,6 @@ export async function removeContactAllowlist(params: {
       }
 
       await conn.reducers.removeContactAllowlistEntry({
-        agentDbId: actor.id,
         entryId: entry.id,
       });
       await waitForAllowlistRemoval({ read, entryId: entry.id });
@@ -964,7 +1231,7 @@ export async function removeContactAllowlist(params: {
         profile: profile.name,
         removed: true,
         kind: 'email',
-        value: entry.displayEmail ?? entry.normalizedEmail ?? normalizedTargetEmail,
+        value: entry.email ?? normalizedTargetEmail,
       };
     } finally {
       subscription.unsubscribe();
@@ -985,8 +1252,8 @@ export async function setPublicDescription(params: {
   description: string | null;
 }> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1002,23 +1269,29 @@ export async function setPublicDescription(params: {
     const subscription = await subscribeContactTables(conn);
     try {
       const read = () => readContactRows(conn);
-      const snapshot = read();
+      const snapshot = await read();
       const actor = resolveOwnedActorBySlug({
         actors: snapshot.actors,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
       });
       const normalizedDescription = params.description?.trim() || undefined;
 
-      await conn.reducers.setAgentPublicDescription({
+      await conn.reducers.updateAgentProfile({
         agentDbId: actor.id,
-        description: normalizedDescription,
+        displayName: undefined,
+        publicDescription: normalizedDescription,
+        publicLinkedEmailEnabled: undefined,
+        allowAllMessageContentTypes: undefined,
+        allowAllMessageHeaders: undefined,
+        supportedMessageContentTypes: undefined,
+        supportedMessageHeaderNames: undefined,
       });
 
-      const updatedActor = await new Promise<VisibleAgentRow>((resolve, reject) => {
+      const updatedActor = await new Promise<Agent>((resolve, reject) => {
         const timeoutAt = Date.now() + 10000;
-        const poll = () => {
-          const nextActor = read().actors.find(row => row.id === actor.id);
+        const poll = async () => {
+          const nextActor = (await read()).actors.find(row => row.id === actor.id);
           if (nextActor && (nextActor.publicDescription ?? null) === (normalizedDescription ?? null)) {
             resolve(nextActor);
             return;
@@ -1031,9 +1304,11 @@ export async function setPublicDescription(params: {
             );
             return;
           }
-          setTimeout(poll, 100);
+          setTimeout(() => {
+            void poll().catch(reject);
+          }, 100);
         };
-        poll();
+        void poll().catch(reject);
       });
 
       return {
@@ -1060,8 +1335,8 @@ export async function setPublicLinkedEmailVisibility(params: {
   enabled: boolean;
 }> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1077,22 +1352,28 @@ export async function setPublicLinkedEmailVisibility(params: {
     const subscription = await subscribeContactTables(conn);
     try {
       const read = () => readContactRows(conn);
-      const snapshot = read();
+      const snapshot = await read();
       const actor = resolveOwnedActorBySlug({
         actors: snapshot.actors,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
       });
 
-      await conn.reducers.setAgentPublicLinkedEmailVisibility({
+      await conn.reducers.updateAgentProfile({
         agentDbId: actor.id,
-        enabled: params.enabled,
+        displayName: undefined,
+        publicDescription: undefined,
+        publicLinkedEmailEnabled: params.enabled,
+        allowAllMessageContentTypes: undefined,
+        allowAllMessageHeaders: undefined,
+        supportedMessageContentTypes: undefined,
+        supportedMessageHeaderNames: undefined,
       });
 
-      const updatedActor = await new Promise<VisibleAgentRow>((resolve, reject) => {
+      const updatedActor = await new Promise<Agent>((resolve, reject) => {
         const timeoutAt = Date.now() + 10000;
-        const poll = () => {
-          const nextActor = read().actors.find(row => row.id === actor.id);
+        const poll = async () => {
+          const nextActor = (await read()).actors.find(row => row.id === actor.id);
           if (nextActor && nextActor.publicLinkedEmailEnabled === params.enabled) {
             resolve(nextActor);
             return;
@@ -1105,9 +1386,11 @@ export async function setPublicLinkedEmailVisibility(params: {
             );
             return;
           }
-          setTimeout(poll, 100);
+          setTimeout(() => {
+            void poll().catch(reject);
+          }, 100);
         };
-        poll();
+        void poll().catch(reject);
       });
 
       return {
@@ -1133,8 +1416,8 @@ export async function getPublicDescription(params: {
   description: string | null;
 }> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1149,10 +1432,10 @@ export async function getPublicDescription(params: {
   try {
     const subscription = await subscribeContactTables(conn);
     try {
-      const snapshot = readContactRows(conn);
+      const snapshot = await readContactRows(conn);
       const actor = resolveOwnedActorBySlug({
         actors: snapshot.actors,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
       });
 

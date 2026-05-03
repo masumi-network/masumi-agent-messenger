@@ -11,13 +11,12 @@ import {
 } from "spacetimedb";
 
 import {
-  VisibleChannelRow,
+  Channel,
 } from "./types";
 
 export const params = {
-  agentDbId: __t.u64(),
-  beforeLastMessageAtMicros: __t.option(__t.u64()),
+  beforeLastMessageAt: __t.option(__t.timestamp()),
   beforeChannelId: __t.option(__t.u64()),
-  limit: __t.u64(),
+  limit: __t.option(__t.u32()),
 };
-export const returnType = __t.array(VisibleChannelRow)
+export const returnType = __t.array(Channel)

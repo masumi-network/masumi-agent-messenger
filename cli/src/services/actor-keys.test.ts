@@ -10,13 +10,13 @@ function createKeyPair(suffix: string): AgentKeyPair {
     encryption: {
       publicKey: `enc-pub-${suffix}`,
       privateKey: `enc-priv-${suffix}`,
-      keyVersion: `enc-${suffix}`,
+      keyVersion: 1,
       algorithm: 'ecdh-p256-v1',
     },
     signing: {
       publicKey: `sig-pub-${suffix}`,
       privateKey: `sig-priv-${suffix}`,
-      keyVersion: `sig-${suffix}`,
+      keyVersion: 1,
       algorithm: 'ecdsa-p256-sha256-v1',
     },
   };
@@ -35,8 +35,7 @@ function createProfile(): ResolvedProfile {
       spacetimeIdentity: 'identity-1',
       inbox: {
         id: '1',
-        normalizedEmail: 'agent@example.com',
-        displayEmail: 'agent@example.com',
+        email: 'agent@example.com',
       },
       actor: {
         id: '7',
@@ -45,8 +44,8 @@ function createProfile(): ResolvedProfile {
         displayName: 'Agent',
       },
       keyVersions: {
-        encryption: 'enc-current',
-        signing: 'sig-current',
+        encryption: 1,
+        signing: 1,
       },
       updatedAt: '2026-04-15T00:00:00.000Z',
     },
@@ -80,11 +79,11 @@ describe('resolveStoredActorKeyPairForPublishedActor', () => {
     await store.setAgentKeyPair(profile.name, stale);
     await store.setNamespaceKeyVault(profile.name, {
       version: 1,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       actors: [
         {
           identity: {
-            normalizedEmail: 'agent@example.com',
+            email: 'agent@example.com',
             slug: 'agent',
           },
           current: stale,
@@ -97,7 +96,7 @@ describe('resolveStoredActorKeyPairForPublishedActor', () => {
       profile,
       secretStore: store,
       identity: {
-        normalizedEmail: 'agent@example.com',
+        email: 'agent@example.com',
         slug: 'agent',
       },
       published: {
@@ -119,11 +118,11 @@ describe('resolveStoredActorKeyPairForPublishedActor', () => {
     expect(await store.getAgentKeyPair(profile.name)).toEqual(matching);
     expect(await store.getNamespaceKeyVault(profile.name)).toEqual({
       version: 1,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       actors: [
         {
           identity: {
-            normalizedEmail: 'agent@example.com',
+            email: 'agent@example.com',
             slug: 'agent',
           },
           current: matching,
@@ -142,11 +141,11 @@ describe('resolveStoredActorKeyPairForPublishedActor', () => {
     await store.setAgentKeyPair(profile.name, stale);
     await store.setNamespaceKeyVault(profile.name, {
       version: 1,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       actors: [
         {
           identity: {
-            normalizedEmail: 'agent@example.com',
+            email: 'agent@example.com',
             slug: 'agent',
           },
           current: stale,
@@ -159,7 +158,7 @@ describe('resolveStoredActorKeyPairForPublishedActor', () => {
       profile,
       secretStore: store,
       identity: {
-        normalizedEmail: 'agent@example.com',
+        email: 'agent@example.com',
         slug: 'agent',
       },
       published: {
@@ -181,11 +180,11 @@ describe('resolveStoredActorKeyPairForPublishedActor', () => {
     expect(await store.getAgentKeyPair(profile.name)).toBeNull();
     expect(await store.getNamespaceKeyVault(profile.name)).toEqual({
       version: 1,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       actors: [
         {
           identity: {
-            normalizedEmail: 'agent@example.com',
+            email: 'agent@example.com',
             slug: 'agent',
           },
           current: null,
@@ -203,11 +202,11 @@ describe('resolveStoredActorKeyPairForPublishedActor', () => {
 
     await store.setNamespaceKeyVault(profile.name, {
       version: 1,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       actors: [
         {
           identity: {
-            normalizedEmail: 'agent@example.com',
+            email: 'agent@example.com',
             slug: 'agent',
           },
           current: null,
@@ -220,7 +219,7 @@ describe('resolveStoredActorKeyPairForPublishedActor', () => {
       profile,
       secretStore: store,
       identity: {
-        normalizedEmail: 'agent@example.com',
+        email: 'agent@example.com',
         slug: 'agent',
       },
       published: {
@@ -242,11 +241,11 @@ describe('resolveStoredActorKeyPairForPublishedActor', () => {
     expect(await store.getAgentKeyPair(profile.name)).toBeNull();
     expect(await store.getNamespaceKeyVault(profile.name)).toEqual({
       version: 1,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       actors: [
         {
           identity: {
-            normalizedEmail: 'agent@example.com',
+            email: 'agent@example.com',
             slug: 'agent',
           },
           current: null,

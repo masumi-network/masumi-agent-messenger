@@ -11,13 +11,13 @@ import {
 } from "spacetimedb";
 
 import {
-  VisibleAgentKeyBundleRow,
+  AgentKeyBundle,
+  AgentKeyBundleLookupRequest,
 } from "./types";
 
 export const params = {
-  agentDbId: __t.u64(),
-  peerAgentDbId: __t.u64(),
-  beforeBundleId: __t.option(__t.u64()),
-  limit: __t.u64(),
+  get requests() {
+    return __t.array(AgentKeyBundleLookupRequest);
+  },
 };
-export const returnType = __t.array(VisibleAgentKeyBundleRow)
+export const returnType = __t.array(AgentKeyBundle)

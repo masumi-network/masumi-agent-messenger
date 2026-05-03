@@ -1,5 +1,14 @@
-import type { AgentKeyPair, InboundEncryptedMessage, InboundSecretEnvelope } from '../../../shared/agent-crypto';
-import { decryptMessage } from '../../../shared/agent-crypto';
+import type {
+  AgentKeyPair,
+  InboundEncryptedMessage,
+  InboundSecretEnvelope,
+} from '../../../shared/agent-crypto';
+import {
+  decryptMessage,
+  normalizeEnvelopeWrapAlgorithm,
+  normalizeMessageCipherAlgorithm,
+} from '../../../shared/agent-crypto';
+import { toHex } from '../../../shared/crypto-utils';
 import {
   buildLegacyPublicMessageCapabilities,
   buildPublicMessageCapabilities,
@@ -19,15 +28,21 @@ import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { timestampToISOString } from '../../../shared/spacetime-time';
 import type { DbConnection } from '../../../webapp/src/module_bindings';
 import type {
-  AgentPublicKeyLookupRequest,
-  AgentPublicKeyLookupRow,
-  VisibleAgentRow,
-  VisibleThreadParticipantRow,
-  VisibleThreadReadStateRow,
-  VisibleThreadRow,
-  VisibleThreadSecretEnvelopeRow,
-  VisibleMessageRow,
+  Agent,
+  Thread,
+  ThreadSecretEnvelope as VisibleThreadSecretEnvelopeRow,
+  Message,
 } from '../../../webapp/src/module_bindings/types';
+import {
+  toAgentPublicKeyKindTag,
+  type AgentPublicKeyLookupRow,
+} from '../../../webapp/src/lib/procedures';
+
+type AgentPublicKeyLookupRequest = {
+  agentDbId: bigint;
+  keyKind: 'encryption' | 'signing';
+  keyVersion: number;
+};
 import { ensureAuthenticatedSession } from './auth';
 import { getStoredActorKeyPair } from './actor-keys';
 import type { TaskReporter } from './command-runtime';
@@ -35,24 +50,28 @@ import { connectivityError, isCliError, userError } from './errors';
 import {
   autoPinPeerIfUnknown,
   comparePinnedPeer,
-  isInboundSignatureTrusted,
+  confirmPeerKeyRotation,
+  type PeerKeyTuple,
 } from './peer-key-trust';
 import { createSecretStore } from './secret-store';
 import {
   connectAuthenticated,
   disconnectConnection,
   readLatestMessageRows,
-  readMessageRows,
   readSubscribedMessageRows,
   subscribeMessageTables,
+  type MessageRows,
+  type VisibleThreadReadStateRow,
+  type VisibleThreadParticipantRow,
 } from './spacetimedb';
+import { mergeRowsById } from './row-utils';
 
 const AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE = 100;
 
 export type InboxMessageItem = {
   id: string;
   threadId: string;
-  threadSeq: string;
+  messageId: string;
   createdAt: string;
   threadLabel: string;
   sender: {
@@ -98,61 +117,70 @@ export type PaginatedNewMessageFeed = NewMessageFeed & {
 };
 
 type MessageSnapshot = {
-  actors: VisibleAgentRow[];
+  actors: Agent[];
   participants: VisibleThreadParticipantRow[];
   readStates: VisibleThreadReadStateRow[];
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
-  threads: VisibleThreadRow[];
-  messages: VisibleMessageRow[];
+  threads: Thread[];
+  messages: Message[];
 };
-
 type AgentPublicKeyKind = 'encryption' | 'signing';
 
 type UnreadMessageContext = {
-  defaultActor: VisibleAgentRow;
+  defaultActor: Agent;
   ownActorIds: Set<bigint>;
-  unreadMessages: VisibleMessageRow[];
+  unreadMessages: Message[];
 };
 
 function findVersionedKey(
-  actor: VisibleAgentRow,
+  _actor: Agent,
   publicKeys: AgentPublicKeyLookupRow[],
   kind: AgentPublicKeyKind,
-  version: string
+  version: number
 ): string | null {
-  if (kind === 'encryption' && actor.currentEncryptionKeyVersion === version) {
-    return actor.currentEncryptionPublicKey;
-  }
-  if (kind === 'signing' && actor.currentSigningKeyVersion === version) {
-    return actor.currentSigningPublicKey;
-  }
+  const expectedTag = kind === 'encryption' ? 'Encryption' : 'Signing';
   return (
-    publicKeys.find(key => key.keyKind === kind && key.keyVersion === version)?.publicKey ??
-    null
+    publicKeys.find(key => key.keyKind.tag === expectedTag && key.keyVersion === version)
+      ?.publicKey ?? null
   );
+}
+
+function tupleFromAgentPublicKeyRows(
+  actor: Agent,
+  publicKeys: AgentPublicKeyLookupRow[]
+): PeerKeyTuple | null {
+  const encryptionPublicKey = findVersionedKey(
+    actor,
+    publicKeys,
+    'encryption',
+    actor.currentKeyBundleVersion
+  );
+  const signingPublicKey = findVersionedKey(
+    actor,
+    publicKeys,
+    'signing',
+    actor.currentKeyBundleVersion
+  );
+
+  if (!encryptionPublicKey || !signingPublicKey) {
+    return null;
+  }
+
+  return {
+    encryptionPublicKey,
+    encryptionKeyVersion: actor.currentKeyBundleVersion,
+    signingPublicKey,
+    signingKeyVersion: actor.currentKeyBundleVersion,
+  };
 }
 
 function addPublicKeyLookupRequest(params: {
   requestsByKey: Map<string, AgentPublicKeyLookupRequest>;
-  actorsById: Map<bigint, VisibleAgentRow>;
+  actorsById: Map<bigint, Agent>;
   agentDbId: bigint;
   keyKind: AgentPublicKeyKind;
-  keyVersion: string;
+  keyVersion: number;
 }) {
-  const actor = params.actorsById.get(params.agentDbId);
-  if (
-    params.keyKind === 'encryption' &&
-    actor?.currentEncryptionKeyVersion === params.keyVersion
-  ) {
-    return;
-  }
-  if (
-    params.keyKind === 'signing' &&
-    actor?.currentSigningKeyVersion === params.keyVersion
-  ) {
-    return;
-  }
-
   const requestKey = `${params.agentDbId.toString()}:${params.keyKind}:${params.keyVersion}`;
   params.requestsByKey.set(requestKey, {
     agentDbId: params.agentDbId,
@@ -162,9 +190,9 @@ function addPublicKeyLookupRequest(params: {
 }
 
 export function collectMessagePublicKeyLookupRequests(params: {
-  messages: VisibleMessageRow[];
+  messages: Message[];
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
-  actorsById: Map<bigint, VisibleAgentRow>;
+  actorsById: Map<bigint, Agent>;
 }): AgentPublicKeyLookupRequest[] {
   const requestsByKey = new Map<string, AgentPublicKeyLookupRequest>();
   const messageSecretKeys = new Set(
@@ -179,6 +207,23 @@ export function collectMessagePublicKeyLookupRequests(params: {
   );
 
   for (const message of params.messages) {
+    const senderActor = params.actorsById.get(message.senderAgentDbId);
+    if (senderActor) {
+      addPublicKeyLookupRequest({
+        requestsByKey,
+        actorsById: params.actorsById,
+        agentDbId: senderActor.id,
+        keyKind: 'encryption',
+        keyVersion: senderActor.currentKeyBundleVersion,
+      });
+      addPublicKeyLookupRequest({
+        requestsByKey,
+        actorsById: params.actorsById,
+        agentDbId: senderActor.id,
+        keyKind: 'signing',
+        keyVersion: senderActor.currentKeyBundleVersion,
+      });
+    }
     addPublicKeyLookupRequest({
       requestsByKey,
       actorsById: params.actorsById,
@@ -221,9 +266,9 @@ export function collectMessagePublicKeyLookupRequests(params: {
 export async function lookupMessagePublicKeys(params: {
   conn: DbConnection;
   agentDbId: bigint;
-  messages: VisibleMessageRow[];
+  messages: Message[];
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
-  actorsById: Map<bigint, VisibleAgentRow>;
+  actorsById: Map<bigint, Agent>;
 }): Promise<AgentPublicKeyLookupRow[]> {
   const requests = collectMessagePublicKeyLookupRequests({
     messages: params.messages,
@@ -232,12 +277,14 @@ export async function lookupMessagePublicKeys(params: {
   });
   const rows: AgentPublicKeyLookupRow[] = [];
   for (let index = 0; index < requests.length; index += AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE) {
-    rows.push(
-      ...(await params.conn.procedures.lookupAgentPublicKeys({
-        agentDbId: params.agentDbId,
-        requests: requests.slice(index, index + AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE),
-      }))
+    const batch = requests.slice(index, index + AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE).map(
+      request => ({
+        agentDbId: request.agentDbId,
+        keyKind: toAgentPublicKeyKindTag(request.keyKind),
+        keyVersion: request.keyVersion,
+      })
     );
+    rows.push(...(await params.conn.procedures.lookupAgentPublicKeys({ requests: batch })));
   }
   return rows;
 }
@@ -321,10 +368,10 @@ function normalizeMessageScope(params: {
 
 export function selectUnreadIncomingMessages(
   snapshot: MessageSnapshot,
-  normalizedEmail: string,
+  email: string,
   actorSlug?: string
 ): UnreadMessageContext {
-  const defaultActor = findDefaultActorByEmail(snapshot.actors, normalizedEmail);
+  const defaultActor = findDefaultActorByEmail(snapshot.actors, email);
   if (!defaultActor) {
     throw userError('No default agent found. Run `masumi-agent-messenger account sync` first.', {
       code: 'INBOX_BOOTSTRAP_REQUIRED',
@@ -342,7 +389,7 @@ export function selectUnreadIncomingMessages(
     requestedSlug
       ? snapshot.actors.find(
           actor =>
-            actor.inboxId === defaultActor.inboxId && actor.slug === requestedSlug
+            actor.accountId === defaultActor.accountId && actor.slug === requestedSlug
         ) ?? null
       : defaultActor;
   if (!recipientActor) {
@@ -352,35 +399,43 @@ export function selectUnreadIncomingMessages(
   }
 
   const selectedActorIds = new Set([recipientActor.id]);
+  const participantStates = mergeRowsById<VisibleThreadParticipantRow>(
+    snapshot.participants,
+    snapshot.readStates
+  );
   const recipientThreadIds = new Set(
-    snapshot.participants
+    participantStates
       .filter(participant => {
         return participant.agentDbId === recipientActor.id && participant.active;
       })
       .map(participant => participant.threadId)
   );
   const archivedThreadIds = new Set(
-    snapshot.readStates
-      .filter(readState => readState.agentDbId === recipientActor.id && readState.archived)
-      .map(readState => readState.threadId)
+    participantStates
+      .filter(participant => participant.agentDbId === recipientActor.id && participant.archived)
+      .map(participant => participant.threadId)
   );
   const lastReadByThreadId = new Map<bigint, bigint>();
-  for (const readState of snapshot.readStates) {
-    if (readState.agentDbId !== recipientActor.id || readState.archived) {
+  for (const participant of participantStates) {
+    if (
+      participant.agentDbId !== recipientActor.id ||
+      participant.active === false ||
+      participant.archived
+    ) {
       continue;
     }
-    lastReadByThreadId.set(readState.threadId, readState.lastReadThreadSeq ?? 0n);
+    lastReadByThreadId.set(participant.threadId, participant.lastReadMessageId ?? 0n);
   }
 
   const unreadMessages = snapshot.messages
     .filter(message => recipientThreadIds.has(message.threadId))
     .filter(message => !archivedThreadIds.has(message.threadId))
     .filter(message => message.senderAgentDbId !== recipientActor.id)
-    .filter(message => message.threadSeq > (lastReadByThreadId.get(message.threadId) ?? 0n))
+    .filter(message => message.id > (lastReadByThreadId.get(message.threadId) ?? 0n))
     .sort((left, right) => {
       if (left.createdAt.microsSinceUnixEpoch < right.createdAt.microsSinceUnixEpoch) return 1;
       if (left.createdAt.microsSinceUnixEpoch > right.createdAt.microsSinceUnixEpoch) return -1;
-      return Number(right.threadSeq - left.threadSeq);
+      return Number(right.id - left.id);
     });
 
   return {
@@ -392,16 +447,16 @@ export function selectUnreadIncomingMessages(
 
 function buildDirectCounterpartyByThreadId(params: {
   participants: VisibleThreadParticipantRow[];
-  actorsById: Map<bigint, VisibleAgentRow>;
-  threadsById: Map<bigint, VisibleThreadRow>;
+  actorsById: Map<bigint, Agent>;
+  threadsById: Map<bigint, Thread>;
   ownActorIds: Set<bigint>;
-}): Map<bigint, VisibleAgentRow> {
+}): Map<bigint, Agent> {
   const participantsByThreadId = buildParticipantsByThreadId(params.participants);
 
-  const counterpartByThreadId = new Map<bigint, VisibleAgentRow>();
+  const counterpartByThreadId = new Map<bigint, Agent>();
   for (const [threadId] of participantsByThreadId) {
     const thread = params.threadsById.get(threadId);
-    if (!thread || thread.kind !== 'direct') continue;
+    if (!thread || thread.kind.tag !== 'Direct') continue;
 
     const counterpart = resolveDirectCounterparty({
       thread,
@@ -421,14 +476,15 @@ function buildDirectCounterpartyByThreadId(params: {
 export type MessageTrustStatus = 'self' | 'trusted' | 'unpinned-first-seen' | 'untrusted-rotation';
 
 export async function decryptVisibleMessage(params: {
-  message: VisibleMessageRow;
-  defaultActor: VisibleAgentRow;
-  actorsById: Map<bigint, VisibleAgentRow>;
+  message: Message;
+  defaultActor: Agent;
+  actorsById: Map<bigint, Agent>;
   publicKeysByActorId: Map<bigint, AgentPublicKeyLookupRow[]>;
   ownActorIds?: Set<bigint>;
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
   recipientKeyPair: AgentKeyPair | null;
   readUnsupported?: boolean;
+  allowFirstContactTrust?: boolean;
 }): Promise<{
   text: string | null;
   decryptStatus: 'ok' | 'unsupported' | 'failed';
@@ -463,44 +519,36 @@ export async function decryptVisibleMessage(params: {
   let trustStatus: MessageTrustStatus = 'trusted';
   let trustNotice: string | null = null;
   let trustWarning: string | null = null;
+  let rotationToConfirm: PeerKeyTuple | null = null;
   if (!isSelfSender) {
-    const observedTuple = {
-      encryptionPublicKey: senderActor.currentEncryptionPublicKey,
-      encryptionKeyVersion: senderActor.currentEncryptionKeyVersion,
-      signingPublicKey: senderActor.currentSigningPublicKey,
-      signingKeyVersion: senderActor.currentSigningKeyVersion,
-    };
-    // senderSeq is deprecated (always 0n on new messages); threadSeq alone
-    // identifies the first message in a thread for first-contact auto-pin.
-    const allowFirstContactTrust = params.message.threadSeq === 1n;
-    const comparison = allowFirstContactTrust
-      ? await autoPinPeerIfUnknown(senderActor.publicIdentity, observedTuple)
-      : await comparePinnedPeer(senderActor.publicIdentity, observedTuple);
-    if (comparison.status === 'unpinned') {
-      trustStatus = 'unpinned-first-seen';
-      if (!allowFirstContactTrust) {
-        trustWarning = `${senderActor.slug} keys are not trusted for this existing contact. Verify out-of-band, then run \`masumi-agent-messenger agent trust pin ${senderActor.slug}\`.`;
-      }
-    } else if (comparison.status === 'rotated') {
-      trustNotice = `Key rotation: ${senderActor.slug} refreshed keys.`;
-      const messageSigningKey = findVersionedKey(
-        senderActor,
-        params.publicKeysByActorId.get(senderActor.id) ?? [],
-        'signing',
-        params.message.signingKeyVersion
-      );
-      if (!messageSigningKey) {
-        trustStatus = 'untrusted-rotation';
-        trustWarning = `${senderActor.slug} has rotated keys, but the signing key for version ${params.message.signingKeyVersion} could not be found.`;
-      } else {
-        const messageSigningTrusted = await isInboundSignatureTrusted(
-          senderActor.publicIdentity,
-          params.message.signingKeyVersion,
-          messageSigningKey
+    const senderPublicKeys = params.publicKeysByActorId.get(senderActor.id) ?? [];
+    const observedTuple = tupleFromAgentPublicKeyRows(senderActor, senderPublicKeys);
+    if (!observedTuple) {
+      trustStatus = 'untrusted-rotation';
+      trustWarning = `${senderActor.slug} keys could not be resolved for trust verification.`;
+    } else {
+      const allowFirstContactTrust = params.allowFirstContactTrust === true;
+      const comparison = allowFirstContactTrust
+        ? await autoPinPeerIfUnknown(senderActor.publicIdentity, observedTuple)
+        : await comparePinnedPeer(senderActor.publicIdentity, observedTuple);
+      if (comparison.status === 'unpinned') {
+        trustStatus = 'unpinned-first-seen';
+        if (!allowFirstContactTrust) {
+          trustWarning = `${senderActor.slug} keys are not trusted for this existing contact. Verify out-of-band, then run \`masumi-agent-messenger agent trust pin ${senderActor.slug}\`.`;
+        }
+      } else if (comparison.status === 'rotated') {
+        trustNotice = `Key rotation: ${senderActor.slug} refreshed keys.`;
+        const messageSigningKey = findVersionedKey(
+          senderActor,
+          senderPublicKeys,
+          'signing',
+          params.message.signingKeyVersion
         );
-        if (!messageSigningTrusted) {
+        if (!messageSigningKey) {
           trustStatus = 'untrusted-rotation';
-          trustWarning = `${senderActor.slug} has rotated keys. Message signature is not trusted.`;
+          trustWarning = `${senderActor.slug} has rotated keys, but the signing key for version ${params.message.signingKeyVersion} could not be found.`;
+        } else {
+          rotationToConfirm = observedTuple;
         }
       }
     }
@@ -597,14 +645,13 @@ export async function decryptVisibleMessage(params: {
         threadId: params.message.threadId,
         senderActorId: senderActor.id,
         senderPublicIdentity: senderActor.publicIdentity,
-        senderSeq: params.message.senderSeq,
         senderMessageId: params.message.senderMessageId,
         secretVersion: params.message.secretVersion,
         signingKeyVersion: params.message.signingKeyVersion,
-        ciphertext: params.message.ciphertext,
-        iv: params.message.iv,
-        cipherAlgorithm: params.message.cipherAlgorithm,
-        signature: params.message.signature,
+        ciphertext: toHex(params.message.ciphertext),
+        iv: toHex(params.message.iv),
+        cipherAlgorithm: normalizeMessageCipherAlgorithm(params.message.cipherAlgorithm),
+        signature: toHex(params.message.signature),
         replyToMessageId: params.message.replyToMessageId ?? undefined,
       } satisfies InboundEncryptedMessage,
       envelope: {
@@ -618,15 +665,25 @@ export async function decryptVisibleMessage(params: {
         recipientEncryptionKeyVersion: envelope.recipientEncryptionKeyVersion,
         senderEncryptionKeyVersion: envelope.senderEncryptionKeyVersion,
         signingKeyVersion: envelope.signingKeyVersion,
-        wrappedSecretCiphertext: envelope.wrappedSecretCiphertext,
-        wrappedSecretIv: envelope.wrappedSecretIv,
-        wrapAlgorithm: envelope.wrapAlgorithm,
-        signature: envelope.signature,
+        wrappedSecretCiphertext: toHex(envelope.wrappedSecretCiphertext),
+        wrappedSecretIv: toHex(envelope.wrappedSecretIv),
+        wrapAlgorithm: normalizeEnvelopeWrapAlgorithm(envelope.wrapAlgorithm),
+        signature: toHex(envelope.signature),
       } satisfies InboundSecretEnvelope,
       senderEncryptionPublicKey,
       messageSigningPublicKey,
       envelopeSigningPublicKey,
     });
+
+    if (rotationToConfirm) {
+      try {
+        await confirmPeerKeyRotation(senderActor.publicIdentity, rotationToConfirm);
+      } catch {
+        trustWarning =
+          trustWarning ??
+          `${senderActor.slug} rotated keys, but the local trust store could not be updated.`;
+      }
+    }
 
     const parsed = parseDecryptedMessagePlaintext(plaintext);
     const capabilities: PublicMessageCapabilities =
@@ -716,8 +773,8 @@ export async function readNewMessages(params: {
   pageSize?: number;
 }): Promise<NewMessageFeed> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -741,11 +798,11 @@ export async function readNewMessages(params: {
   try {
     const readMode = params.readMode ?? 'subscription';
     let unsubscribe: (() => void) | undefined;
-    let snapshot: ReturnType<typeof readMessageRows>;
+    let snapshot: MessageRows;
     if (readMode === 'latest') {
       params.reporter.verbose?.('Reading latest message state');
       snapshot = await readLatestMessageRows(conn, {
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
         threadId: scope.threadId,
         counterpartySlug: scope.slug,
@@ -758,7 +815,7 @@ export async function readNewMessages(params: {
         subscription.unsubscribe();
       };
       snapshot = await readSubscribedMessageRows(conn, {
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
         threadId: scope.threadId,
         counterpartySlug: scope.slug,
@@ -770,16 +827,16 @@ export async function readNewMessages(params: {
       params.reporter.verbose?.('Collecting unread messages');
       const { defaultActor, ownActorIds, unreadMessages } = selectUnreadIncomingMessages(
         snapshot,
-        normalizedEmail,
+        email,
         params.actorSlug
       );
       const recipientKeyPair = await getStoredActorKeyPair({
         profile,
         secretStore,
         identity: {
-          normalizedEmail,
+          email,
           slug: defaultActor.slug,
-          inboxIdentifier: defaultActor.inboxIdentifier ?? defaultActor.slug,
+          accountIdentifier: defaultActor.slug,
         },
       });
 
@@ -827,12 +884,20 @@ export async function readNewMessages(params: {
             secretEnvelopes: snapshot.secretEnvelopes,
             recipientKeyPair,
             readUnsupported: params.readUnsupported,
+            // First-contact heuristic: only the very first message on a fresh thread can
+            // auto-pin the peer's keys without prior trust. If two messages race to land
+            // before the subscription flushes, the second one falls through to
+            // `unpinned-first-seen` and the user is prompted to confirm — this is the
+            // intentional safe default; do not loosen the equality without re-evaluating
+            // the trust model.
+            allowFirstContactTrust:
+              thread?.messageCount === 1n && thread.lastMessageId === message.id,
           });
 
           return {
             id: message.id.toString(),
             threadId: message.threadId.toString(),
-            threadSeq: message.threadSeq.toString(),
+            messageId: message.id.toString(),
             createdAt: timestampToISOString(message.createdAt),
             threadLabel: thread
               ? summarizeThread(

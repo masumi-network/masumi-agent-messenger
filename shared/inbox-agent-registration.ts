@@ -353,13 +353,18 @@ export function isNonDeregisteredInboxAgentState(
 export function isDeregisteredInboxAgentState(
   state: string | null | undefined
 ): boolean {
-  return state === 'DeregistrationConfirmed';
+  // Accepts both legacy granular names and new short tag names from the Rust enum.
+  return state === 'DeregistrationConfirmed' || state === 'Deregistered';
 }
 
 export function isDeregisteringInboxAgentState(
   state: string | null | undefined
 ): boolean {
-  return state === 'DeregistrationRequested' || state === 'DeregistrationInitiated';
+  return (
+    state === 'DeregistrationRequested' ||
+    state === 'DeregistrationInitiated' ||
+    state === 'PendingDeregistration'
+  );
 }
 
 export function isDeregisteringOrDeregisteredInboxAgentState(

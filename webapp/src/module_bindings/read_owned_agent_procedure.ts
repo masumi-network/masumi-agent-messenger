@@ -11,10 +11,10 @@ import {
 } from "spacetimedb";
 
 import {
-  VisibleAgentRow,
+  Agent,
 } from "./types";
 
 export const params = {
-  agentSlug: __t.option(__t.string()),
+  slug: __t.string(),
 };
-export const returnType = __t.array(VisibleAgentRow)
+export const returnType = __t.option(Agent)

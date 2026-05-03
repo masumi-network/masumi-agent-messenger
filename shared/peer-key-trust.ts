@@ -1,8 +1,8 @@
 export type PeerKeyTuple = {
   encryptionPublicKey: string;
-  encryptionKeyVersion: string;
+  encryptionKeyVersion: number;
   signingPublicKey: string;
-  signingKeyVersion: string;
+  signingKeyVersion: number;
 };
 
 export type PinnedPeer = {
@@ -43,24 +43,24 @@ export function emptyPeerKeyTrustStore(): PeerKeyTrustStore {
 }
 
 export function tupleFromActorLike(actor: {
-  currentEncryptionPublicKey: string;
-  currentEncryptionKeyVersion: string;
-  currentSigningPublicKey: string;
-  currentSigningKeyVersion: string;
+  encryptionPublicKey: string;
+  encryptionKeyVersion: number;
+  signingPublicKey: string;
+  signingKeyVersion: number;
 }): PeerKeyTuple {
   return {
-    encryptionPublicKey: actor.currentEncryptionPublicKey,
-    encryptionKeyVersion: actor.currentEncryptionKeyVersion,
-    signingPublicKey: actor.currentSigningPublicKey,
-    signingKeyVersion: actor.currentSigningKeyVersion,
+    encryptionPublicKey: actor.encryptionPublicKey,
+    encryptionKeyVersion: actor.encryptionKeyVersion,
+    signingPublicKey: actor.signingPublicKey,
+    signingKeyVersion: actor.signingKeyVersion,
   };
 }
 
 export function tupleFromPublishedActor(actor: {
   encryptionPublicKey: string;
-  encryptionKeyVersion: string;
+  encryptionKeyVersion: number;
   signingPublicKey: string;
-  signingKeyVersion: string;
+  signingKeyVersion: number;
 }): PeerKeyTuple {
   return {
     encryptionPublicKey: actor.encryptionPublicKey,
@@ -138,7 +138,7 @@ export function isKeyTupleKnown(
 export function isSigningKeyVersionTrusted(
   store: PeerKeyTrustStore,
   publicIdentity: string,
-  signingKeyVersion: string,
+  signingKeyVersion: number,
   signingPublicKey: string
 ): boolean {
   const pinned = store.peers[publicIdentity];
@@ -186,8 +186,8 @@ export function pinPeerKeys(
 export function fingerprintTuple(tuple: PeerKeyTuple): {
   signing: string;
   encryption: string;
-  signingVersion: string;
-  encryptionVersion: string;
+  signingVersion: number;
+  encryptionVersion: number;
 } {
   return {
     signing: groupFingerprint(tuple.signingPublicKey),
@@ -260,33 +260,80 @@ export function listPinnedPeers(store: PeerKeyTrustStore): PinnedPeer[] {
   );
 }
 
-function isPeerKeyTuple(value: unknown): value is PeerKeyTuple {
-  if (typeof value !== 'object' || value === null) return false;
-  const record = value as Record<string, unknown>;
-  return (
-    typeof record.encryptionPublicKey === 'string' &&
-    typeof record.encryptionKeyVersion === 'string' &&
-    typeof record.signingPublicKey === 'string' &&
-    typeof record.signingKeyVersion === 'string'
-  );
+function readPersistedKeyVersion(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value >= 1 ? value : null;
+  }
+  if (typeof value === 'string') {
+    const match = value.trim().match(/(\d+)$/u);
+    if (!match) {
+      return null;
+    }
+    const parsed = Number.parseInt(match[1], 10);
+    return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+  }
+  return null;
 }
 
-function isPinnedPeer(value: unknown): value is PinnedPeer {
-  if (typeof value !== 'object' || value === null) return false;
+function parsePeerKeyTuple(value: unknown): PeerKeyTuple | null {
+  if (typeof value !== 'object' || value === null) return null;
   const record = value as Record<string, unknown>;
+  const encryptionKeyVersion = readPersistedKeyVersion(record.encryptionKeyVersion);
+  const signingKeyVersion = readPersistedKeyVersion(record.signingKeyVersion);
   if (
-    typeof record.publicIdentity !== 'string' ||
-    typeof record.pinnedAt !== 'string' ||
-    !isPeerKeyTuple(record.current) ||
-    !Array.isArray(record.history)
+    typeof record.encryptionPublicKey !== 'string' ||
+    !encryptionKeyVersion ||
+    typeof record.signingPublicKey !== 'string' ||
+    !signingKeyVersion
   ) {
-    return false;
+    return null;
   }
-  return record.history.every(entry => {
-    if (typeof entry !== 'object' || entry === null) return false;
-    const entryRecord = entry as Record<string, unknown>;
-    return isPeerKeyTuple(entry) && typeof entryRecord.confirmedAt === 'string';
-  });
+  return {
+    encryptionPublicKey: record.encryptionPublicKey,
+    encryptionKeyVersion,
+    signingPublicKey: record.signingPublicKey,
+    signingKeyVersion,
+  };
+}
+
+function parsePinnedPeer(key: string, value: unknown): PinnedPeer | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const publicIdentity =
+    typeof record.publicIdentity === 'string' ? record.publicIdentity : key;
+  const current = parsePeerKeyTuple(record.current);
+  if (
+    publicIdentity !== key ||
+    typeof record.pinnedAt !== 'string' ||
+    !current
+  ) {
+    return null;
+  }
+  const history: Array<PeerKeyTuple & { confirmedAt: string }> = [];
+  if (Array.isArray(record.history)) {
+    for (const entry of record.history) {
+      if (typeof entry !== 'object' || entry === null) return null;
+      const entryRecord = entry as Record<string, unknown>;
+      const tuple = parsePeerKeyTuple(entry);
+      if (!tuple || typeof entryRecord.confirmedAt !== 'string') {
+        return null;
+      }
+      history.push({ ...tuple, confirmedAt: entryRecord.confirmedAt });
+    }
+  } else if (record.history !== undefined) {
+    return null;
+  }
+
+  if (history.length === 0) {
+    history.push({ ...current, confirmedAt: record.pinnedAt });
+  }
+
+  return {
+    publicIdentity,
+    pinnedAt: record.pinnedAt,
+    current,
+    history,
+  };
 }
 
 function invalidPeerKeyTrustStore(strict: boolean, message: string): PeerKeyTrustStore {
@@ -314,8 +361,9 @@ function parsePeerKeyTrustStoreInternal(raw: unknown, strict: boolean): PeerKeyT
 
   const peers: Record<string, PinnedPeer> = {};
   for (const [key, value] of Object.entries(record.peers as Record<string, unknown>)) {
-    if (isPinnedPeer(value) && value.publicIdentity === key) {
-      peers[key] = value;
+    const peer = parsePinnedPeer(key, value);
+    if (peer) {
+      peers[key] = peer;
     } else if (strict) {
       throw new PeerKeyTrustStoreParseError(`Peer key trust entry for ${key} is malformed`);
     }

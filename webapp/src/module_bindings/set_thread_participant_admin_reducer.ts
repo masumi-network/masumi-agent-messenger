@@ -13,6 +13,6 @@ import {
 export default {
   agentDbId: __t.u64(),
   threadId: __t.u64(),
-  participantAgentDbId: __t.u64(),
+  targetAgentDbId: __t.u64(),
   isAdmin: __t.bool(),
 };

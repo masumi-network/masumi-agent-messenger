@@ -109,7 +109,7 @@ export function MessagePagerScreen({
                 {message.sender.displayName ?? message.sender.slug} {'->'} {message.threadLabel}
               </Text>
       <Text color="gray">
-        {message.createdAt} | thread #{message.threadId} seq {message.threadSeq}
+        {message.createdAt} | thread #{message.threadId} message #{message.messageId}
       </Text>
               <Text>{renderMessageText(message)}</Text>
             </Box>

@@ -11,14 +11,15 @@ describe('resolvePublishedActorLookup', () => {
 
       return [
         {
+          agentDbId: 1n,
           slug: 'lisa-kuepers',
           publicIdentity: 'lisa-kuepers',
           isDefault: false,
           displayName: 'Lisa Kuepers',
           agentIdentifier: null,
-          encryptionKeyVersion: 'enc-v1',
+          encryptionKeyVersion: 1,
           encryptionPublicKey: 'enc-lisa',
-          signingKeyVersion: 'sig-v1',
+          signingKeyVersion: 1,
           signingPublicKey: 'sig-lisa',
         },
       ];
@@ -42,25 +43,27 @@ describe('resolvePublishedActorLookup', () => {
     const lookupBySlug = vi.fn(async () => []);
     const lookupByEmail = vi.fn(async () => [
       {
+        agentDbId: 1n,
         slug: 'owner-build',
         publicIdentity: 'owner-build',
         isDefault: false,
         displayName: 'Owner Build',
         agentIdentifier: null,
-        encryptionKeyVersion: 'enc-v1',
+        encryptionKeyVersion: 1,
         encryptionPublicKey: 'enc-build',
-        signingKeyVersion: 'sig-v1',
+        signingKeyVersion: 1,
         signingPublicKey: 'sig-build',
       },
       {
+        agentDbId: 2n,
         slug: 'owner',
         publicIdentity: 'owner',
         isDefault: true,
         displayName: 'Owner',
         agentIdentifier: 'agent-1',
-        encryptionKeyVersion: 'enc-v1',
+        encryptionKeyVersion: 1,
         encryptionPublicKey: 'enc',
-        signingKeyVersion: 'sig-v1',
+        signingKeyVersion: 1,
         signingPublicKey: 'sig',
       },
     ]);

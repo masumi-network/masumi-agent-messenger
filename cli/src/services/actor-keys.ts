@@ -16,11 +16,11 @@ export type StoredActorKeyRotationPlan = {
 export type PublishedActorKeyBundle = {
   encryption: {
     publicKey: string;
-    keyVersion: string;
+    keyVersion: number;
   };
   signing: {
     publicKey: string;
-    keyVersion: string;
+    keyVersion: number;
   };
 };
 
@@ -41,7 +41,7 @@ function buildDefaultActorIdentity(profile: ResolvedProfile): ActorIdentity | nu
   }
 
   return {
-    normalizedEmail: snapshot.inbox.normalizedEmail,
+    email: snapshot.inbox.email,
     slug: snapshot.actor.slug,
   };
 }
@@ -54,7 +54,7 @@ function isDefaultProfileActor(profile: ResolvedProfile, identity: ActorIdentity
 function buildEmptyVault(identity: ActorIdentity): NamespaceKeyVault {
   return {
     version: 1,
-    normalizedEmail: identity.normalizedEmail,
+    email: identity.email,
     actors: [],
   };
 }
@@ -127,7 +127,7 @@ function upsertVaultActor(params: {
 
   return {
     ...params.vault,
-    normalizedEmail: params.identity.normalizedEmail,
+    email: params.identity.email,
     actors: nextActors,
   };
 }
@@ -144,7 +144,7 @@ function replaceVaultActor(params: {
   if (!hasAnyPrivateKeyMaterial) {
     return {
       ...params.vault,
-      normalizedEmail: params.identity.normalizedEmail,
+      email: params.identity.email,
       actors:
         actorIndex >= 0
           ? params.vault.actors.filter((_, index) => index !== actorIndex)
@@ -160,7 +160,7 @@ function replaceVaultActor(params: {
 
   return {
     ...params.vault,
-    normalizedEmail: params.identity.normalizedEmail,
+    email: params.identity.email,
     actors:
       actorIndex >= 0
         ? params.vault.actors.map((actor, index) => (index === actorIndex ? nextActor : actor))
@@ -308,8 +308,8 @@ export async function getOrCreateStoredActorKeyPair(params: {
   }
 
   const created = await generateAgentKeyPair({
-    encryptionKeyVersion: 'enc-v1',
-    signingKeyVersion: 'sig-v1',
+    encryptionKeyVersion: 1,
+    signingKeyVersion: 1,
   });
   await setStoredActorKeyPair({
     ...params,
@@ -322,12 +322,11 @@ export async function previewStoredActorKeyRotation(params: {
   profile: ResolvedProfile;
   secretStore: SecretStore;
   identity: ActorIdentity;
-  currentEncryptionKeyVersion: string;
-  currentSigningKeyVersion: string;
+  currentKeyBundleVersion: number;
 }): Promise<StoredActorKeyRotationPlan> {
   const rotated = await generateAgentKeyPair({
-    encryptionKeyVersion: nextKeyVersion(params.currentEncryptionKeyVersion, 'enc-v'),
-    signingKeyVersion: nextKeyVersion(params.currentSigningKeyVersion, 'sig-v'),
+    encryptionKeyVersion: nextKeyVersion(params.currentKeyBundleVersion),
+    signingKeyVersion: nextKeyVersion(params.currentKeyBundleVersion),
   });
   const existing = await getStoredActorKeyPair(params);
   const nextVault = await buildNextVault({
@@ -358,8 +357,7 @@ export async function rotateStoredActorKeyPair(params: {
   profile: ResolvedProfile;
   secretStore: SecretStore;
   identity: ActorIdentity;
-  currentEncryptionKeyVersion: string;
-  currentSigningKeyVersion: string;
+  currentKeyBundleVersion: number;
 }): Promise<AgentKeyPair> {
   const plan = await previewStoredActorKeyRotation(params);
   await commitStoredActorKeyRotation({

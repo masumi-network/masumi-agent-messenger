@@ -10,11 +10,17 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+import {
+  DeviceEncryptionAlgorithm,
+} from "./types";
+
 export default {
   deviceId: __t.string(),
   label: __t.option(__t.string()),
   platform: __t.option(__t.string()),
   deviceEncryptionPublicKey: __t.string(),
-  deviceEncryptionKeyVersion: __t.string(),
-  deviceEncryptionAlgorithm: __t.option(__t.string()),
+  deviceEncryptionKeyVersion: __t.u32(),
+  get deviceEncryptionAlgorithm() {
+    return DeviceEncryptionAlgorithm;
+  },
 };

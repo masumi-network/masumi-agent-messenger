@@ -23,25 +23,25 @@ function privateKey(label: string): string {
 function createSnapshot(): DeviceKeyShareSnapshot {
   return {
     version: 1,
-    normalizedEmail: 'agent@example.com',
+    email: 'agent@example.com',
     createdAt: '2026-04-14T12:00:00.000Z',
     actors: [
       {
         identity: {
-          normalizedEmail: 'agent@example.com',
+          email: 'agent@example.com',
           slug: 'agent',
         },
         current: {
           encryption: {
             publicKey: publicKey('enc-current'),
             privateKey: privateKey('enc-current'),
-            keyVersion: 'enc-v2',
+            keyVersion: 2,
             algorithm: 'ecdh-p256-v1',
           },
           signing: {
             publicKey: publicKey('sig-current'),
             privateKey: privateKey('sig-current'),
-            keyVersion: 'sig-v2',
+            keyVersion: 2,
             algorithm: 'ecdsa-p256-sha256-v1',
           },
         },
@@ -50,13 +50,13 @@ function createSnapshot(): DeviceKeyShareSnapshot {
             encryption: {
               publicKey: publicKey('enc-archived'),
               privateKey: privateKey('enc-archived'),
-              keyVersion: 'enc-v1',
+              keyVersion: 1,
               algorithm: 'ecdh-p256-v1',
             },
             signing: {
               publicKey: publicKey('sig-archived'),
               privateKey: privateKey('sig-archived'),
-              keyVersion: 'sig-v1',
+              keyVersion: 1,
               algorithm: 'ecdsa-p256-sha256-v1',
             },
           },
@@ -64,21 +64,20 @@ function createSnapshot(): DeviceKeyShareSnapshot {
       },
       {
         identity: {
-          normalizedEmail: 'agent@example.com',
+          email: 'agent@example.com',
           slug: 'support-bot',
-          inboxIdentifier: 'support-bot',
         },
         current: {
           encryption: {
             publicKey: publicKey('support-enc'),
             privateKey: privateKey('support-enc'),
-            keyVersion: 'enc-v1',
+            keyVersion: 1,
             algorithm: 'ecdh-p256-v1',
           },
           signing: {
             publicKey: publicKey('support-sig'),
             privateKey: privateKey('support-sig'),
-            keyVersion: 'sig-v1',
+            keyVersion: 1,
             algorithm: 'ecdsa-p256-sha256-v1',
           },
         },

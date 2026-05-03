@@ -10,16 +10,24 @@ import {
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { syncBrowserInboxAgentRegistration } from '@/lib/inbox-agent-registration';
 import { useLiveTable } from '@/lib/spacetime-live-table';
+import {
+  readAllOwnedAgents,
+  readPendingChannelJoinRequests,
+  readPendingContactRequests,
+  readPendingThreadInvites,
+} from '@/lib/spacetime-procedure-reads';
+import { useProcedureSnapshot } from '@/lib/spacetime-procedure-snapshot';
 import { reducers, tables } from '@/module_bindings';
 import type { MasumiRegistrationResult } from '../../../../shared/inbox-agent-registration';
 import type {
   Agent,
-  Inbox as InboxRow,
-  VisibleChannelJoinRequestRow,
-  VisibleChannelMembershipRow,
-  VisibleChannelRow,
-  VisibleContactRequestRow,
-  VisibleThreadInviteRow,
+  Account,
+  ChannelJoinRequest,
+  ChannelMember,
+  Channel,
+  ContactRequest,
+  ThreadInvite,
+  AccountChangeSignal,
 } from '@/module_bindings/types';
 import { buildMasumiRegistrationSyncKey } from './actor-settings';
 
@@ -45,10 +53,10 @@ export type WorkspaceShellReadyState = {
   conn: ReturnType<typeof useSpacetimeDB>;
   connected: boolean;
   connectionError: string | null;
-  inboxes: InboxRow[];
+  inboxes: Account[];
   actors: Agent[];
-  contactRequests: VisibleContactRequestRow[];
-  threadInvites: VisibleThreadInviteRow[];
+  contactRequests: ContactRequest[];
+  threadInvites: ThreadInvite[];
   inboxesReady: boolean;
   actorsReady: boolean;
   contactRequestsReady: boolean;
@@ -57,8 +65,8 @@ export type WorkspaceShellReadyState = {
   tablesReady: boolean;
   tablesError: string | null;
   channelTablesError: string | null;
-  normalizedEmail: string;
-  ownedInbox: InboxRow | null;
+  email: string;
+  ownedInbox: Account | null;
   existingDefaultActor: Agent | null;
   ownedInboxAgents: OwnedInboxAgentEntry<Agent>[];
   channelNavEntries: ChannelNavEntry[];
@@ -66,10 +74,10 @@ export type WorkspaceShellReadyState = {
   selectedActor: Agent | null;
   shellInboxSlug: string | null;
   approvalView: {
-    incoming: VisibleContactRequestRow[];
-    outgoing: VisibleContactRequestRow[];
-    incomingThreadInvites: VisibleThreadInviteRow[];
-    outgoingThreadInvites: VisibleThreadInviteRow[];
+    incoming: ContactRequest[];
+    outgoing: ContactRequest[];
+    incomingThreadInvites: ThreadInvite[];
+    outgoingThreadInvites: ThreadInvite[];
     pendingIncomingCount: number;
     pendingOutgoingCount: number;
   };
@@ -90,8 +98,8 @@ export function useWorkspaceShell(params?: {
   const auth = useAuthSession();
   const conn = useSpacetimeDB();
   const session = auth.status === 'authenticated' ? auth.session : null;
-  const upsertMasumiInboxAgentRegistrationReducer = useReducer(
-    reducers.upsertMasumiInboxAgentRegistration
+  const upsertMasumiRegistrationReducer = useReducer(
+    reducers.upsertMasumiRegistration
   );
   const [refreshedRegistrationByActorId, setRefreshedRegistrationByActorId] =
     useState<Record<string, RefreshedWorkspaceAgentRegistration>>({});
@@ -102,44 +110,50 @@ export function useWorkspaceShell(params?: {
   const [ownedAgentRegistrationRefreshErrors, setOwnedAgentRegistrationRefreshErrors] =
     useState<Record<string, string>>({});
 
-  const [inboxes, inboxesReady, inboxesError] = useLiveTable<InboxRow>(
-    tables.visibleInboxes,
-    'visibleInboxes'
+  const [inboxes, inboxesReady, inboxesError] = useLiveTable<Account>(
+    tables.visible_accounts,
+    'visible_accounts'
   );
-  const [actors, actorsReady, actorsError] = useLiveTable<Agent>(
-    tables.visibleAgents,
-    'visibleAgents'
+  const [accountSignals] = useLiveTable<AccountChangeSignal>(
+    tables.visible_account_change_signal,
+    'visible_account_change_signal'
   );
+  const accountSignal = accountSignals[0] ?? null;
+  const [actors, actorsReady, actorsError] =
+    useProcedureSnapshot<Agent>(
+      readAllOwnedAgents,
+      accountSignal?.ownedAgentsVersion.toString() ?? null
+    );
   const [contactRequests, contactRequestsReady, contactRequestsError] =
-    useLiveTable<VisibleContactRequestRow>(
-      tables.visibleContactRequests,
-      'visibleContactRequests'
+    useProcedureSnapshot<ContactRequest>(
+      readPendingContactRequests,
+      accountSignal?.contactRequestsVersion.toString() ?? null
     );
   const [threadInvites, threadInvitesReady, threadInvitesError] =
-    useLiveTable<VisibleThreadInviteRow>(
-      tables.visibleThreadInvites,
-      'visibleThreadInvites'
+    useProcedureSnapshot<ThreadInvite>(
+      readPendingThreadInvites,
+      accountSignal?.threadInvitesVersion.toString() ?? null
     );
-  const [visibleChannels, visibleChannelsReady, visibleChannelsError] =
-    useLiveTable<VisibleChannelRow>(
-      tables.visibleChannels,
-      'visibleChannels'
+  const [visible_channels, visible_channelsReady, visible_channelsError] =
+    useLiveTable<Channel>(
+      tables.visible_channels,
+      'visible_channels'
     );
   const [
-    visibleChannelMemberships,
-    visibleChannelMembershipsReady,
-    visibleChannelMembershipsError,
-  ] = useLiveTable<VisibleChannelMembershipRow>(
-    tables.visibleChannelMemberships,
-    'visibleChannelMemberships'
+    visible_channel_memberships,
+    visible_channel_membershipsReady,
+    visible_channel_membershipsError,
+  ] = useLiveTable<ChannelMember>(
+    tables.visible_channel_memberships,
+    'visible_channel_memberships'
   );
   const [
-    visibleChannelJoinRequests,
-    visibleChannelJoinRequestsReady,
-    visibleChannelJoinRequestsError,
-  ] = useLiveTable<VisibleChannelJoinRequestRow>(
-    tables.visibleChannelJoinRequests,
-    'visibleChannelJoinRequests'
+    pendingChannelJoinRequests,
+    pendingChannelJoinRequestsReady,
+    pendingChannelJoinRequestsError,
+  ] = useProcedureSnapshot<ChannelJoinRequest>(
+    readPendingChannelJoinRequests,
+    accountSignal?.channelJoinRequestsVersion.toString() ?? null
   );
   const rawSnapshot = useMemo(
     () =>
@@ -195,9 +209,9 @@ export function useWorkspaceShell(params?: {
   const channelNavEntries = useMemo(
     () =>
       buildChannelNavEntries({
-        channels: visibleChannels,
-        memberships: visibleChannelMemberships,
-        joinRequests: visibleChannelJoinRequests,
+        channels: visible_channels,
+        memberships: visible_channel_memberships,
+        joinRequests: pendingChannelJoinRequests,
         ownedActorIds: new Set(
           snapshot.ownedInboxAgents
             .filter(entry => !entry.deregistered)
@@ -206,19 +220,19 @@ export function useWorkspaceShell(params?: {
       }),
     [
       snapshot.ownedInboxAgents,
-      visibleChannelJoinRequests,
-      visibleChannelMemberships,
-      visibleChannels,
+      pendingChannelJoinRequests,
+      visible_channel_memberships,
+      visible_channels,
     ]
   );
   const channelTablesReady =
-    visibleChannelsReady &&
-    visibleChannelMembershipsReady &&
-    visibleChannelJoinRequestsReady;
+    visible_channelsReady &&
+    visible_channel_membershipsReady &&
+    pendingChannelJoinRequestsReady;
   const channelTablesError =
-    visibleChannelsError ||
-    visibleChannelMembershipsError ||
-    visibleChannelJoinRequestsError;
+    visible_channelsError ||
+    visible_channel_membershipsError ||
+    pendingChannelJoinRequestsError;
 
   useEffect(() => {
     if (
@@ -269,7 +283,7 @@ export function useWorkspaceShell(params?: {
             actor,
             persistRegistration: async payload => {
               await Promise.resolve(
-                upsertMasumiInboxAgentRegistrationReducer(payload)
+                upsertMasumiRegistrationReducer(payload)
               );
             },
           });
@@ -329,7 +343,7 @@ export function useWorkspaceShell(params?: {
     ownedAgentRegistrationRefreshKey,
     ownedAgentRegistrationRefreshTargets,
     session,
-    upsertMasumiInboxAgentRegistrationReducer,
+    upsertMasumiRegistrationReducer,
   ]);
 
   if (auth.status === 'loading') {
@@ -367,7 +381,7 @@ export function useWorkspaceShell(params?: {
     tablesReady: inboxesReady && actorsReady && contactRequestsReady && threadInvitesReady,
     tablesError: inboxesError || actorsError || contactRequestsError || threadInvitesError,
     channelTablesError,
-    normalizedEmail: snapshot.normalizedEmail,
+    email: snapshot.email,
     ownedInbox: snapshot.ownedInbox,
     existingDefaultActor: snapshot.existingDefaultActor,
     ownedInboxAgents: snapshot.ownedInboxAgents,

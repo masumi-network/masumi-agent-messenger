@@ -12,14 +12,13 @@ import {
 } from '../../../shared/inbox-agent-registration';
 import { isTimestampInFuture, timestampToISOString } from '../../../shared/spacetime-time';
 import type {
-  VisibleAgentRow,
-  VisibleThreadParticipantRow,
-  VisibleThreadReadStateRow,
-  VisibleChannelJoinRequestRow,
-  VisibleChannelMembershipRow,
-  VisibleChannelRow,
+  Agent,
+  ThreadParticipantPreview,
+  ChannelJoinRequest,
+  ChannelMember,
+  Channel,
 } from '../../../webapp/src/module_bindings/types';
-import type { ShellRows } from './spacetimedb';
+import type { ShellRows, VisibleThreadReadStateRow } from './spacetimedb';
 
 export type OwnedInboxSummary = {
   slug: string;
@@ -43,7 +42,7 @@ export type ShellThreadSummary = {
   participantCount: number;
   participants: string[];
   lastMessageAt: string;
-  lastMessageSeq: string;
+  lastMessageId: string;
 };
 
 export type ShellRequestSummary = {
@@ -101,9 +100,8 @@ export type ShellChannelSummary = {
   title: string | null;
   description: string | null;
   accessMode: string;
-  publicJoinPermission: string;
   discoverable: boolean;
-  lastMessageSeq: string;
+  messageCount: string;
   lastMessageAt: string;
   permission: string;
   canSend: boolean;
@@ -201,7 +199,39 @@ function compareBigIntDesc(left: bigint, right: bigint): number {
   return 0;
 }
 
-function sortOwnedActors(left: VisibleAgentRow, right: VisibleAgentRow): number {
+function enumTag(value: { tag: string } | string | null | undefined): string {
+  if (typeof value === 'string') return value;
+  return value?.tag ?? '';
+}
+
+function contactRequestStatusToCli(status: { tag: string } | string | null | undefined): ShellRequestSummary['status'] {
+  const tag = enumTag(status);
+  if (tag === 'Approved' || tag === 'approved') return 'approved';
+  if (tag === 'Rejected' || tag === 'rejected') return 'rejected';
+  return 'pending';
+}
+
+function allowlistKindToCli(kind: { tag: string } | string | null | undefined): ShellAllowlistSummary['kind'] {
+  const tag = enumTag(kind);
+  return tag === 'Agent' || tag === 'agent' ? 'agent' : 'email';
+}
+
+function channelPermissionToCli(permission: { tag: string } | string | null | undefined): string {
+  const tag = enumTag(permission);
+  if (tag === 'ReadWrite') return 'read_write';
+  if (tag === 'Admin') return 'admin';
+  if (tag === 'Read') return 'read';
+  return tag || 'none';
+}
+
+function channelAccessModeToCli(accessMode: { tag: string } | string | null | undefined): string {
+  const tag = enumTag(accessMode);
+  return tag === 'ApprovalRequired' || tag === 'approval_required'
+    ? 'approval_required'
+    : 'public';
+}
+
+function sortOwnedActors(left: Agent, right: Agent): number {
   if (left.isDefault !== right.isDefault) {
     return left.isDefault ? -1 : 1;
   }
@@ -220,7 +250,7 @@ function buildReadStateByThreadId(
   );
 }
 
-function toOwnedInboxSummary(actor: VisibleAgentRow): OwnedInboxSummary {
+function toOwnedInboxSummary(actor: Agent): OwnedInboxSummary {
   const metadata = readActorRegistrationMetadata(actor);
   const registration = registrationResultFromMetadata(metadata);
   return {
@@ -236,23 +266,40 @@ function toOwnedInboxSummary(actor: VisibleAgentRow): OwnedInboxSummary {
   };
 }
 
-function isDeregisteredOwnedActor(actor: VisibleAgentRow): boolean {
+function isDeregisteredOwnedActor(actor: Agent): boolean {
   return isDeregisteringOrDeregisteredMasumiRegistrationMetadata(
     readActorRegistrationMetadata(actor)
   );
 }
 
 function readActorRegistrationMetadata(
-  actor: VisibleAgentRow
+  actor: Agent
 ): MasumiActorRegistrationMetadata | null {
+  const masumiRegistrationState = enumTag(actor.masumiRegistrationState);
+  const granularRegistrationState = (() => {
+    if (masumiRegistrationState && isMasumiInboxAgentState(masumiRegistrationState)) {
+      return masumiRegistrationState;
+    }
+    switch (masumiRegistrationState) {
+      case 'PendingRegistration':
+        return 'RegistrationRequested';
+      case 'Registered':
+        return 'RegistrationConfirmed';
+      case 'PendingDeregistration':
+        return 'DeregistrationRequested';
+      case 'Deregistered':
+        return 'DeregistrationConfirmed';
+      case 'Failed':
+        return 'RegistrationFailed';
+      default:
+        return undefined;
+    }
+  })();
   const metadata: MasumiActorRegistrationMetadata = {
     masumiRegistrationNetwork: actor.masumiRegistrationNetwork ?? undefined,
     masumiInboxAgentId: actor.masumiInboxAgentId ?? undefined,
     masumiAgentIdentifier: actor.masumiAgentIdentifier ?? undefined,
-    masumiRegistrationState:
-      actor.masumiRegistrationState && isMasumiInboxAgentState(actor.masumiRegistrationState)
-        ? actor.masumiRegistrationState
-        : undefined,
+    masumiRegistrationState: granularRegistrationState,
   };
 
   return Object.values(metadata).some(value => value !== undefined) ? metadata : null;
@@ -260,8 +307,8 @@ function readActorRegistrationMetadata(
 
 function listThreadParticipants(params: {
   threadId: bigint;
-  participantsByThreadId: Map<bigint, VisibleThreadParticipantRow[]>;
-  actorsById: Map<bigint, VisibleAgentRow>;
+  participantsByThreadId: Map<bigint, ThreadParticipantPreview[]>;
+  actorsById: Map<bigint, Agent>;
 }): string[] {
   return (params.participantsByThreadId.get(params.threadId) ?? [])
     .map(participant => params.actorsById.get(participant.agentDbId)?.slug ?? null)
@@ -332,12 +379,12 @@ function buildInboxSections(params: {
 }
 
 function buildChannelState(params: {
-  channels: VisibleChannelRow[];
-  memberships: VisibleChannelMembershipRow[];
-  requests: VisibleChannelJoinRequestRow[];
-  activeActor: VisibleAgentRow;
+  channels: Channel[];
+  memberships: ChannelMember[];
+  requests: ChannelJoinRequest[];
+  activeActor: Agent;
 }): RootShellViewModel['channels'] {
-  const membershipByChannelId = new Map<bigint, VisibleChannelMembershipRow>();
+  const membershipByChannelId = new Map<bigint, ChannelMember>();
 
   for (const membership of params.memberships) {
     if (!membership.active || membership.agentDbId !== params.activeActor.id) {
@@ -348,15 +395,14 @@ function buildChannelState(params: {
 
   const adminChannelIds = new Set(
     [...membershipByChannelId.entries()]
-      .filter(([, membership]) => membership.permission === 'admin')
+      .filter(([, membership]) => enumTag(membership.permission) === 'Admin')
       .map(([channelId]) => channelId)
   );
 
   const pendingApprovalsByChannelId = new Map<bigint, number>();
   for (const request of params.requests) {
     if (
-      request.status !== 'pending' ||
-      request.direction !== 'incoming' ||
+      request.status.tag !== 'Pending' ||
       !adminChannelIds.has(request.channelId)
     ) {
       continue;
@@ -372,8 +418,8 @@ function buildChannelState(params: {
     .sort((left, right) => {
       const leftMembership = membershipByChannelId.get(left.id);
       const rightMembership = membershipByChannelId.get(right.id);
-      const leftAdmin = leftMembership?.permission === 'admin';
-      const rightAdmin = rightMembership?.permission === 'admin';
+      const leftAdmin = enumTag(leftMembership?.permission) === 'Admin';
+      const rightAdmin = enumTag(rightMembership?.permission) === 'Admin';
       if (leftAdmin !== rightAdmin) {
         return leftAdmin ? -1 : 1;
       }
@@ -394,14 +440,15 @@ function buildChannelState(params: {
         slug: channel.slug,
         title: channel.title ?? null,
         description: channel.description ?? null,
-        accessMode: channel.accessMode,
-        publicJoinPermission: channel.publicJoinPermission,
+        accessMode: channelAccessModeToCli(channel.accessMode),
         discoverable: channel.discoverable,
-        lastMessageSeq: channel.lastMessageSeq.toString(),
+        messageCount: channel.messageCount.toString(),
         lastMessageAt: timestampToISOString(channel.lastMessageAt),
-        permission: membership?.permission ?? 'none',
-        canSend: membership?.permission === 'admin' || membership?.permission === 'read_write',
-        isAdmin: membership?.permission === 'admin',
+        permission: channelPermissionToCli(membership?.permission),
+        canSend:
+          enumTag(membership?.permission) === 'Admin' ||
+          enumTag(membership?.permission) === 'ReadWrite',
+        isAdmin: enumTag(membership?.permission) === 'Admin',
         actorSlug: params.activeActor.slug,
         pendingApprovals: pendingApprovalsByChannelId.get(channel.id) ?? 0,
       } satisfies ShellChannelSummary;
@@ -410,8 +457,7 @@ function buildChannelState(params: {
   const approvals = params.requests
     .filter(request => {
       return (
-        request.status === 'pending' &&
-        request.direction === 'incoming' &&
+        request.status.tag === 'Pending' &&
         adminChannelIds.has(request.channelId)
       );
     })
@@ -428,12 +474,12 @@ function buildChannelState(params: {
     .map(request => ({
       id: request.id.toString(),
       channelId: request.channelId.toString(),
-      channelSlug: request.channelSlug,
-      channelTitle: request.channelTitle ?? null,
+      channelSlug: params.channels.find(channel => channel.id === request.channelId)?.slug ?? `channel:${request.channelId.toString()}`,
+      channelTitle: params.channels.find(channel => channel.id === request.channelId)?.title ?? null,
       requesterAgentDbId: request.requesterAgentDbId.toString(),
-      requesterSlug: request.requesterSlug,
-      requesterDisplayName: request.requesterDisplayName ?? null,
-      permission: request.permission,
+      requesterSlug: `agent:${request.requesterAgentDbId.toString()}`,
+      requesterDisplayName: null,
+      permission: channelPermissionToCli(request.permission),
       status: 'pending',
       createdAt: timestampToISOString(request.createdAt),
       updatedAt: timestampToISOString(request.updatedAt),
@@ -542,19 +588,19 @@ function buildAttentionItems(params: {
 
 export function buildRootShellViewModel(params: {
   rows: ShellRows;
-  normalizedEmail: string;
+  email: string;
   activeInboxSlug?: string | null;
   securityState: ShellSecurityState;
   connectionHealth: RootShellConnectionHealth;
   pendingBackupPrompt?: string | null;
 }): RootShellViewModel | null {
-  const defaultActor = findDefaultActorByEmail(params.rows.actors, params.normalizedEmail);
+  const defaultActor = findDefaultActorByEmail(params.rows.actors, params.email);
   if (!defaultActor) {
     return null;
   }
 
   const ownedActors = params.rows.actors
-    .filter(actor => actor.inboxId === defaultActor.inboxId)
+    .filter(actor => actor.accountId === defaultActor.accountId)
     .sort(sortOwnedActors);
   const usableOwnedActors = ownedActors.filter(actor => !isDeregisteredOwnedActor(actor));
   const activeActor =
@@ -565,7 +611,7 @@ export function buildRootShellViewModel(params: {
     return null;
   }
 
-  const ownActorIds = buildOwnActorIds(params.rows.actors, activeActor.inboxId);
+  const ownActorIds = buildOwnActorIds(params.rows.actors, activeActor.accountId);
   const activeParticipantsByThreadId = buildParticipantsByThreadId(
     params.rows.participants.filter(participant => participant.active)
   );
@@ -590,7 +636,7 @@ export function buildRootShellViewModel(params: {
     })
     .map(thread => ({
       id: thread.id.toString(),
-      kind: thread.kind,
+      kind: enumTag(thread.kind).toLowerCase(),
       label: summarizeThread(
         thread,
         activeParticipantsByThreadId.get(thread.id) ?? [],
@@ -602,26 +648,23 @@ export function buildRootShellViewModel(params: {
         if (readState?.archived) {
           return 0;
         }
-        const unread = thread.lastMessageSeq - (readState?.lastReadThreadSeq ?? 0n);
-        if (unread <= 0n) {
-          return 0;
-        }
-        return Number(unread > 999n ? 999n : unread);
+        const lastAssigned = thread.lastMessageId;
+        return lastAssigned > (readState?.lastReadMessageId ?? 0n) ? 1 : 0;
       })(),
       archived: readStateByThreadId.get(thread.id)?.archived ?? false,
-      locked: thread.membershipLocked,
-      participantCount: (activeParticipantsByThreadId.get(thread.id) ?? []).length,
+      locked: enumTag(thread.kind) === 'Direct',
+      participantCount: Number(thread.activeParticipantCount),
       participants: listThreadParticipants({
         threadId: thread.id,
         participantsByThreadId: activeParticipantsByThreadId,
         actorsById,
       }),
       lastMessageAt: timestampToISOString(thread.lastMessageAt),
-      lastMessageSeq: thread.lastMessageSeq.toString(),
+      lastMessageId: thread.lastMessageId.toString(),
     }) satisfies ShellThreadSummary);
 
   const requests = params.rows.contactRequests
-    .filter(request => request.status === 'pending')
+    .filter(request => request.status.tag === 'Pending')
     .filter(request => {
       return (
         request.requesterAgentDbId === activeActor.id ||
@@ -641,18 +684,19 @@ export function buildRootShellViewModel(params: {
     .map(request => ({
       id: request.id.toString(),
       threadId: request.threadId.toString(),
-      direction: request.direction as ShellRequestSummary['direction'],
-      status: request.status as ShellRequestSummary['status'],
-      messageCount: request.messageCount.toString(),
+      direction:
+        request.targetAgentDbId === activeActor.id ? 'incoming' : 'outgoing',
+      status: contactRequestStatusToCli(request.status),
+      messageCount: '0',
       requesterSlug: request.requesterSlug,
-      requesterDisplayName: request.requesterDisplayName ?? null,
+      requesterDisplayName: actorsById.get(request.requesterAgentDbId)?.displayName ?? null,
       targetSlug: request.targetSlug,
-      targetDisplayName: request.targetDisplayName ?? null,
+      targetDisplayName: actorsById.get(request.targetAgentDbId)?.displayName ?? null,
       updatedAt: timestampToISOString(request.updatedAt),
     }) satisfies ShellRequestSummary);
 
   const allowlist = params.rows.allowlistEntries
-    .filter(entry => entry.inboxId === activeActor.inboxId)
+    .filter(entry => entry.accountId === activeActor.accountId)
     .sort((left, right) => {
       const byCreated = compareBigIntDesc(
         left.createdAt.microsSinceUnixEpoch,
@@ -663,19 +707,16 @@ export function buildRootShellViewModel(params: {
       }
       return compareBigIntDesc(left.id, right.id);
     })
-    .map(entry => ({
-      id: entry.id.toString(),
-      kind: entry.kind as ShellAllowlistSummary['kind'],
-      value:
-        entry.kind === 'agent'
-          ? (entry.agentPublicIdentity ?? '')
-          : (entry.displayEmail ?? entry.normalizedEmail ?? ''),
-      label:
-        entry.kind === 'agent'
-          ? (entry.agentDisplayName ?? entry.agentSlug ?? null)
-          : (entry.displayEmail ?? null),
-      createdAt: timestampToISOString(entry.createdAt),
-    }) satisfies ShellAllowlistSummary);
+    .map(entry => {
+      const kind = allowlistKindToCli(entry.kind);
+      return {
+        id: entry.id.toString(),
+        kind,
+        value: kind === 'agent' ? (entry.agentPublicIdentity ?? '') : (entry.email ?? ''),
+        label: kind === 'agent' ? entry.agentSlug ?? null : entry.email ?? null,
+        createdAt: timestampToISOString(entry.createdAt),
+      } satisfies ShellAllowlistSummary;
+    });
 
   const pendingShareCountByDeviceId = new Map<string, number>();
   for (const request of params.rows.deviceRequests) {
@@ -688,7 +729,7 @@ export function buildRootShellViewModel(params: {
   }
 
   const devices = params.rows.devices
-    .filter(device => device.inboxId === activeActor.inboxId)
+    .filter(device => device.accountId === activeActor.accountId)
     .sort((left, right) => {
       const byUpdated = compareBigIntDesc(
         left.lastSeenAt.microsSinceUnixEpoch,
@@ -703,7 +744,7 @@ export function buildRootShellViewModel(params: {
       deviceId: device.deviceId,
       label: device.label ?? null,
       platform: device.platform ?? null,
-      status: device.status,
+      status: enumTag(device.status).toLowerCase(),
       approvedAt: device.approvedAt ? timestampToISOString(device.approvedAt) : null,
       revokedAt: device.revokedAt ? timestampToISOString(device.revokedAt) : null,
       lastSeenAt: timestampToISOString(device.lastSeenAt),
@@ -725,8 +766,8 @@ export function buildRootShellViewModel(params: {
     .map(request => ({
       id: request.id.toString(),
       deviceId: request.deviceId,
-      label: request.label ?? null,
-      platform: request.platform ?? null,
+      label: null,
+      platform: null,
       expiresAt: timestampToISOString(request.expiresAt),
       createdAt: timestampToISOString(request.createdAt),
       approvedAt: request.approvedAt ? timestampToISOString(request.approvedAt) : null,

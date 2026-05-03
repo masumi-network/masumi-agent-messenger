@@ -37,6 +37,20 @@ function makeAuthStatus(
   };
 }
 
+function makeOwnedAgentImportSummary() {
+  return {
+    checked: 0,
+    imported: 0,
+    synced: 0,
+    present: 0,
+    missing: 0,
+    skipped: 0,
+    warnings: [],
+    successes: [],
+    items: [],
+  };
+}
+
 function makeAuthenticatedInboxResult(
   overrides: Partial<AuthenticatedInboxResult> = {}
 ): AuthenticatedInboxResult {
@@ -51,8 +65,7 @@ function makeAuthenticatedInboxResult(
     bootstrapped: true,
     inbox: {
       id: '1',
-      normalizedEmail: 'agent@example.com',
-      displayEmail: 'agent@example.com',
+      email: 'agent@example.com',
     },
     actor: {
       id: '1',
@@ -61,6 +74,7 @@ function makeAuthenticatedInboxResult(
       displayName: 'Agent',
     },
     agentRegistration: createEmptyMasumiRegistrationResult(),
+    ownedAgentImport: makeOwnedAgentImportSummary(),
     deviceId: 'device-1',
     localKeysReady: true,
     keySource: 'existing_local',
@@ -184,8 +198,7 @@ async function loadProgramWithMocks(params: {
     connected: true,
     inbox: {
       id: '1',
-      normalizedEmail: 'agent@example.com',
-      displayEmail: 'agent@example.com',
+      email: 'agent@example.com',
     },
     actor: {
       id: '1',
@@ -195,8 +208,8 @@ async function loadProgramWithMocks(params: {
     },
     agentRegistration: createEmptyMasumiRegistrationResult(),
     keyVersions: {
-      encryption: 'enc-v1',
-      signing: 'sig-v1',
+      encryption: 1,
+      signing: 1,
     },
     profile: 'default',
   }));
@@ -234,7 +247,7 @@ async function loadProgramWithMocks(params: {
     callbackURL: null,
   }));
 
-  const createInboxIdentity = vi.fn(async () => ({
+  const createAgent = vi.fn(async () => ({
     profile: 'default',
     actor: {
       id: '2',
@@ -242,8 +255,8 @@ async function loadProgramWithMocks(params: {
       publicIdentity: 'support-bot',
       displayName: 'Support Bot',
       keyVersions: {
-        encryption: 'enc-v1',
-        signing: 'sig-v1',
+        encryption: 1,
+        signing: 1,
       },
     },
     registration: createEmptyMasumiRegistrationResult(),
@@ -346,7 +359,6 @@ async function loadProgramWithMocks(params: {
     },
     threadId: '42',
     messageId: '100',
-    threadSeq: '3',
     createdDirectThread: true,
     targetLookup: {
       input: input.to,
@@ -366,7 +378,6 @@ async function loadProgramWithMocks(params: {
     threadId: '42',
     label: 'Support Bot',
     messageId: '100',
-    threadSeq: '3',
   }));
   const countThreadMessages = vi.fn(async (input: { threadId: string; actorSlug?: string }) => ({
     authenticated: true as const,
@@ -375,7 +386,7 @@ async function loadProgramWithMocks(params: {
     actorSlug: input.actorSlug ?? 'agent',
     thread: {
       id: input.threadId,
-      kind: 'group',
+      kind: { tag: 'Group' as const },
       label: 'Support Group',
       locked: false,
       archived: false,
@@ -383,7 +394,6 @@ async function loadProgramWithMocks(params: {
       participants: ['agent', 'support-bot'],
     },
     messageCount: 7,
-    lastMessageSeq: '7',
     lastMessageAt: '2026-04-15T10:00:00.000Z',
   }));
   const listThreads = vi.fn(async () => ({
@@ -402,12 +412,12 @@ async function loadProgramWithMocks(params: {
     actorSlug: 'agent',
     thread: {
       id: '42',
-      kind: 'direct',
+      kind: { tag: 'Direct' as const },
       label: 'Support Bot',
       locked: false,
       archived: false,
     },
-    lastReadThreadSeq: '0',
+    lastReadMessageId: '0',
     totalMessages: 0,
     messages: [],
   }));
@@ -428,7 +438,7 @@ async function loadProgramWithMocks(params: {
     actorSlug: 'agent',
     threadId: '42',
     label: 'Support Bot',
-    kind: 'direct' as const,
+    kind: { tag: 'Direct' as const } as const,
     locked: false,
     participants: ['agent', 'support-bot'],
     invitedParticipants: [],
@@ -438,7 +448,7 @@ async function loadProgramWithMocks(params: {
     actorSlug: 'agent',
     threadId: '43',
     label: 'Support Group',
-    kind: 'group' as const,
+    kind: { tag: 'Group' as const } as const,
     locked: false,
     participants: ['agent', 'support-bot'],
     invitedParticipants: [],
@@ -468,7 +478,7 @@ async function loadProgramWithMocks(params: {
     actorSlug: 'agent',
     threadId: '42',
     label: 'Support Bot',
-    throughSeq: '7',
+    throughMessageId: '7',
   }));
   const setThreadArchived = vi.fn(async () => ({
     profile: 'default',
@@ -518,13 +528,13 @@ async function loadProgramWithMocks(params: {
   const addContactAllowlist = vi.fn(async () => ({
     profile: 'default',
     actorSlug: 'agent',
-    kind: 'agent',
+    kind: { tag: 'Agent' as const },
     value: 'support-bot',
   }));
   const removeContactAllowlist = vi.fn(async () => ({
     profile: 'default',
     actorSlug: 'agent',
-    kind: 'agent',
+    kind: { tag: 'Agent' as const },
     value: 'support-bot',
   }));
 
@@ -554,15 +564,15 @@ async function loadProgramWithMocks(params: {
       publicIdentity: 'support-bot',
       isDefault: true,
       agentIdentifier: null,
-      encryptionKeyVersion: 'enc-v1',
-      signingKeyVersion: 'sig-v1',
+      encryptionKeyVersion: 1,
+      signingKeyVersion: 1,
     },
     publicRoute: {
       agentIdentifier: null,
       linkedEmail: null,
       description: 'Support agent',
-      encryptionKeyVersion: 'enc-v1',
-      signingKeyVersion: 'sig-v1',
+      encryptionKeyVersion: 1,
+      signingKeyVersion: 1,
       allowAllContentTypes: true,
       allowAllHeaders: true,
       supportedContentTypes: [],
@@ -575,7 +585,7 @@ async function loadProgramWithMocks(params: {
       },
     },
   }));
-  const listPublicChannels = vi.fn(async () => ({
+  const listDiscoverableChannels = vi.fn(async () => ({
     profile: 'default',
     channels: [],
   }));
@@ -630,13 +640,13 @@ async function loadProgramWithMocks(params: {
   const approveChannelJoin = vi.fn(async (_input: { requestId: string }) => ({
     profile: 'default',
     channelId: '1',
-    status: 'approved',
+    status: { tag: 'Approved' as const },
   }));
   const rejectChannelJoin = vi.fn(async () => ({
     profile: 'default',
-    status: 'rejected',
+    status: { tag: 'Rejected' as const },
   }));
-  const setChannelMemberPermission = vi.fn(async (input: { slug: string }) => ({
+  const updateChannelMemberPermission = vi.fn(async (input: { slug: string }) => ({
     profile: 'default',
     slug: input.slug,
     channelId: '1',
@@ -660,18 +670,18 @@ async function loadProgramWithMocks(params: {
       publicIdentity: `${input.slug}:public-identity`,
       isDefault: true,
       displayName: 'Support Bot',
-      encryptionKeyVersion: 'enc-v1',
+      encryptionKeyVersion: 1,
       encryptionPublicKey: 'enc-public-key',
-      signingKeyVersion: 'sig-v1',
+      signingKeyVersion: 1,
       signingPublicKey: 'sig-public-key',
     },
   ]);
-  const lookupPublishedAgentsByEmail = vi.fn(async () => []);
+  const lookupPublishedAgentsByEmailPage = vi.fn(async () => []);
   const connectAuthenticated = vi.fn(async () => ({
     conn: {
       procedures: {
         lookupPublishedAgentBySlug,
-        lookupPublishedAgentsByEmail,
+        lookupPublishedAgentsByEmailPage,
       },
     },
     identityHex: '0xabc',
@@ -705,8 +715,8 @@ async function loadProgramWithMocks(params: {
     publicIdentity: 'support-bot:public-identity',
     previousStatus: 'pending' as const,
     confirmedAt: '2026-04-18T00:00:00.000Z',
-    encryptionKeyVersion: 'enc-v1',
-    signingKeyVersion: 'sig-v1',
+    encryptionKeyVersion: 1,
+    signingKeyVersion: 1,
   }));
 
   vi.doMock('./services/command-runtime', () => ({
@@ -786,7 +796,7 @@ async function loadProgramWithMocks(params: {
     const actual = await importOriginal<typeof import('./services/inbox-management')>();
     return {
       ...actual,
-      createInboxIdentity,
+      createAgent,
       rotateInboxKeys,
     };
   });
@@ -853,7 +863,7 @@ async function loadProgramWithMocks(params: {
     joinPublicChannel,
     listChannelJoinRequests,
     listChannelMembers,
-    listPublicChannels,
+    listDiscoverableChannels,
     showPublicChannel,
     readAuthenticatedChannelMessages,
     readPublicChannelMessages,
@@ -861,7 +871,7 @@ async function loadProgramWithMocks(params: {
     removeChannelMember,
     requestChannelJoin,
     sendChannelMessage,
-    setChannelMemberPermission,
+    updateChannelMemberPermission,
   }));
 
   const programModule = await import('./program');
@@ -886,7 +896,7 @@ async function loadProgramWithMocks(params: {
       removeLocalKeys,
       ensureAuthenticatedSession,
       requestVerificationEmailForIssuer,
-      createInboxIdentity,
+      createAgent,
       rotateInboxKeys,
       resolveRotationDeviceSelection,
       resolvePreferredAgentSlug,
@@ -906,7 +916,7 @@ async function loadProgramWithMocks(params: {
       removeContactAllowlist,
       discoverAgents,
       showDiscoveredAgent,
-      listPublicChannels,
+      listDiscoverableChannels,
       showPublicChannel,
       readPublicChannelMessages,
       readAuthenticatedChannelMessages,
@@ -918,11 +928,11 @@ async function loadProgramWithMocks(params: {
       listChannelJoinRequests,
       approveChannelJoin,
       rejectChannelJoin,
-      setChannelMemberPermission,
+      updateChannelMemberPermission,
       removeChannelMember,
       sendChannelMessage,
       lookupPublishedAgentBySlug,
-      lookupPublishedAgentsByEmail,
+      lookupPublishedAgentsByEmailPage,
       connectAnonymous,
       connectAuthenticated,
       disconnectConnection,
@@ -1267,7 +1277,7 @@ describe('CLI command parsing', () => {
 
       type BootstrapCall = {
         confirmDefaultSlug?: (params: {
-          normalizedEmail: string;
+          email: string;
           suggestedSlug: string;
         }) => Promise<string | { slug: string; publicDescription?: string | null }>;
         registrationMode?: string;
@@ -1282,7 +1292,7 @@ describe('CLI command parsing', () => {
       mocks.promptText.mockResolvedValueOnce('custom-agent');
       mocks.promptMultiline.mockResolvedValueOnce('Custom public description');
       const result = await bootstrapCall?.confirmDefaultSlug?.({
-        normalizedEmail: 'agent@example.com',
+        email: 'agent@example.com',
         suggestedSlug: 'agent',
       });
 
@@ -1359,7 +1369,7 @@ describe('CLI command parsing', () => {
       'Support Bot',
     ]);
 
-    expect(mocks.createInboxIdentity).toHaveBeenCalledWith(
+    expect(mocks.createAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         slug: 'support-bot',
         displayName: 'Support Bot',
@@ -1382,7 +1392,7 @@ describe('CLI command parsing', () => {
       '--skip-agent-registration',
     ]);
 
-    expect(mocks.createInboxIdentity).toHaveBeenCalledWith(
+    expect(mocks.createAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         slug: 'support-bot',
         profileName: 'default',
@@ -1675,8 +1685,6 @@ describe('CLI command parsing', () => {
       '--description',
       'Deployment handoffs',
       '--approval-required',
-      '--public-join-permission',
-      'read_write',
       '--no-discoverable',
     ]);
 
@@ -1688,7 +1696,6 @@ describe('CLI command parsing', () => {
         title: 'Release Room',
         description: 'Deployment handoffs',
         accessMode: 'approval_required',
-        publicJoinPermission: 'read_write',
         discoverable: false,
       })
     );
@@ -1707,8 +1714,6 @@ describe('CLI command parsing', () => {
       '--agent',
       'deploy-agent',
       '--public',
-      '--public-join-permission',
-      'read_write',
       '--discoverable',
     ]);
 
@@ -1718,7 +1723,6 @@ describe('CLI command parsing', () => {
         actorSlug: 'deploy-agent',
         slug: 'release-room',
         accessMode: 'public',
-        publicJoinPermission: 'read_write',
         discoverable: true,
       })
     );
@@ -1744,7 +1748,6 @@ describe('CLI command parsing', () => {
         profileName: 'default',
         actorSlug: 'deploy-agent',
         slug: 'release-room',
-        direction: 'incoming',
         includeResolved: true,
         requireAdmin: true,
       })
@@ -1763,8 +1766,6 @@ describe('CLI command parsing', () => {
       '42',
       '--agent',
       'deploy-agent',
-      '--permission',
-      'read_write',
     ]);
 
     const call = mocks.approveChannelJoin.mock.calls[0]?.[0] as Record<string, unknown>;
@@ -1773,7 +1774,6 @@ describe('CLI command parsing', () => {
         profileName: 'default',
         actorSlug: 'deploy-agent',
         requestId: '42',
-        permission: 'read_write',
       })
     );
     expect(call).not.toHaveProperty('secretEnvelope');
@@ -1919,7 +1919,7 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('requires an explicit agent slug for agent key rotation', async () => {
+  it('requires an explicit agent slug for agent key reset', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await expect(
@@ -1929,7 +1929,7 @@ describe('CLI command parsing', () => {
         '--json',
         'agent',
         'key',
-        'rotate',
+        'reset',
       ])
     ).rejects.toMatchObject({
       code: 'AGENT_KEY_ROTATE_SLUG_REQUIRED',
@@ -1939,7 +1939,7 @@ describe('CLI command parsing', () => {
     expect(mocks.rotateInboxKeys).not.toHaveBeenCalled();
   });
 
-  it('parses agent key rotation with an explicit slug', async () => {
+  it('parses agent key reset with an explicit slug', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await buildProgram().parseAsync([
@@ -1948,7 +1948,7 @@ describe('CLI command parsing', () => {
       '--json',
       'agent',
       'key',
-      'rotate',
+      'reset',
       'support-bot',
       '--share-device',
       'device-a',
@@ -1973,7 +1973,7 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('parses agent key rotation with an explicit --agent selector', async () => {
+  it('parses agent key reset with an explicit --agent selector', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await buildProgram().parseAsync([
@@ -1982,7 +1982,7 @@ describe('CLI command parsing', () => {
       '--json',
       'agent',
       'key',
-      'rotate',
+      'reset',
       '--agent',
       'support-bot',
     ]);
@@ -2026,9 +2026,9 @@ describe('CLI command parsing', () => {
       'support-bot:public-identity',
       {
         encryptionPublicKey: 'enc-public-key',
-        encryptionKeyVersion: 'enc-v1',
+        encryptionKeyVersion: 1,
         signingPublicKey: 'sig-public-key',
-        signingKeyVersion: 'sig-v1',
+        signingKeyVersion: 1,
       }
     );
   });
@@ -2043,9 +2043,9 @@ describe('CLI command parsing', () => {
           pinnedAt: '2026-04-18T00:00:00.000Z',
           current: {
             encryptionPublicKey: 'old-enc-public-key',
-            encryptionKeyVersion: 'old-enc-v1',
+            encryptionKeyVersion: 0,
             signingPublicKey: 'old-sig-public-key',
-            signingKeyVersion: 'old-sig-v1',
+            signingKeyVersion: 0,
           },
           history: [],
         },
@@ -2065,8 +2065,8 @@ describe('CLI command parsing', () => {
     expect(mocks.confirmPeerKeyRotation).toHaveBeenCalledWith(
       'support-bot:public-identity',
       expect.objectContaining({
-        encryptionKeyVersion: 'enc-v1',
-        signingKeyVersion: 'sig-v1',
+        encryptionKeyVersion: 1,
+        signingKeyVersion: 1,
       })
     );
   });
@@ -2260,7 +2260,7 @@ describe('CLI doctor', () => {
       );
       expect(mocks.connectAnonymous).toHaveBeenCalledWith(
         expect.objectContaining({
-          databaseName: 'masumi-agent-messenger-3rx0g',
+          databaseName: 'masumi-messenger-dev-hlq5a',
         })
       );
       expect(mocks.ensureAuthenticatedSession).not.toHaveBeenCalled();

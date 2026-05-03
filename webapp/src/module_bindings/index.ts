@@ -39,197 +39,126 @@ import AddContactAllowlistEntryReducer from "./add_contact_allowlist_entry_reduc
 import AddThreadParticipantReducer from "./add_thread_participant_reducer";
 import ApproveChannelJoinReducer from "./approve_channel_join_reducer";
 import ApproveContactRequestReducer from "./approve_contact_request_reducer";
-import ApproveDeviceShareReducer from "./approve_device_share_reducer";
+import ApproveDeviceShareRequestReducer from "./approve_device_share_request_reducer";
+import CancelContactRequestReducer from "./cancel_contact_request_reducer";
+import CreateAgentReducer from "./create_agent_reducer";
 import CreateChannelReducer from "./create_channel_reducer";
 import CreateDeviceShareRequestReducer from "./create_device_share_request_reducer";
-import CreateDirectThreadReducer from "./create_direct_thread_reducer";
-import CreateGroupThreadReducer from "./create_group_thread_reducer";
-import CreateInboxIdentityReducer from "./create_inbox_identity_reducer";
+import CreateThreadReducer from "./create_thread_reducer";
+import DeclineThreadInviteReducer from "./decline_thread_invite_reducer";
 import DeleteThreadReducer from "./delete_thread_reducer";
 import JoinPublicChannelReducer from "./join_public_channel_reducer";
-import MarkThreadReadReducer from "./mark_thread_read_reducer";
-import RefreshInboxAuthLeaseReducer from "./refresh_inbox_auth_lease_reducer";
+import RefreshAccountAuthLeaseReducer from "./refresh_account_auth_lease_reducer";
 import RegisterDeviceReducer from "./register_device_reducer";
 import RejectChannelJoinReducer from "./reject_channel_join_reducer";
 import RejectContactRequestReducer from "./reject_contact_request_reducer";
-import RejectThreadInviteReducer from "./reject_thread_invite_reducer";
 import RemoveChannelMemberReducer from "./remove_channel_member_reducer";
 import RemoveContactAllowlistEntryReducer from "./remove_contact_allowlist_entry_reducer";
 import RemoveThreadParticipantReducer from "./remove_thread_participant_reducer";
-import RepairOwnSenderReadStatesReducer from "./repair_own_sender_read_states_reducer";
 import RequestChannelJoinReducer from "./request_channel_join_reducer";
-import RequestDirectContactWithFirstMessageReducer from "./request_direct_contact_with_first_message_reducer";
+import RequestDirectContactReducer from "./request_direct_contact_reducer";
 import RevokeDeviceReducer from "./revoke_device_reducer";
 import RotateAgentKeysReducer from "./rotate_agent_keys_reducer";
 import SendChannelMessageReducer from "./send_channel_message_reducer";
 import SendEncryptedMessageReducer from "./send_encrypted_message_reducer";
-import SetAgentPublicDescriptionReducer from "./set_agent_public_description_reducer";
-import SetAgentPublicLinkedEmailVisibilityReducer from "./set_agent_public_linked_email_visibility_reducer";
-import SetAgentPublicMessageCapabilitiesReducer from "./set_agent_public_message_capabilities_reducer";
-import SetChannelMemberPermissionReducer from "./set_channel_member_permission_reducer";
-import SetThreadArchivedReducer from "./set_thread_archived_reducer";
 import SetThreadParticipantAdminReducer from "./set_thread_participant_admin_reducer";
+import ShareDeviceKeyBundleReducer from "./share_device_key_bundle_reducer";
 import UpdateAgentProfileReducer from "./update_agent_profile_reducer";
+import UpdateChannelMemberPermissionReducer from "./update_channel_member_permission_reducer";
+import UpdateChannelMemberReadStateReducer from "./update_channel_member_read_state_reducer";
 import UpdateChannelSettingsReducer from "./update_channel_settings_reducer";
-import UpsertInboxFromOidcIdentityReducer from "./upsert_inbox_from_oidc_identity_reducer";
-import UpsertMasumiInboxAgentRegistrationReducer from "./upsert_masumi_inbox_agent_registration_reducer";
+import UpdateThreadMessageRetentionReducer from "./update_thread_message_retention_reducer";
+import UpdateThreadReadStateReducer from "./update_thread_read_state_reducer";
+import UpsertAccountFromOidcIdentityReducer from "./upsert_account_from_oidc_identity_reducer";
+import UpsertMasumiRegistrationReducer from "./upsert_masumi_registration_reducer";
 
 // Import all procedure arg schemas
 import * as ClaimDeviceKeyBundleProcedure from "./claim_device_key_bundle_procedure";
 import * as ListChannelMembersProcedure from "./list_channel_members_procedure";
 import * as ListChannelMessagesProcedure from "./list_channel_messages_procedure";
+import * as ListContactAllowlistEntriesProcedure from "./list_contact_allowlist_entries_procedure";
 import * as ListDiscoverableChannelsProcedure from "./list_discoverable_channels_procedure";
+import * as ListOwnedAgentsPageProcedure from "./list_owned_agents_page_procedure";
+import * as ListOwnedDevicesProcedure from "./list_owned_devices_procedure";
+import * as ListPendingChannelJoinRequestsPageProcedure from "./list_pending_channel_join_requests_page_procedure";
+import * as ListPendingContactRequestsPageProcedure from "./list_pending_contact_requests_page_procedure";
+import * as ListPendingThreadInvitesPageProcedure from "./list_pending_thread_invites_page_procedure";
 import * as ListPublicChannelMessagesProcedure from "./list_public_channel_messages_procedure";
-import * as ListPublicChannelsProcedure from "./list_public_channels_procedure";
+import * as ListResolvedChannelJoinRequestsProcedure from "./list_resolved_channel_join_requests_procedure";
+import * as ListResolvedContactRequestsProcedure from "./list_resolved_contact_requests_procedure";
+import * as ListResolvedThreadInvitesProcedure from "./list_resolved_thread_invites_procedure";
 import * as ListThreadMessagesProcedure from "./list_thread_messages_procedure";
+import * as ListThreadParticipantsProcedure from "./list_thread_participants_procedure";
 import * as ListThreadSecretEnvelopesProcedure from "./list_thread_secret_envelopes_procedure";
+import * as ListVisibleChannelPageProcedure from "./list_visible_channel_page_procedure";
 import * as ListVisibleThreadsProcedure from "./list_visible_threads_procedure";
 import * as LookupAgentKeyBundlesProcedure from "./lookup_agent_key_bundles_procedure";
 import * as LookupAgentPublicKeysProcedure from "./lookup_agent_public_keys_procedure";
+import * as LookupPublicChannelBySlugProcedure from "./lookup_public_channel_by_slug_procedure";
 import * as LookupPublishedAgentBySlugProcedure from "./lookup_published_agent_by_slug_procedure";
 import * as LookupPublishedAgentSigningKeysProcedure from "./lookup_published_agent_signing_keys_procedure";
-import * as LookupPublishedAgentsByEmailProcedure from "./lookup_published_agents_by_email_procedure";
+import * as LookupPublishedAgentsByEmailPageProcedure from "./lookup_published_agents_by_email_page_procedure";
 import * as LookupPublishedPublicRouteBySlugProcedure from "./lookup_published_public_route_by_slug_procedure";
+import * as ReadContactRequestProcedure from "./read_contact_request_procedure";
 import * as ReadOwnedAgentProcedure from "./read_owned_agent_procedure";
-import * as ReadPublicChannelProcedure from "./read_public_channel_procedure";
 import * as ReadVisibleChannelStateProcedure from "./read_visible_channel_state_procedure";
 import * as ReadVisibleThreadProcedure from "./read_visible_thread_procedure";
 import * as ResolveDeviceShareRequestByCodeProcedure from "./resolve_device_share_request_by_code_procedure";
 
 // Import all table schema definitions
-import PublicRecentChannelMessagesRow from "./public_recent_channel_messages_table";
-import VisibleAgentsRow from "./visible_agents_table";
-import VisibleChannelJoinRequestsRow from "./visible_channel_join_requests_table";
+import VisibleAccountChangeSignalRow from "./visible_account_change_signal_table";
+import VisibleAccountsRow from "./visible_accounts_table";
 import VisibleChannelMembershipsRow from "./visible_channel_memberships_table";
 import VisibleChannelsRow from "./visible_channels_table";
-import VisibleContactAllowlistEntriesRow from "./visible_contact_allowlist_entries_table";
-import VisibleContactRequestsRow from "./visible_contact_requests_table";
 import VisibleDeviceKeyBundlesRow from "./visible_device_key_bundles_table";
 import VisibleDeviceShareRequestsRow from "./visible_device_share_requests_table";
-import VisibleDevicesRow from "./visible_devices_table";
-import VisibleInboxesRow from "./visible_inboxes_table";
-import VisibleThreadInvitesRow from "./visible_thread_invites_table";
-import VisibleThreadParticipantsRow from "./visible_thread_participants_table";
-import VisibleThreadReadStatesRow from "./visible_thread_read_states_table";
-import VisibleThreadSecretEnvelopesRow from "./visible_thread_secret_envelopes_table";
-import VisibleThreadsRow from "./visible_threads_table";
 
 /** Type-only namespace exports for generated type groups. */
 
 /** The schema information for all tables in this module. This is defined the same was as the tables would have been defined in the server. */
 const tablesSchema = __schema({
-  publicRecentChannelMessages: __table({
-    name: 'public_recent_channel_messages',
+  visible_account_change_signal: __table({
+    name: 'visible_account_change_signal',
     indexes: [
     ],
     constraints: [
     ],
-  }, PublicRecentChannelMessagesRow),
-  visibleAgents: __table({
-    name: 'visible_agents',
+  }, VisibleAccountChangeSignalRow),
+  visible_accounts: __table({
+    name: 'visible_accounts',
     indexes: [
     ],
     constraints: [
     ],
-  }, VisibleAgentsRow),
-  visibleChannelJoinRequests: __table({
-    name: 'visible_channel_join_requests',
-    indexes: [
-    ],
-    constraints: [
-    ],
-  }, VisibleChannelJoinRequestsRow),
-  visibleChannelMemberships: __table({
+  }, VisibleAccountsRow),
+  visible_channel_memberships: __table({
     name: 'visible_channel_memberships',
     indexes: [
     ],
     constraints: [
     ],
   }, VisibleChannelMembershipsRow),
-  visibleChannels: __table({
+  visible_channels: __table({
     name: 'visible_channels',
     indexes: [
     ],
     constraints: [
     ],
   }, VisibleChannelsRow),
-  visibleContactAllowlistEntries: __table({
-    name: 'visible_contact_allowlist_entries',
-    indexes: [
-    ],
-    constraints: [
-    ],
-  }, VisibleContactAllowlistEntriesRow),
-  visibleContactRequests: __table({
-    name: 'visible_contact_requests',
-    indexes: [
-    ],
-    constraints: [
-    ],
-  }, VisibleContactRequestsRow),
-  visibleDeviceKeyBundles: __table({
+  visible_device_key_bundles: __table({
     name: 'visible_device_key_bundles',
     indexes: [
     ],
     constraints: [
     ],
   }, VisibleDeviceKeyBundlesRow),
-  visibleDeviceShareRequests: __table({
+  visible_device_share_requests: __table({
     name: 'visible_device_share_requests',
     indexes: [
     ],
     constraints: [
     ],
   }, VisibleDeviceShareRequestsRow),
-  visibleDevices: __table({
-    name: 'visible_devices',
-    indexes: [
-    ],
-    constraints: [
-    ],
-  }, VisibleDevicesRow),
-  visibleInboxes: __table({
-    name: 'visible_inboxes',
-    indexes: [
-    ],
-    constraints: [
-    ],
-  }, VisibleInboxesRow),
-  visibleThreadInvites: __table({
-    name: 'visible_thread_invites',
-    indexes: [
-    ],
-    constraints: [
-    ],
-  }, VisibleThreadInvitesRow),
-  visibleThreadParticipants: __table({
-    name: 'visible_thread_participants',
-    indexes: [
-    ],
-    constraints: [
-    ],
-  }, VisibleThreadParticipantsRow),
-  visibleThreadReadStates: __table({
-    name: 'visible_thread_read_states',
-    indexes: [
-    ],
-    constraints: [
-    ],
-  }, VisibleThreadReadStatesRow),
-  visibleThreadSecretEnvelopes: __table({
-    name: 'visible_thread_secret_envelopes',
-    indexes: [
-    ],
-    constraints: [
-    ],
-  }, VisibleThreadSecretEnvelopesRow),
-  visibleThreads: __table({
-    name: 'visible_threads',
-    indexes: [
-    ],
-    constraints: [
-    ],
-  }, VisibleThreadsRow),
 });
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
@@ -239,40 +168,38 @@ const reducersSchema = __reducers(
   __reducerSchema("add_thread_participant", AddThreadParticipantReducer),
   __reducerSchema("approve_channel_join", ApproveChannelJoinReducer),
   __reducerSchema("approve_contact_request", ApproveContactRequestReducer),
-  __reducerSchema("approve_device_share", ApproveDeviceShareReducer),
+  __reducerSchema("approve_device_share_request", ApproveDeviceShareRequestReducer),
+  __reducerSchema("cancel_contact_request", CancelContactRequestReducer),
+  __reducerSchema("create_agent", CreateAgentReducer),
   __reducerSchema("create_channel", CreateChannelReducer),
   __reducerSchema("create_device_share_request", CreateDeviceShareRequestReducer),
-  __reducerSchema("create_direct_thread", CreateDirectThreadReducer),
-  __reducerSchema("create_group_thread", CreateGroupThreadReducer),
-  __reducerSchema("create_inbox_identity", CreateInboxIdentityReducer),
+  __reducerSchema("create_thread", CreateThreadReducer),
+  __reducerSchema("decline_thread_invite", DeclineThreadInviteReducer),
   __reducerSchema("delete_thread", DeleteThreadReducer),
   __reducerSchema("join_public_channel", JoinPublicChannelReducer),
-  __reducerSchema("mark_thread_read", MarkThreadReadReducer),
-  __reducerSchema("refresh_inbox_auth_lease", RefreshInboxAuthLeaseReducer),
+  __reducerSchema("refresh_account_auth_lease", RefreshAccountAuthLeaseReducer),
   __reducerSchema("register_device", RegisterDeviceReducer),
   __reducerSchema("reject_channel_join", RejectChannelJoinReducer),
   __reducerSchema("reject_contact_request", RejectContactRequestReducer),
-  __reducerSchema("reject_thread_invite", RejectThreadInviteReducer),
   __reducerSchema("remove_channel_member", RemoveChannelMemberReducer),
   __reducerSchema("remove_contact_allowlist_entry", RemoveContactAllowlistEntryReducer),
   __reducerSchema("remove_thread_participant", RemoveThreadParticipantReducer),
-  __reducerSchema("repair_own_sender_read_states", RepairOwnSenderReadStatesReducer),
   __reducerSchema("request_channel_join", RequestChannelJoinReducer),
-  __reducerSchema("request_direct_contact_with_first_message", RequestDirectContactWithFirstMessageReducer),
+  __reducerSchema("request_direct_contact", RequestDirectContactReducer),
   __reducerSchema("revoke_device", RevokeDeviceReducer),
   __reducerSchema("rotate_agent_keys", RotateAgentKeysReducer),
   __reducerSchema("send_channel_message", SendChannelMessageReducer),
   __reducerSchema("send_encrypted_message", SendEncryptedMessageReducer),
-  __reducerSchema("set_agent_public_description", SetAgentPublicDescriptionReducer),
-  __reducerSchema("set_agent_public_linked_email_visibility", SetAgentPublicLinkedEmailVisibilityReducer),
-  __reducerSchema("set_agent_public_message_capabilities", SetAgentPublicMessageCapabilitiesReducer),
-  __reducerSchema("set_channel_member_permission", SetChannelMemberPermissionReducer),
-  __reducerSchema("set_thread_archived", SetThreadArchivedReducer),
   __reducerSchema("set_thread_participant_admin", SetThreadParticipantAdminReducer),
+  __reducerSchema("share_device_key_bundle", ShareDeviceKeyBundleReducer),
   __reducerSchema("update_agent_profile", UpdateAgentProfileReducer),
+  __reducerSchema("update_channel_member_permission", UpdateChannelMemberPermissionReducer),
+  __reducerSchema("update_channel_member_read_state", UpdateChannelMemberReadStateReducer),
   __reducerSchema("update_channel_settings", UpdateChannelSettingsReducer),
-  __reducerSchema("upsert_inbox_from_oidc_identity", UpsertInboxFromOidcIdentityReducer),
-  __reducerSchema("upsert_masumi_inbox_agent_registration", UpsertMasumiInboxAgentRegistrationReducer),
+  __reducerSchema("update_thread_message_retention", UpdateThreadMessageRetentionReducer),
+  __reducerSchema("update_thread_read_state", UpdateThreadReadStateReducer),
+  __reducerSchema("upsert_account_from_oidc_identity", UpsertAccountFromOidcIdentityReducer),
+  __reducerSchema("upsert_masumi_registration", UpsertMasumiRegistrationReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */
@@ -280,20 +207,31 @@ const proceduresSchema = __procedures(
   __procedureSchema("claim_device_key_bundle", ClaimDeviceKeyBundleProcedure.params, ClaimDeviceKeyBundleProcedure.returnType),
   __procedureSchema("list_channel_members", ListChannelMembersProcedure.params, ListChannelMembersProcedure.returnType),
   __procedureSchema("list_channel_messages", ListChannelMessagesProcedure.params, ListChannelMessagesProcedure.returnType),
+  __procedureSchema("list_contact_allowlist_entries", ListContactAllowlistEntriesProcedure.params, ListContactAllowlistEntriesProcedure.returnType),
   __procedureSchema("list_discoverable_channels", ListDiscoverableChannelsProcedure.params, ListDiscoverableChannelsProcedure.returnType),
+  __procedureSchema("list_owned_agents_page", ListOwnedAgentsPageProcedure.params, ListOwnedAgentsPageProcedure.returnType),
+  __procedureSchema("list_owned_devices", ListOwnedDevicesProcedure.params, ListOwnedDevicesProcedure.returnType),
+  __procedureSchema("list_pending_channel_join_requests_page", ListPendingChannelJoinRequestsPageProcedure.params, ListPendingChannelJoinRequestsPageProcedure.returnType),
+  __procedureSchema("list_pending_contact_requests_page", ListPendingContactRequestsPageProcedure.params, ListPendingContactRequestsPageProcedure.returnType),
+  __procedureSchema("list_pending_thread_invites_page", ListPendingThreadInvitesPageProcedure.params, ListPendingThreadInvitesPageProcedure.returnType),
   __procedureSchema("list_public_channel_messages", ListPublicChannelMessagesProcedure.params, ListPublicChannelMessagesProcedure.returnType),
-  __procedureSchema("list_public_channels", ListPublicChannelsProcedure.params, ListPublicChannelsProcedure.returnType),
+  __procedureSchema("list_resolved_channel_join_requests", ListResolvedChannelJoinRequestsProcedure.params, ListResolvedChannelJoinRequestsProcedure.returnType),
+  __procedureSchema("list_resolved_contact_requests", ListResolvedContactRequestsProcedure.params, ListResolvedContactRequestsProcedure.returnType),
+  __procedureSchema("list_resolved_thread_invites", ListResolvedThreadInvitesProcedure.params, ListResolvedThreadInvitesProcedure.returnType),
   __procedureSchema("list_thread_messages", ListThreadMessagesProcedure.params, ListThreadMessagesProcedure.returnType),
+  __procedureSchema("list_thread_participants", ListThreadParticipantsProcedure.params, ListThreadParticipantsProcedure.returnType),
   __procedureSchema("list_thread_secret_envelopes", ListThreadSecretEnvelopesProcedure.params, ListThreadSecretEnvelopesProcedure.returnType),
+  __procedureSchema("list_visible_channel_page", ListVisibleChannelPageProcedure.params, ListVisibleChannelPageProcedure.returnType),
   __procedureSchema("list_visible_threads", ListVisibleThreadsProcedure.params, ListVisibleThreadsProcedure.returnType),
   __procedureSchema("lookup_agent_key_bundles", LookupAgentKeyBundlesProcedure.params, LookupAgentKeyBundlesProcedure.returnType),
   __procedureSchema("lookup_agent_public_keys", LookupAgentPublicKeysProcedure.params, LookupAgentPublicKeysProcedure.returnType),
+  __procedureSchema("lookup_public_channel_by_slug", LookupPublicChannelBySlugProcedure.params, LookupPublicChannelBySlugProcedure.returnType),
   __procedureSchema("lookup_published_agent_by_slug", LookupPublishedAgentBySlugProcedure.params, LookupPublishedAgentBySlugProcedure.returnType),
   __procedureSchema("lookup_published_agent_signing_keys", LookupPublishedAgentSigningKeysProcedure.params, LookupPublishedAgentSigningKeysProcedure.returnType),
-  __procedureSchema("lookup_published_agents_by_email", LookupPublishedAgentsByEmailProcedure.params, LookupPublishedAgentsByEmailProcedure.returnType),
+  __procedureSchema("lookup_published_agents_by_email_page", LookupPublishedAgentsByEmailPageProcedure.params, LookupPublishedAgentsByEmailPageProcedure.returnType),
   __procedureSchema("lookup_published_public_route_by_slug", LookupPublishedPublicRouteBySlugProcedure.params, LookupPublishedPublicRouteBySlugProcedure.returnType),
+  __procedureSchema("read_contact_request", ReadContactRequestProcedure.params, ReadContactRequestProcedure.returnType),
   __procedureSchema("read_owned_agent", ReadOwnedAgentProcedure.params, ReadOwnedAgentProcedure.returnType),
-  __procedureSchema("read_public_channel", ReadPublicChannelProcedure.params, ReadPublicChannelProcedure.returnType),
   __procedureSchema("read_visible_channel_state", ReadVisibleChannelStateProcedure.params, ReadVisibleChannelStateProcedure.returnType),
   __procedureSchema("read_visible_thread", ReadVisibleThreadProcedure.params, ReadVisibleThreadProcedure.returnType),
   __procedureSchema("resolve_device_share_request_by_code", ResolveDeviceShareRequestByCodeProcedure.params, ResolveDeviceShareRequestByCodeProcedure.returnType),

@@ -2,28 +2,10 @@
   "name": "@masumi-agent-messenger/spacetimedb",
   "version": "1.0.0",
   "private": true,
-  "description": "",
+  "description": "Encrypted agent-to-agent inbox SpacetimeDB module (Rust). The actual module sources live next to this file as a Cargo crate; the package.json is kept to participate in the pnpm workspace.",
   "scripts": {
+    "check": "cargo check --target wasm32-unknown-unknown",
     "build": "spacetime build",
     "publish": "spacetime publish"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "@cardano-foundation/cardano-verify-datasignature": "^1.0.11",
-    "@noble/ed25519": "^3.1.0",
-    "@noble/hashes": "^2.2.0",
-    "@scure/base": "^2.0.0",
-    "@stricahq/bip32ed25519": "^1.1.2",
-    "@stricahq/cbors": "^1.0.4",
-    "@stricahq/cip08": "^1.0.4",
-    "@stricahq/typhonjs": "^3.0.2",
-    "blakejs": "^1.2.1",
-    "cborg": "^5.1.0",
-    "spacetimedb": "^2.1.0"
-  },
-  "devDependencies": {
-    "typescript": "~5.6.2"
   }
 }

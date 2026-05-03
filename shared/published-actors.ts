@@ -1,19 +1,21 @@
 import { normalizeInboxSlug } from './inbox-slug';
 
 export type PublishedActorLookupLike = {
+  agentDbId: bigint;
   slug: string;
   publicIdentity: string;
   isDefault: boolean;
   displayName?: string | null;
   agentIdentifier?: string | null;
-  encryptionKeyVersion: string;
+  encryptionKeyVersion: number;
   encryptionPublicKey: string;
-  signingKeyVersion: string;
+  signingKeyVersion: number;
   signingPublicKey: string;
   linkedEmail?: string | null;
 };
 
 export type ResolvedPublishedActor = {
+  agentDbId: bigint;
   slug: string;
   publicIdentity: string;
   isDefault: boolean;
@@ -25,6 +27,7 @@ export function toResolvedPublishedActor<Actor extends PublishedActorLookupLike>
   actor: Actor
 ): ResolvedPublishedActor {
   return {
+    agentDbId: actor.agentDbId,
     slug: actor.slug,
     publicIdentity: actor.publicIdentity,
     isDefault: actor.isDefault,

@@ -147,22 +147,55 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const createInboxIdentityReducer = useReducer(reducers.createInboxIdentity);
-  const upsertMasumiInboxAgentRegistrationReducer = useReducer(
-    reducers.upsertMasumiInboxAgentRegistration
+  const createAgentReducer = useReducer(reducers.createAgent);
+  const upsertMasumiRegistrationReducer = useReducer(
+    reducers.upsertMasumiRegistration
   );
-  const setAgentPublicLinkedEmailVisibilityReducer = useReducer(
-    reducers.setAgentPublicLinkedEmailVisibility
-  );
-  const setAgentPublicDescriptionReducer = useReducer(
-    reducers.setAgentPublicDescription
-  );
-  const setAgentPublicMessageCapabilitiesReducer = useReducer(
-    reducers.setAgentPublicMessageCapabilities
-  );
+  const updateAgentProfileReducer = useReducer(reducers.updateAgentProfile);
+  const callUpdateAgentProfile = (
+    agentDbId: bigint,
+    patch: {
+      displayName?: string;
+      publicDescription?: string;
+      publicLinkedEmailEnabled?: boolean;
+      allowAllMessageContentTypes?: boolean;
+      allowAllMessageHeaders?: boolean;
+      supportedMessageContentTypes?: string[];
+      supportedMessageHeaderNames?: string[];
+    }
+  ) =>
+    updateAgentProfileReducer({
+      agentDbId,
+      displayName: patch.displayName,
+      publicDescription: patch.publicDescription,
+      publicLinkedEmailEnabled: patch.publicLinkedEmailEnabled,
+      allowAllMessageContentTypes: patch.allowAllMessageContentTypes,
+      allowAllMessageHeaders: patch.allowAllMessageHeaders,
+      supportedMessageContentTypes: patch.supportedMessageContentTypes,
+      supportedMessageHeaderNames: patch.supportedMessageHeaderNames,
+    });
+  const updateAgentLinkedEmailVisibility = (params: {
+    agentDbId: bigint;
+    publicLinkedEmailEnabled: boolean;
+  }) => callUpdateAgentProfile(params.agentDbId, {
+    publicLinkedEmailEnabled: params.publicLinkedEmailEnabled,
+  });
+  const updateAgentPublicDescription = (params: {
+    agentDbId: bigint;
+    publicDescription: string | undefined;
+  }) => callUpdateAgentProfile(params.agentDbId, {
+    publicDescription: params.publicDescription,
+  });
+  const updateAgentPublicMessageCapabilities = (params: {
+    agentDbId: bigint;
+    allowAllMessageContentTypes: boolean;
+    allowAllMessageHeaders: boolean;
+    supportedMessageContentTypes: string[];
+    supportedMessageHeaderNames: string[];
+  }) => callUpdateAgentProfile(params.agentDbId, params);
   const inboxAgentBusy = inboxAgentAction !== null;
 
-  const normalizedEmail = useMemo(
+  const email = useMemo(
     () =>
       workspace.status === 'ready'
         ? normalizeEmail(workspace.session.user.email ?? '')
@@ -265,7 +298,7 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
     connected,
     session,
     normalizedSessionEmail:
-      workspace.status === 'ready' ? workspace.normalizedEmail : null,
+      workspace.status === 'ready' ? workspace.email : null,
     inbox: workspace.status === 'ready' ? workspace.ownedInbox : null,
     connectionIdentity:
       workspace.status === 'ready' ? workspace.conn.identity ?? null : null,
@@ -399,25 +432,24 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
 
     try {
       const identity = {
-        normalizedEmail,
+        email,
         slug: normalizedSlug,
-        inboxIdentifier: normalizedSlug,
+        accountIdentifier: normalizedSlug,
       };
       const keyPair = await getOrCreateAgentKeyPair(identity);
       await Promise.resolve(
-        createInboxIdentityReducer({
+        createAgentReducer({
           slug: normalizedSlug,
           displayName: newDisplayName.trim() || undefined,
           encryptionPublicKey: keyPair.encryption.publicKey,
-          encryptionKeyVersion: keyPair.encryption.keyVersion,
-          encryptionAlgorithm: keyPair.encryption.algorithm,
+          keyBundleVersion: keyPair.encryption.keyVersion,
+          encryptionAlgorithm: { tag: 'EcdhP256V1' },
           signingPublicKey: keyPair.signing.publicKey,
-          signingKeyVersion: keyPair.signing.keyVersion,
-          signingAlgorithm: keyPair.signing.algorithm,
+          signingAlgorithm: { tag: 'EcdsaP256Sha256V1' },
         })
       );
       queueKeyBackupPrompt({
-        normalizedEmail,
+        email,
         slug: normalizedSlug,
         reason: 'created',
       });
@@ -472,9 +504,9 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
     try {
       if (!selectedOwnedAgent.publicLinkedEmailEnabled) {
         await Promise.resolve(
-          setAgentPublicLinkedEmailVisibilityReducer({
+          updateAgentLinkedEmailVisibility({
             agentDbId: selectedOwnedAgent.id,
-            enabled: true,
+            publicLinkedEmailEnabled: true,
           })
         );
       }
@@ -482,7 +514,7 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
         session,
         actor: selectedOwnedAgent,
         persistRegistration: async payload => {
-          await Promise.resolve(upsertMasumiInboxAgentRegistrationReducer(payload));
+          await Promise.resolve(upsertMasumiRegistrationReducer(payload));
         },
       });
       setManagedAgentRegistration(result.registration);
@@ -536,7 +568,7 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
         session,
         actor: selectedOwnedAgent,
         persistRegistration: async payload => {
-          await Promise.resolve(upsertMasumiInboxAgentRegistrationReducer(payload));
+          await Promise.resolve(upsertMasumiRegistrationReducer(payload));
         },
       });
       setManagedAgentRegistration(result.registration);
@@ -578,9 +610,9 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
 
     try {
       await Promise.resolve(
-        setAgentPublicLinkedEmailVisibilityReducer({
+        updateAgentLinkedEmailVisibility({
           agentDbId: selectedOwnedAgent.id,
-          enabled,
+          publicLinkedEmailEnabled: enabled,
         })
       );
       setFeedback(
@@ -615,9 +647,9 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
     try {
       const normalizedDescription = publicDescriptionDraft.trim();
       await Promise.resolve(
-        setAgentPublicDescriptionReducer({
+        updateAgentPublicDescription({
           agentDbId: selectedOwnedAgent.id,
-          description: normalizedDescription || undefined,
+          publicDescription: normalizedDescription,
         })
       );
       setFeedback(
@@ -657,18 +689,18 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
     try {
       const currentCapabilities = getActorPublishedCapabilities(selectedOwnedAgent);
       await Promise.resolve(
-        setAgentPublicMessageCapabilitiesReducer({
+        updateAgentPublicMessageCapabilities({
           agentDbId: selectedOwnedAgent.id,
-          allowAllContentTypes:
+          allowAllMessageContentTypes:
             inferAllowAllFromSelection(params.supportedContentTypes)
               ? true
               : (params.allowAllContentTypes ?? currentCapabilities.allowAllContentTypes),
-          allowAllHeaders:
+          allowAllMessageHeaders:
             inferAllowAllFromSelection(params.supportedHeaders)
               ? true
               : (params.allowAllHeaders ?? currentCapabilities.allowAllHeaders),
-          supportedContentTypes: params.supportedContentTypes,
-          supportedHeaders: params.supportedHeaders,
+          supportedMessageContentTypes: params.supportedContentTypes,
+          supportedMessageHeaderNames: params.supportedHeaders,
         })
       );
       setFeedback('Public message capabilities updated.');

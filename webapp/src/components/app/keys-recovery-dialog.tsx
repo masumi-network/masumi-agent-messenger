@@ -62,7 +62,7 @@ export function KeysRecoveryDialog({
   open,
   onOpenChange,
   mode,
-  normalizedEmail,
+  email,
   defaultKeyIssue,
   vaultUnlocked,
   deviceShareBusy,
@@ -83,7 +83,7 @@ export function KeysRecoveryDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   mode: DashboardModal;
-  normalizedEmail: string;
+  email: string;
   defaultKeyIssue: DefaultKeyIssue;
   vaultUnlocked: boolean;
   deviceShareBusy: boolean;
@@ -121,7 +121,7 @@ export function KeysRecoveryDialog({
         <KeysRecoveryContent
           open={open}
           mode={mode}
-          normalizedEmail={normalizedEmail}
+          email={email}
           defaultKeyIssue={defaultKeyIssue}
           vaultUnlocked={vaultUnlocked}
           deviceShareBusy={deviceShareBusy}
@@ -147,7 +147,7 @@ export function KeysRecoveryDialog({
 export function KeysRecoveryContent({
   open,
   mode,
-  normalizedEmail,
+  email,
   defaultKeyIssue,
   vaultUnlocked,
   deviceShareBusy,
@@ -167,7 +167,7 @@ export function KeysRecoveryContent({
 }: {
   open?: boolean;
   mode: DashboardModal;
-  normalizedEmail: string;
+  email: string;
   defaultKeyIssue: DefaultKeyIssue;
   vaultUnlocked: boolean;
   deviceShareBusy: boolean;
@@ -258,15 +258,15 @@ export function KeysRecoveryContent({
     return `${minutes.toString()}:${seconds.toString().padStart(2, '0')}`;
   }, [nowMs, pendingDeviceRequest]);
   const approvedDeviceCount = useMemo(
-    () => devices.filter(device => device.status === 'approved').length,
+    () => devices.filter(device => device.status.tag === 'Approved').length,
     [devices]
   );
   const pendingDeviceCount = useMemo(
-    () => devices.filter(device => device.status === 'pending').length,
+    () => devices.filter(device => device.status.tag === 'Pending').length,
     [devices]
   );
   const revokedDeviceCount = useMemo(
-    () => devices.filter(device => device.status === 'revoked').length,
+    () => devices.filter(device => device.status.tag === 'Revoked').length,
     [devices]
   );
   const topDeviceLabels = useMemo(() => {
@@ -287,7 +287,7 @@ export function KeysRecoveryContent({
   if (mode === 'backups') {
     return (
       <KeyBackupPanel
-        normalizedEmail={normalizedEmail}
+        email={email}
         disabled={!vaultUnlocked}
         onImportSuccess={onImportSuccess}
         onExportSuccess={onExportSuccess}
@@ -467,7 +467,7 @@ export function KeysRecoveryContent({
             </p>
           </div>
           <KeyBackupPanel
-            normalizedEmail={normalizedEmail}
+            email={email}
             disabled={!vaultUnlocked}
             showExport={false}
             onImportSuccess={onImportSuccess}
@@ -501,7 +501,7 @@ export function KeysRecoveryContent({
                     <p className="truncate text-sm font-medium">
                       {device.label?.trim() || device.deviceId}
                     </p>
-                    <Badge variant="outline">{device.status}</Badge>
+                    <Badge variant="outline">{device.status.tag}</Badge>
                   </div>
                   <p className="truncate text-sm text-muted-foreground">
                     {device.platform ?? 'unknown platform'}
@@ -511,7 +511,7 @@ export function KeysRecoveryContent({
                   size="sm"
                   variant="outline"
                   onClick={() => void onRevokeDevice(device.deviceId)}
-                  disabled={deviceShareBusy || device.status === 'revoked'}
+                  disabled={deviceShareBusy || device.status.tag === 'Revoked'}
                 >
                   <ShieldSlash className="h-4 w-4" />
                   Revoke

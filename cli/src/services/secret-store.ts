@@ -4,10 +4,14 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { lock as acquireLock } from 'proper-lockfile';
-import type { AgentKeyPair } from '../../../shared/agent-crypto';
-import type {
-  DeviceKeyPair,
-  SharedActorKeyMaterial,
+import {
+  normalizeAgentKeyPairVersions,
+  type AgentKeyPair,
+} from '../../../shared/agent-crypto';
+import {
+  normalizeDeviceKeyPairVersion,
+  type DeviceKeyPair,
+  type SharedActorKeyMaterial,
 } from '../../../shared/device-sharing';
 import { resolveConfigDirectory } from './config-store';
 import type { StoredOidcSession } from './oidc';
@@ -520,9 +524,32 @@ export type DeviceKeyMaterial = {
 
 export type NamespaceKeyVault = {
   version: 1;
-  normalizedEmail: string;
+  email: string;
   actors: SharedActorKeyMaterial[];
 };
+
+function normalizeDeviceKeyMaterial(material: DeviceKeyMaterial): DeviceKeyMaterial {
+  return {
+    deviceId: material.deviceId,
+    keyPair: normalizeDeviceKeyPairVersion(material.keyPair),
+  };
+}
+
+function normalizeSharedActorKeyMaterial(actor: SharedActorKeyMaterial): SharedActorKeyMaterial {
+  return {
+    identity: actor.identity,
+    current: actor.current ? normalizeAgentKeyPairVersions(actor.current) : null,
+    archived: actor.archived.map(pair => normalizeAgentKeyPairVersions(pair)),
+  };
+}
+
+function normalizeNamespaceKeyVault(vault: NamespaceKeyVault): NamespaceKeyVault {
+  return {
+    version: vault.version,
+    email: vault.email,
+    actors: vault.actors.map(actor => normalizeSharedActorKeyMaterial(actor)),
+  };
+}
 
 function accountKey(profileName: string, kind: SecretKind): string {
   return `${profileName}:${kind}`;
@@ -622,10 +649,13 @@ export function createSecretStore(backend: KeychainBackend = createDefaultBacken
     async getAgentKeyPair(profileName: string): Promise<AgentKeyPair | null> {
       const secret = await backend.get(accountKey(profileName, 'agent-keypair'));
       if (!secret) return null;
-      return JSON.parse(secret) as AgentKeyPair;
+      return normalizeAgentKeyPairVersions(JSON.parse(secret) as AgentKeyPair);
     },
     async setAgentKeyPair(profileName: string, keyPair: AgentKeyPair): Promise<void> {
-      await backend.set(accountKey(profileName, 'agent-keypair'), JSON.stringify(keyPair));
+      await backend.set(
+        accountKey(profileName, 'agent-keypair'),
+        JSON.stringify(normalizeAgentKeyPairVersions(keyPair))
+      );
     },
     async deleteAgentKeyPair(profileName: string): Promise<boolean> {
       return backend.delete(accountKey(profileName, 'agent-keypair'));
@@ -633,10 +663,13 @@ export function createSecretStore(backend: KeychainBackend = createDefaultBacken
     async getDeviceKeyMaterial(profileName: string): Promise<DeviceKeyMaterial | null> {
       const secret = await backend.get(accountKey(profileName, 'device-keypair'));
       if (!secret) return null;
-      return JSON.parse(secret) as DeviceKeyMaterial;
+      return normalizeDeviceKeyMaterial(JSON.parse(secret) as DeviceKeyMaterial);
     },
     async setDeviceKeyMaterial(profileName: string, material: DeviceKeyMaterial): Promise<void> {
-      await backend.set(accountKey(profileName, 'device-keypair'), JSON.stringify(material));
+      await backend.set(
+        accountKey(profileName, 'device-keypair'),
+        JSON.stringify(normalizeDeviceKeyMaterial(material))
+      );
     },
     async deleteDeviceKeyMaterial(profileName: string): Promise<boolean> {
       return backend.delete(accountKey(profileName, 'device-keypair'));
@@ -644,10 +677,13 @@ export function createSecretStore(backend: KeychainBackend = createDefaultBacken
     async getNamespaceKeyVault(profileName: string): Promise<NamespaceKeyVault | null> {
       const secret = await backend.get(accountKey(profileName, 'namespace-key-vault'));
       if (!secret) return null;
-      return JSON.parse(secret) as NamespaceKeyVault;
+      return normalizeNamespaceKeyVault(JSON.parse(secret) as NamespaceKeyVault);
     },
     async setNamespaceKeyVault(profileName: string, vault: NamespaceKeyVault): Promise<void> {
-      await backend.set(accountKey(profileName, 'namespace-key-vault'), JSON.stringify(vault));
+      await backend.set(
+        accountKey(profileName, 'namespace-key-vault'),
+        JSON.stringify(normalizeNamespaceKeyVault(vault))
+      );
     },
     async deleteNamespaceKeyVault(profileName: string): Promise<boolean> {
       return backend.delete(accountKey(profileName, 'namespace-key-vault'));

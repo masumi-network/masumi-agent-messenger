@@ -21,16 +21,16 @@ describe('app shell helpers', () => {
     const ownedActors = [
       {
         id: 1n,
-        inboxId: 10n,
-        normalizedEmail: 'owner@example.com',
+        accountId: 10n,
+        email: 'owner@example.com',
         slug: 'alpha',
         isDefault: true,
         publicIdentity: 'did:alpha',
       },
       {
         id: 2n,
-        inboxId: 10n,
-        normalizedEmail: 'owner@example.com',
+        accountId: 10n,
+        email: 'owner@example.com',
         slug: 'beta',
         isDefault: false,
         publicIdentity: 'did:beta',
@@ -43,8 +43,7 @@ describe('app shell helpers', () => {
         requesterSlug: 'remote-a',
         targetAgentDbId: 1n,
         targetSlug: 'alpha',
-        direction: 'incoming',
-        status: 'pending',
+        status: { tag: 'Pending' },
         updatedAt: { microsSinceUnixEpoch: 40n },
       },
       {
@@ -53,8 +52,7 @@ describe('app shell helpers', () => {
         requesterSlug: 'beta',
         targetAgentDbId: 88n,
         targetSlug: 'remote-b',
-        direction: 'outgoing',
-        status: 'pending',
+        status: { tag: 'Pending' },
         updatedAt: { microsSinceUnixEpoch: 30n },
       },
       {
@@ -63,8 +61,7 @@ describe('app shell helpers', () => {
         requesterSlug: 'remote-c',
         targetAgentDbId: 2n,
         targetSlug: 'beta',
-        direction: 'incoming',
-        status: 'rejected',
+        status: { tag: 'Rejected' },
         updatedAt: { microsSinceUnixEpoch: 20n },
       },
     ];
@@ -93,19 +90,15 @@ describe('app shell helpers', () => {
         {
           id: 20n,
           inviterAgentDbId: 77n,
-          inviterSlug: 'remote-a',
           inviteeAgentDbId: 1n,
-          inviteeSlug: 'alpha',
-          status: 'pending',
+          status: { tag: 'Pending' },
           updatedAt: { microsSinceUnixEpoch: 50n },
         },
         {
           id: 21n,
           inviterAgentDbId: 2n,
-          inviterSlug: 'beta',
           inviteeAgentDbId: 88n,
-          inviteeSlug: 'remote-b',
-          status: 'pending',
+          status: { tag: 'Pending' },
           updatedAt: { microsSinceUnixEpoch: 40n },
         },
       ],
@@ -154,43 +147,43 @@ describe('app shell helpers', () => {
         {
           channelId: 10n,
           agentDbId: 1n,
-          permission: 'read_write',
+          permission: { tag: 'ReadWrite' },
           active: true,
         },
         {
           channelId: 10n,
           agentDbId: 2n,
-          permission: 'admin',
+          permission: { tag: 'Admin' },
           active: true,
         },
         {
           channelId: 11n,
           agentDbId: 1n,
-          permission: 'read',
+          permission: { tag: 'Read' },
           active: true,
         },
         {
           channelId: 12n,
           agentDbId: 99n,
-          permission: 'admin',
+          permission: { tag: 'Admin' },
           active: true,
         },
       ],
       joinRequests: [
         {
           channelId: 10n,
-          direction: 'incoming',
-          status: 'pending',
+          requesterAgentDbId: 88n,
+          status: { tag: 'Pending' },
         },
         {
           channelId: 10n,
-          direction: 'incoming',
-          status: 'approved',
+          requesterAgentDbId: 89n,
+          status: { tag: 'Approved' },
         },
         {
           channelId: 11n,
-          direction: 'incoming',
-          status: 'pending',
+          requesterAgentDbId: 88n,
+          status: { tag: 'Pending' },
         },
       ],
       ownedActorIds: new Set([1n, 2n]),
@@ -201,7 +194,7 @@ describe('app shell helpers', () => {
         channelId: 10n,
         slug: 'release-room',
         title: 'Release room',
-        permission: 'admin',
+        permission: { tag: 'Admin' },
         isAdmin: true,
         pendingApprovals: 1,
       },
@@ -209,7 +202,7 @@ describe('app shell helpers', () => {
         channelId: 11n,
         slug: 'incident-feed',
         title: null,
-        permission: 'read',
+        permission: { tag: 'Read' },
         isAdmin: false,
         pendingApprovals: 0,
       },
@@ -244,16 +237,16 @@ describe('app shell helpers', () => {
       actors: [
         {
           id: 3n,
-          inboxId: 10n,
-          normalizedEmail: 'owner@example.com',
+          accountId: 10n,
+          email: 'owner@example.com',
           slug: 'custom',
           isDefault: false,
           publicIdentity: 'did:custom',
         },
         {
           id: 1n,
-          inboxId: 10n,
-          normalizedEmail: 'owner@example.com',
+          accountId: 10n,
+          email: 'owner@example.com',
           slug: 'default',
           isDefault: true,
           publicIdentity: 'did:default',
@@ -263,7 +256,7 @@ describe('app shell helpers', () => {
         },
       ],
       ownInboxId: 10n,
-      normalizedEmail: 'owner@example.com',
+      email: 'owner@example.com',
     });
 
     expect(ownedEntries.map(entry => entry.actor.slug)).toEqual(['default', 'custom']);
@@ -279,8 +272,8 @@ describe('app shell helpers', () => {
       actors: [
         {
           id: 1n,
-          inboxId: 10n,
-          normalizedEmail: 'owner@example.com',
+          accountId: 10n,
+          email: 'owner@example.com',
           slug: 'pending',
           isDefault: true,
           publicIdentity: 'did:pending',
@@ -290,7 +283,7 @@ describe('app shell helpers', () => {
         },
       ],
       ownInboxId: 10n,
-      normalizedEmail: 'owner@example.com',
+      email: 'owner@example.com',
     });
 
     expect(ownedEntries[0]?.managed).toBe(true);
@@ -303,8 +296,8 @@ describe('app shell helpers', () => {
       actors: [
         {
           id: 1n,
-          inboxId: 10n,
-          normalizedEmail: 'owner@example.com',
+          accountId: 10n,
+          email: 'owner@example.com',
           slug: 'old-agent',
           isDefault: true,
           publicIdentity: 'did:old',
@@ -314,15 +307,15 @@ describe('app shell helpers', () => {
         },
         {
           id: 2n,
-          inboxId: 10n,
-          normalizedEmail: 'owner@example.com',
+          accountId: 10n,
+          email: 'owner@example.com',
           slug: 'current-agent',
           isDefault: false,
           publicIdentity: 'did:current',
         },
       ],
       ownInboxId: 10n,
-      normalizedEmail: 'owner@example.com',
+      email: 'owner@example.com',
     });
 
     expect(ownedEntries.map(entry => entry.actor.slug)).toEqual([
@@ -336,7 +329,7 @@ describe('app shell helpers', () => {
       inboxes: [
         {
           id: 10n,
-          normalizedEmail: 'owner@example.com',
+          email: 'owner@example.com',
           authIssuer: 'https://issuer.example',
           authSubject: 'current-subject',
         },
@@ -362,8 +355,8 @@ describe('app shell helpers', () => {
       actors: [
         {
           id: 1n,
-          inboxId: 10n,
-          normalizedEmail: 'owner@example.com',
+          accountId: 10n,
+          email: 'owner@example.com',
           slug: 'leaving-agent',
           isDefault: true,
           publicIdentity: 'did:leaving',
@@ -373,15 +366,15 @@ describe('app shell helpers', () => {
         },
         {
           id: 2n,
-          inboxId: 10n,
-          normalizedEmail: 'owner@example.com',
+          accountId: 10n,
+          email: 'owner@example.com',
           slug: 'current-agent',
           isDefault: false,
           publicIdentity: 'did:current',
         },
       ],
       ownInboxId: 10n,
-      normalizedEmail: 'owner@example.com',
+      email: 'owner@example.com',
     });
 
     expect(ownedEntries[0]?.deregistered).toBe(true);
@@ -437,13 +430,13 @@ describe('app shell helpers', () => {
       inboxes: [
         {
           id: 1n,
-          normalizedEmail: 'owner@example.com',
+          email: 'owner@example.com',
           authIssuer: 'https://issuer.example',
           authSubject: 'legacy-subject',
         },
         {
           id: 2n,
-          normalizedEmail: 'owner@example.com',
+          email: 'owner@example.com',
           authIssuer: 'https://issuer.example',
           authSubject: 'current-subject',
         },
@@ -451,24 +444,24 @@ describe('app shell helpers', () => {
       actors: [
         {
           id: 10n,
-          inboxId: 1n,
-          normalizedEmail: 'owner@example.com',
+          accountId: 1n,
+          email: 'owner@example.com',
           slug: 'legacy',
           isDefault: true,
           publicIdentity: 'did:legacy',
         },
         {
           id: 20n,
-          inboxId: 2n,
-          normalizedEmail: 'owner@example.com',
+          accountId: 2n,
+          email: 'owner@example.com',
           slug: 'home',
           isDefault: true,
           publicIdentity: 'did:home',
         },
         {
           id: 21n,
-          inboxId: 2n,
-          normalizedEmail: 'owner@example.com',
+          accountId: 2n,
+          email: 'owner@example.com',
           slug: 'project',
           isDefault: false,
           publicIdentity: 'did:project',
@@ -481,8 +474,7 @@ describe('app shell helpers', () => {
           requesterSlug: 'remote-a',
           targetAgentDbId: 21n,
           targetSlug: 'project',
-          direction: 'incoming',
-          status: 'pending',
+          status: { tag: 'Pending' },
           updatedAt: { microsSinceUnixEpoch: 30n },
         },
         {
@@ -491,8 +483,7 @@ describe('app shell helpers', () => {
           requesterSlug: 'project',
           targetAgentDbId: 8n,
           targetSlug: 'remote-b',
-          direction: 'outgoing',
-          status: 'pending',
+          status: { tag: 'Pending' },
           updatedAt: { microsSinceUnixEpoch: 20n },
         },
       ],
@@ -506,7 +497,7 @@ describe('app shell helpers', () => {
       selectedSlug: 'project',
     });
 
-    expect(snapshot.normalizedEmail).toBe('owner@example.com');
+    expect(snapshot.email).toBe('owner@example.com');
     expect(snapshot.ownedInbox?.id).toBe(2n);
     expect(snapshot.existingDefaultActor?.slug).toBe('home');
     expect(snapshot.selectedActor?.slug).toBe('project');
@@ -522,7 +513,7 @@ describe('app shell helpers', () => {
   it('enforces write access using email, issuer, subject, and connection identity', () => {
     const inbox = {
       id: 2n,
-      normalizedEmail: 'owner@example.com',
+      email: 'owner@example.com',
       authIssuer: 'https://issuer.example',
       authSubject: 'current-subject',
       ownerIdentity: {

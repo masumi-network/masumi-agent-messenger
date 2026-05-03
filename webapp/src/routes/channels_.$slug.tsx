@@ -62,7 +62,12 @@ import {
   usePublicChannelMessagesLookup,
 } from '@/lib/public-channel';
 import { buildRouteHead } from '@/lib/seo';
-import { useLiveTable, usePublicLiveTable } from '@/lib/spacetime-live-table';
+import { useLiveTable } from '@/lib/spacetime-live-table';
+import {
+  readAllOwnedAgents,
+  readPendingChannelJoinRequests,
+} from '@/lib/spacetime-procedure-reads';
+import { useProcedureSnapshot } from '@/lib/spacetime-procedure-snapshot';
 import { formatTimestamp } from '@/lib/thread-format';
 import { cn } from '@/lib/utils';
 import {
@@ -74,19 +79,18 @@ import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell'
 import { DbConnection, reducers, tables } from '@/module_bindings';
 import type {
   Agent,
-  ChannelMemberListRow,
-  ChannelMessageRow,
-  PublicChannelMirrorRow,
-  PublicRecentChannelMessage,
-  VisibleChannelJoinRequestRow,
-  VisibleChannelMembershipRow,
-  VisibleChannelRow,
+  AccountChangeSignal,
+  ChannelMessage as ChannelMessageRow,
+  ChannelJoinRequest,
+  ChannelMember,
+  Channel,
 } from '@/module_bindings/types';
 import {
   prepareChannelMessage,
   verifySignedChannelMessage,
   type ChannelMessageSignatureInput,
 } from '../../../shared/channel-crypto';
+import { fromHex, toHex } from '../../../shared/crypto-utils';
 import { randomSenderMessageId } from '../../../shared/agent-crypto';
 import { normalizeEmail } from '../../../shared/inbox-slug';
 import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
@@ -99,8 +103,8 @@ import {
 const MAX_CHANNEL_MESSAGE_CHARS = 10_000;
 const SCROLL_LOAD_THRESHOLD_PX = 80;
 const PUBLIC_CHANNEL_RECENT_PAGE_SIZE = 25n;
-const CHANNEL_HISTORY_PAGE_SIZE = 10n;
-const CHANNEL_MEMBER_PAGE_SIZE = 10n;
+const CHANNEL_HISTORY_PAGE_SIZE = 10;
+const CHANNEL_MEMBER_PAGE_SIZE = 10;
 
 export const Route = createFileRoute('/channels_/$slug')({
   head: ({ params }) =>
@@ -130,15 +134,13 @@ type ChannelPageDetails = {
   title?: string;
   description?: string;
   accessMode: ChannelAccessMode;
-  publicJoinPermission: PublicJoinPermission;
   discoverable: boolean;
-  lastMessageSeq: bigint;
+  lastMessageId: bigint;
 };
 
 type ChannelAccessMode = 'public' | 'approval_required';
-type PublicJoinPermission = 'read' | 'read_write';
 
-type CombinedChannelMessage = ChannelMessageRow | PublicRecentChannelMessage;
+type CombinedChannelMessage = ChannelMessageRow;
 
 function compareBigint(left: bigint, right: bigint): number {
   if (left < right) return -1;
@@ -146,49 +148,41 @@ function compareBigint(left: bigint, right: bigint): number {
   return 0;
 }
 
-function channelPermissionRank(permission: string): number {
-  if (permission === 'admin') return 3;
-  if (permission === 'read_write') return 2;
-  if (permission === 'read') return 1;
+function channelPermissionRank(permission: { tag: string }): number {
+  if (permission.tag === 'Admin') return 3;
+  if (permission.tag === 'ReadWrite') return 2;
+  if (permission.tag === 'Read') return 1;
   return 0;
 }
 
-function describePermission(permission: string): string {
-  if (permission === 'admin') return 'Admin';
-  if (permission === 'read_write') return 'Write';
-  if (permission === 'read') return 'Read only';
-  return permission;
+function describePermission(permission: { tag: string }): string {
+  if (permission.tag === 'Admin') return 'Admin';
+  if (permission.tag === 'ReadWrite') return 'Write';
+  if (permission.tag === 'Read') return 'Read only';
+  return permission.tag;
 }
 
-function describePublicJoinPermission(permission: string): string {
-  if (permission === 'read_write') return 'Join grants write access';
-  return 'Join grants read-only access';
+function describeAccessMode(accessMode: { tag: string } | string): string {
+  const tag = typeof accessMode === 'string' ? accessMode : accessMode.tag;
+  if (tag === 'Public' || tag === 'public') return 'Public';
+  if (tag === 'ApprovalRequired' || tag === 'approval_required') return 'Approval required';
+  return tag;
 }
 
-function describeAccessMode(accessMode: string): string {
-  if (accessMode === 'public') return 'Public';
-  if (accessMode === 'approval_required') return 'Approval required';
-  return accessMode;
+function normalizeAccessMode(accessMode: { tag: string } | string): ChannelAccessMode {
+  const tag = typeof accessMode === 'string' ? accessMode : accessMode.tag;
+  return tag === 'ApprovalRequired' || tag === 'approval_required' ? 'approval_required' : 'public';
 }
 
-function normalizeAccessMode(accessMode: string): ChannelAccessMode {
-  return accessMode === 'approval_required' ? 'approval_required' : 'public';
-}
-
-function normalizePublicJoinPermission(permission: string | null | undefined): PublicJoinPermission {
-  return permission === 'read_write' ? 'read_write' : 'read';
-}
-
-function toPublicChannelDetails(channel: PublicChannelMirrorRow): ChannelPageDetails {
+function toPublicChannelDetails(channel: Channel): ChannelPageDetails {
   return {
-    channelId: channel.channelId,
+    channelId: channel.id,
     slug: channel.slug,
     title: channel.title,
     description: channel.description,
     accessMode: normalizeAccessMode(channel.accessMode),
-    publicJoinPermission: normalizePublicJoinPermission(channel.publicJoinPermission),
     discoverable: channel.discoverable,
-    lastMessageSeq: channel.lastMessageSeq,
+    lastMessageId: channel.lastMessageId,
   };
 }
 
@@ -196,18 +190,18 @@ function pickPreferredChannelActor(params: {
   actors: Agent[];
   normalizedSessionEmail: string;
   channelId: bigint;
-  memberships: VisibleChannelMembershipRow[];
-  joinRequests: VisibleChannelJoinRequestRow[];
+  memberships: ChannelMember[];
+  joinRequests: ChannelJoinRequest[];
 }): Agent | null {
   const defaultActor =
     params.actors.find(
-      actor => actor.isDefault && actor.normalizedEmail === params.normalizedSessionEmail
+      actor => actor.isDefault && actor.email === params.normalizedSessionEmail
     ) ?? null;
   const ownedActors = defaultActor
-    ? params.actors.filter(actor => actor.inboxId === defaultActor.inboxId)
-    : params.actors.filter(actor => actor.normalizedEmail === params.normalizedSessionEmail);
+    ? params.actors.filter(actor => actor.accountId === defaultActor.accountId)
+    : params.actors.filter(actor => actor.email === params.normalizedSessionEmail);
   const usableOwnedActors = ownedActors.filter(
-    actor => !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+    actor => !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState?.tag)
   );
   const ownedActorsById = new Map(usableOwnedActors.map(actor => [actor.id, actor]));
 
@@ -235,8 +229,7 @@ function pickPreferredChannelActor(params: {
     .filter(
       request =>
         request.channelId === params.channelId &&
-        request.direction === 'outgoing' &&
-        request.status === 'pending' &&
+        request.status.tag === 'Pending' &&
         ownedActorsById.has(request.requesterAgentDbId)
     )
     .sort((left, right) => {
@@ -251,7 +244,7 @@ function pickPreferredChannelActor(params: {
 
   return (
     (defaultActor &&
-      !isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState)
+      !isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState?.tag)
       ? defaultActor
       : null) ??
     usableOwnedActors[0] ??
@@ -262,16 +255,14 @@ function pickPreferredChannelActor(params: {
 function toSignatureInput(message: {
   channelId: bigint;
   senderPublicIdentity: string;
-  senderSeq: bigint;
-  senderMessageId?: bigint;
-  senderSigningKeyVersion: string;
+  senderMessageId: bigint;
+  senderSigningKeyVersion: number;
   plaintext: string;
   replyToMessageId?: bigint | null;
 }): ChannelMessageSignatureInput {
   return {
     channelId: message.channelId,
     senderPublicIdentity: message.senderPublicIdentity,
-    senderSeq: message.senderSeq,
     senderMessageId: message.senderMessageId,
     senderSigningKeyVersion: message.senderSigningKeyVersion,
     plaintext: message.plaintext,
@@ -279,8 +270,8 @@ function toSignatureInput(message: {
   };
 }
 
-function channelMessageKey(message: { channelId: bigint; channelSeq: bigint }): string {
-  return `${message.channelId.toString()}:${message.channelSeq.toString()}`;
+function channelMessageKey(message: { id: bigint; channelId: bigint }): string {
+  return `${message.channelId.toString()}:${message.id.toString()}`;
 }
 
 function mergeChannelMessageRows(
@@ -307,7 +298,7 @@ function toDecryptDomainMessage(error: unknown): string {
     return 'This message could not be verified as coming from the claimed sender.';
   }
   if (text.includes('private key') || text.includes('key pair') || text.includes('published agent keys')) {
-    return 'Your local keys are missing or out of sync. Restore or rotate keys before reading this channel.';
+    return 'Your local keys are missing or out of sync. Restore or reset keys before reading this channel.';
   }
   if (text.includes('sign in') || text.includes('channel member')) {
     return 'Sign in as a channel member to read this message.';
@@ -318,8 +309,7 @@ function toDecryptDomainMessage(error: unknown): string {
 function isRetryableChannelSendError(error: unknown): boolean {
   return (
     error instanceof Error &&
-    (error.message.includes('senderSigningKeyVersion must match') ||
-      error.message.includes('senderSeq must be'))
+    error.message.includes('senderSigningKeyVersion must match')
   );
 }
 
@@ -370,17 +360,12 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
     [publicChannel]
   );
   const channelId = channel?.channelId ?? 0n;
-  const messageQuery = useMemo(
-    () => tables.publicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
-    [channelId]
-  );
-  const [liveMessages, liveMessagesReady] = usePublicLiveTable<PublicRecentChannelMessage>(
-    messageQuery,
-    'publicRecentChannelMessages',
-    { enabled: channel !== null }
-  );
+  // The new schema dropped the public mirror table — anonymous viewers rely
+  // on the paginated lookup procedure instead of a live subscription.
+  const liveMessages = useMemo<ChannelMessageRow[]>(() => [], []);
+  const liveMessagesReady = true;
   const [messages, messagesReady, messagesError, reloadMessages] = usePublicChannelMessagesLookup({
-    channelId,
+    channelSlug: slug,
     enabled: channel !== null,
     limit: PUBLIC_CHANNEL_RECENT_PAGE_SIZE,
   });
@@ -388,7 +373,7 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
   const connectionState = useSpacetimeDB();
   const connection = connectionState.getConnection?.() as DbConnection | null;
   const liveMessagesRefreshKey = useMemo(
-    () => liveMessages.map(message => `${message.id.toString()}:${message.channelSeq.toString()}`).join('|'),
+    () => liveMessages.map(message => `${message.id.toString()}:${message.id.toString()}`).join('|'),
     [liveMessages]
   );
 
@@ -397,8 +382,8 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
       [...messages]
         .filter(message => message.channelId === channelId)
         .sort((left, right) => {
-          if (left.channelSeq < right.channelSeq) return -1;
-          if (left.channelSeq > right.channelSeq) return 1;
+          if (left.id < right.id) return -1;
+          if (left.id > right.id) return 1;
           return Number(left.id - right.id);
         }),
     [channelId, messages]
@@ -445,7 +430,7 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
 
             const verified = await verifySignedChannelMessage({
               input: toSignatureInput(message),
-              signature: message.signature,
+              signature: toHex(message.signature),
               senderSigningPublicKey,
             });
             const normalized = normalizeEncryptedMessagePayload(verified.payload);
@@ -563,7 +548,7 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
                   </Badge>
                   {channel.accessMode === 'public' ? (
                     <Badge variant="outline">
-                      {describePublicJoinPermission(channel.publicJoinPermission)}
+                      {'See channel access mode'}
                     </Badge>
                   ) : null}
                 </div>
@@ -687,26 +672,32 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const removeChannelMemberReducer = useReducer(reducers.removeChannelMember);
   const sendChannelMessageReducer = useReducer(reducers.sendChannelMessage);
   const requestChannelJoinReducer = useReducer(reducers.requestChannelJoin);
-  const setChannelMemberPermissionReducer = useReducer(reducers.setChannelMemberPermission);
+  const updateChannelMemberPermissionReducer = useReducer(reducers.updateChannelMemberPermission);
   const updateChannelSettingsReducer = useReducer(reducers.updateChannelSettings);
   const [publicChannel, channelsReady, channelsError] = usePublicChannelLookup({
     channelSlug: slug,
   });
   const visibleChannelQuery = useMemo(
-    () => tables.visibleChannels.where(row => row.slug.eq(slug)),
+    () => tables.visible_channels.where(row => row.slug.eq(slug)),
     [slug]
   );
-  const [visibleChannels, visibleChannelsReady, visibleChannelsError] = useLiveTable<VisibleChannelRow>(
+  const [visible_channels, visible_channelsReady, visible_channelsError] = useLiveTable<Channel>(
     visibleChannelQuery,
-    'visibleChannels'
+    'visible_channels'
   );
-  const [actors, actorsReady, actorsError] = useLiveTable<Agent>(
-    tables.visibleAgents,
-    'visibleAgents'
+  const [accountSignals] = useLiveTable<AccountChangeSignal>(
+    tables.visible_account_change_signal,
+    'visible_account_change_signal'
   );
+  const accountSignal = accountSignals[0] ?? null;
+  const [actors, actorsReady, actorsError] =
+    useProcedureSnapshot<Agent>(
+      readAllOwnedAgents,
+      accountSignal?.ownedAgentsVersion.toString() ?? null
+    );
   const visibleChannel = useMemo(
-    () => visibleChannels.find(row => row.slug === slug) ?? null,
-    [slug, visibleChannels]
+    () => visible_channels.find(row => row.slug === slug) ?? null,
+    [slug, visible_channels]
   );
   const channel = useMemo<ChannelPageDetails | null>(() => {
     if (visibleChannel) {
@@ -716,62 +707,58 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         title: visibleChannel.title,
         description: visibleChannel.description,
         accessMode: normalizeAccessMode(visibleChannel.accessMode),
-        publicJoinPermission: normalizePublicJoinPermission(visibleChannel.publicJoinPermission),
         discoverable: visibleChannel.discoverable,
-        lastMessageSeq: visibleChannel.lastMessageSeq,
+        lastMessageId: visibleChannel.lastMessageId,
       };
     }
     if (publicChannel) {
       return {
-        channelId: publicChannel.channelId,
+        channelId: publicChannel.id,
         slug: publicChannel.slug,
         title: publicChannel.title,
         description: publicChannel.description,
         accessMode: normalizeAccessMode(publicChannel.accessMode),
-        publicJoinPermission: normalizePublicJoinPermission(publicChannel.publicJoinPermission),
         discoverable: publicChannel.discoverable,
-        lastMessageSeq: publicChannel.lastMessageSeq,
+        lastMessageId: publicChannel.lastMessageId,
       };
     }
     return null;
   }, [publicChannel, visibleChannel]);
   const channelId = channel?.channelId ?? 0n;
   const membershipQuery = useMemo(
-    () => tables.visibleChannelMemberships.where(row => row.channelId.eq(channelId)),
+    () => tables.visible_channel_memberships.where(row => row.channelId.eq(channelId)),
     [channelId]
   );
-  const [memberships, membershipsReady, membershipsError] = useLiveTable<VisibleChannelMembershipRow>(
+  const [memberships, membershipsReady, membershipsError] = useLiveTable<ChannelMember>(
     membershipQuery,
-    'visibleChannelMemberships',
+    'visible_channel_memberships',
     { enabled: channel !== null }
   );
-  const joinRequestQuery = useMemo(
-    () => tables.visibleChannelJoinRequests.where(row => row.channelId.eq(channelId)),
-    [channelId]
+  const [allJoinRequests, joinRequestsReady, joinRequestsError] =
+    useProcedureSnapshot<ChannelJoinRequest>(
+      readPendingChannelJoinRequests,
+      accountSignal?.channelJoinRequestsVersion.toString() ?? null
+    );
+  const joinRequests = useMemo(
+    () =>
+      channel === null
+        ? []
+        : allJoinRequests.filter(row => row.channelId === channelId),
+    [allJoinRequests, channel, channelId]
   );
-  const [joinRequests, joinRequestsReady, joinRequestsError] = useLiveTable<VisibleChannelJoinRequestRow>(
-    joinRequestQuery,
-    'visibleChannelJoinRequests',
-    { enabled: channel !== null }
-  );
-  const messageQuery = useMemo(
-    () => tables.publicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
-    [channelId]
-  );
-  const [liveMessages, liveMessagesReady] = usePublicLiveTable<PublicRecentChannelMessage>(
-    messageQuery,
-    'publicRecentChannelMessages',
-    { enabled: channel !== null }
-  );
+  // Anonymous public mirror and live message-body subscriptions were dropped;
+  // channel bodies are loaded through paginated procedures.
+  const liveMessages = useMemo<ChannelMessageRow[]>(() => [], []);
+  const liveMessagesReady = true;
   const [messages, messagesReady, messagesError, reloadMessages] = usePublicChannelMessagesLookup({
-    channelId,
-    enabled: channel !== null,
+    channelSlug: slug,
+    enabled: channel !== null && channel.accessMode === 'public',
     limit: PUBLIC_CHANNEL_RECENT_PAGE_SIZE,
   });
   const [historyMessages, setHistoryMessages] = useState<ChannelMessageRow[]>([]);
   const [historyReady, setHistoryReady] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [memberRows, setMemberRows] = useState<ChannelMemberListRow[]>([]);
+  const [memberRows, setMemberRows] = useState<ChannelMember[]>([]);
   const [decryptedByKey, setDecryptedByKey] = useState<Record<string, DecryptedChannelMessage>>({});
   const [draft, setDraft] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
@@ -790,7 +777,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const shouldAutoScrollRef = useRef<boolean>(true);
   const lastMessageKeyRef = useRef<string | null>(null);
   const liveMessagesRefreshKey = useMemo(
-    () => liveMessages.map(message => `${message.id.toString()}:${message.channelSeq.toString()}`).join('|'),
+    () => liveMessages.map(message => `${message.id.toString()}:${message.id.toString()}`).join('|'),
     [liveMessages]
   );
   const [feedUnseenCount, setFeedUnseenCount] = useState(0);
@@ -820,8 +807,9 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         : null,
     [activeActor, channelId, memberships]
   );
-  const canSend = membership?.permission === 'read_write' || membership?.permission === 'admin';
-  const canManage = membership?.permission === 'admin';
+  const canSend =
+    membership?.permission.tag === 'ReadWrite' || membership?.permission.tag === 'Admin';
+  const canManage = membership?.permission.tag === 'Admin';
   const canListMembers = Boolean(membership);
   const canReadChannelHistory = Boolean(
     authenticatedSession &&
@@ -835,8 +823,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         ? joinRequests.find(
             request =>
               request.channelId === channelId &&
-              request.requesterAgentDbId === activeActor.id &&
-              request.direction === 'outgoing'
+              request.requesterAgentDbId === activeActor.id
           ) ?? null
         : null,
     [activeActor, channelId, joinRequests]
@@ -847,11 +834,12 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         ? joinRequests.filter(
             request =>
               request.channelId === channelId &&
-              request.direction === 'incoming' &&
-              request.status === 'pending'
+              activeActor !== null &&
+              request.requesterAgentDbId !== activeActor.id &&
+              request.status.tag === 'Pending'
           )
         : [],
-    [canManage, channelId, joinRequests]
+    [activeActor, canManage, channelId, joinRequests]
   );
   const historyMessagesForChannel = useMemo(
     () => historyMessages.filter(message => message.channelId === channelId),
@@ -867,8 +855,8 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
       [...messages]
         .filter(message => message.channelId === channelId)
         .sort((left, right) => {
-          if (left.channelSeq < right.channelSeq) return -1;
-          if (left.channelSeq > right.channelSeq) return 1;
+          if (left.id < right.id) return -1;
+          if (left.id > right.id) return 1;
           return Number(left.id - right.id);
         }),
     [channelId, messages]
@@ -882,14 +870,18 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
       byKey.set(channelMessageKey(message), message);
     }
     return Array.from(byKey.values()).sort((left, right) => {
-      if (left.channelSeq < right.channelSeq) return -1;
-      if (left.channelSeq > right.channelSeq) return 1;
+      if (left.id < right.id) return -1;
+      if (left.id > right.id) return 1;
       return Number(left.id - right.id);
     });
   }, [historyMessagesForChannel, sortedMessages]);
-  const earliestLoadedSeq = combinedMessages[0]?.channelSeq ?? null;
+  const earliestLoadedMessageId = combinedMessages[0]?.id ?? null;
   const canLoadOlder = Boolean(
-    authenticatedSession && activeActor && channel && earliestLoadedSeq !== null && earliestLoadedSeq > 1n
+    authenticatedSession &&
+      activeActor &&
+      channel &&
+      earliestLoadedMessageId !== null &&
+      earliestLoadedMessageId > 0n
   );
 
   useEffect(() => {
@@ -934,10 +926,8 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     });
     void connection.procedures
       .listChannelMessages({
-        agentDbId: activeActor.id,
         channelId: channel.channelId,
-        channelSlug: undefined,
-        beforeChannelSeq: undefined,
+        beforeMessageId: undefined,
         limit: CHANNEL_HISTORY_PAGE_SIZE,
       })
       .then(rows => {
@@ -995,7 +985,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
 
             const verified = await verifySignedChannelMessage({
               input: toSignatureInput(message),
-              signature: message.signature,
+              signature: toHex(message.signature),
               senderSigningPublicKey,
             });
             const normalized = normalizeEncryptedMessagePayload(verified.payload);
@@ -1089,18 +1079,16 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     setActionError(null);
     setActionFeedback(null);
     try {
+      if (!channel?.channelId) {
+        throw new Error('Channel must be loaded before joining.');
+      }
       await Promise.resolve(
         joinPublicChannelReducer({
           agentDbId: activeActor.id,
-          channelId: channel?.channelId,
-          channelSlug: channel ? undefined : slug,
+          channelId: channel.channelId,
         })
       );
-      setActionFeedback(
-        `Joined channel with ${
-          channel?.publicJoinPermission === 'read_write' ? 'read/write' : 'read-only'
-        } access.`
-      );
+      setActionFeedback('Joined channel.');
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Unable to join channel');
     } finally {
@@ -1116,12 +1104,14 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     setActionError(null);
     setActionFeedback(null);
     try {
+      if (!channel?.channelId) {
+        throw new Error('Channel must be loaded before requesting access.');
+      }
       await Promise.resolve(
         requestChannelJoinReducer({
           agentDbId: activeActor.id,
-          channelId: channel?.channelId,
-          channelSlug: channel ? undefined : slug,
-          permission: 'read',
+          channelId: channel.channelId,
+          requestedPermission: { tag: 'Read' },
         })
       );
       setActionFeedback('Requested channel access.');
@@ -1144,11 +1134,13 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     setActionFeedback(null);
     try {
       if (action === 'approve') {
+        // Permission is set during requestChannelJoin; approve no longer
+        // accepts a permission override.
+        void permission;
         await Promise.resolve(
           approveChannelJoinReducer({
             agentDbId: activeActor.id,
             requestId,
-            permission,
           })
         );
         setActionFeedback('Approved channel request.');
@@ -1180,10 +1172,8 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
           ? undefined
           : memberRowsForChannel[memberRowsForChannel.length - 1]?.id;
       const rows = await connection.procedures.listChannelMembers({
-        agentDbId: activeActor.id,
         channelId: channel.channelId,
-        channelSlug: undefined,
-        afterMemberId,
+        afterId: afterMemberId,
         limit: CHANNEL_MEMBER_PAGE_SIZE,
       });
       setMemberRows(current => (reset ? rows : [...current, ...rows]));
@@ -1200,19 +1190,25 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     }
     setActionError(null);
     setActionFeedback(null);
+    const tagged: { tag: 'Read' } | { tag: 'ReadWrite' } | { tag: 'Admin' } =
+      permission === 'admin'
+        ? { tag: 'Admin' }
+        : permission === 'read_write'
+          ? { tag: 'ReadWrite' }
+          : { tag: 'Read' };
     try {
       await Promise.resolve(
-        setChannelMemberPermissionReducer({
+        updateChannelMemberPermissionReducer({
           agentDbId: activeActor.id,
           channelId: channel.channelId,
-          memberAgentDbId,
-          permission,
+          targetAgentDbId: memberAgentDbId,
+          permission: tagged,
         })
       );
       setMemberRows(rows =>
         rows.map(row =>
           row.channelId === channel.channelId && row.agentDbId === memberAgentDbId
-            ? { ...row, permission }
+            ? { ...row, permission: tagged }
             : row
         )
       );
@@ -1224,7 +1220,6 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
 
   async function handleUpdateChannelSettings(settings: {
     accessMode: ChannelAccessMode;
-    publicJoinPermission: PublicJoinPermission;
     discoverable: boolean;
   }) {
     if (!channel || !activeActor || !canManage) {
@@ -1238,10 +1233,14 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         updateChannelSettingsReducer({
           agentDbId: activeActor.id,
           channelId: channel.channelId,
-          channelSlug: undefined,
-          accessMode: settings.accessMode,
-          publicJoinPermission: settings.publicJoinPermission,
+          title: undefined,
+          description: undefined,
+          accessMode:
+            settings.accessMode === 'public'
+              ? { tag: 'Public' }
+              : { tag: 'ApprovalRequired' },
           discoverable: settings.discoverable,
+          defaultPermission: undefined,
         })
       );
       setSettingsOpen(false);
@@ -1264,13 +1263,13 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
         removeChannelMemberReducer({
           agentDbId: activeActor.id,
           channelId: channel.channelId,
-          memberAgentDbId,
+          targetAgentDbId: memberAgentDbId,
         })
       );
       setMemberRows(rows =>
         rows.map(row =>
           row.channelId === channel.channelId && row.agentDbId === memberAgentDbId
-            ? { ...row, active: false, permission: 'read' }
+            ? { ...row, active: false, permission: { tag: 'Read' } as const }
             : row
         )
       );
@@ -1281,7 +1280,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   }
 
   async function handleLoadOlder() {
-    if (!connection || !channel || !activeActor || !earliestLoadedSeq) {
+    if (!connection || !channel || !activeActor || !earliestLoadedMessageId) {
       return;
     }
     setLoadingOlder(true);
@@ -1292,10 +1291,8 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     const prevScrollTop = scrollEl?.scrollTop ?? 0;
     try {
       const rows = await connection.procedures.listChannelMessages({
-        agentDbId: activeActor.id,
         channelId: channel.channelId,
-        channelSlug: undefined,
-        beforeChannelSeq: earliestLoadedSeq,
+        beforeMessageId: earliestLoadedMessageId,
         limit: CHANNEL_HISTORY_PAGE_SIZE,
       });
       setHistoryMessages(current => {
@@ -1320,22 +1317,20 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     if (!connection) {
       throw new Error('Not connected to the realtime service.');
     }
-    const freshActors = Array.from(connection.db.visibleAgents.iter()) as Agent[];
+    const freshActors = await readAllOwnedAgents(connection);
     const freshVisibleChannel =
-      (Array.from(connection.db.visibleChannels.iter()) as VisibleChannelRow[]).find(
+      (Array.from(connection.db.visible_channels.iter()) as Channel[]).find(
         row => row.slug === slug
       ) ?? null;
     const freshPublicChannel = publicChannel?.slug === slug ? publicChannel : null;
-    const freshChannelId = freshVisibleChannel?.id ?? freshPublicChannel?.channelId;
+    const freshChannelId = freshVisibleChannel?.id ?? freshPublicChannel?.id;
     if (!freshChannelId) {
       throw new Error('Channel is unavailable.');
     }
     const freshMemberships = Array.from(
-      connection.db.visibleChannelMemberships.iter()
-    ) as VisibleChannelMembershipRow[];
-    const freshJoinRequests = Array.from(
-      connection.db.visibleChannelJoinRequests.iter()
-    ) as VisibleChannelJoinRequestRow[];
+      connection.db.visible_channel_memberships.iter()
+    ) as ChannelMember[];
+    const freshJoinRequests = await readPendingChannelJoinRequests(connection);
     const freshActor = pickPreferredChannelActor({
       actors: freshActors,
       normalizedSessionEmail,
@@ -1356,7 +1351,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     }
     const keyPair = await loadStoredAgentKeyPair(toActorIdentity(freshActor));
     if (!keyPair) {
-      throw new Error('Local key pair is missing. Restore or rotate keys before sending.');
+      throw new Error('Local key pair is missing. Restore or reset keys before sending.');
     }
     if (!matchesPublishedActorKeys(freshActor, keyPair)) {
       throw new Error('Local key pair does not match the published agent keys.');
@@ -1365,7 +1360,6 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     const prepared = await prepareChannelMessage({
       channelId: freshChannelId,
       senderPublicIdentity: freshActor.publicIdentity,
-      senderSeq: 0n,
       senderMessageId,
       keyPair,
       payload: normalizeEncryptedMessagePayload({
@@ -1377,11 +1371,10 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
       sendChannelMessageReducer({
         agentDbId: freshActor.id,
         channelId: freshChannelId,
-        senderSeq: 0n,
         senderMessageId,
         senderSigningKeyVersion: prepared.senderSigningKeyVersion,
         plaintext: prepared.plaintext,
-        signature: prepared.signature,
+        signature: fromHex(prepared.signature),
         replyToMessageId: undefined,
       })
     );
@@ -1437,7 +1430,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     channelsError ??
     messagesError ??
     (auth.status === 'authenticated'
-      ? visibleChannelsError ??
+      ? visible_channelsError ??
         actorsError ??
         membershipsError ??
         joinRequestsError ??
@@ -1445,7 +1438,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
       : null);
   const authenticatedTablesReady =
     auth.status !== 'authenticated' ||
-    (visibleChannelsReady &&
+    (visible_channelsReady &&
       actorsReady &&
       membershipsReady &&
       joinRequestsReady);
@@ -1563,13 +1556,13 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
                     ) : null}
                     {membership
                       ? describePermission(membership.permission)
-                      : ownJoinRequest?.status === 'pending'
+                      : ownJoinRequest?.status.tag === 'Pending'
                         ? `${accessModeLabel} · Requested`
                         : accessModeLabel}
                   </Badge>
                   {channel.accessMode === 'public' && !membership ? (
                     <Badge variant="outline">
-                      {describePublicJoinPermission(channel.publicJoinPermission)}
+                      {'See channel access mode'}
                     </Badge>
                   ) : null}
                 </div>
@@ -1594,13 +1587,13 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
                       <Button
                         type="button"
                         size="sm"
-                        variant={ownJoinRequest?.status === 'pending' ? 'outline' : 'default'}
+                        variant={ownJoinRequest?.status.tag === 'Pending' ? 'outline' : 'default'}
                         onClick={() => void handleRequestJoin()}
-                        disabled={requesting || ownJoinRequest?.status === 'pending'}
+                        disabled={requesting || ownJoinRequest?.status.tag === 'Pending'}
                       >
                         {requesting
                           ? 'Requesting…'
-                          : ownJoinRequest?.status === 'pending'
+                          : ownJoinRequest?.status.tag === 'Pending'
                             ? 'Requested'
                             : 'Request access'}
                       </Button>
@@ -1867,6 +1860,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
               }
             }}
             members={memberRowsForChannel}
+            actorById={new Map(actors.map(actor => [actor.id, actor]))}
             canManage={canManage}
             loading={loadingMembers}
             onLoadMore={() => void handleLoadMembers(false)}
@@ -1878,6 +1872,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
             open={requestsOpen}
             onOpenChange={setRequestsOpen}
             requests={pendingAdminRequests}
+            actorById={new Map(actors.map(actor => [actor.id, actor]))}
             onResolve={handleResolveRequest}
           />
         </>
@@ -1900,8 +1895,8 @@ function ChannelFooterCta({
   channel: ChannelPageDetails;
   authenticated: boolean;
   hasActor: boolean;
-  membership: VisibleChannelMembershipRow | null;
-  ownJoinRequest: VisibleChannelJoinRequestRow | null;
+  membership: ChannelMember | null;
+  ownJoinRequest: ChannelJoinRequest | null;
   joining: boolean;
   requesting: boolean;
   onJoin: () => void;
@@ -1944,7 +1939,7 @@ function ChannelFooterCta({
     );
   }
 
-  if (membership && membership.permission === 'read') {
+  if (membership && membership.permission.tag === 'Read') {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-md border bg-muted/30 px-4 py-4 text-center">
         <p className="text-sm font-medium">Read-only access</p>
@@ -1960,7 +1955,7 @@ function ChannelFooterCta({
       <div className="flex flex-col items-center justify-center gap-2 rounded-md border bg-muted/30 px-4 py-4 text-center">
         <p className="text-sm font-medium">Join this channel</p>
         <p className="text-xs text-muted-foreground">
-          {describePublicJoinPermission(channel.publicJoinPermission)}.
+          {'See channel access mode'}.
         </p>
         <Button type="button" size="sm" onClick={onJoin} disabled={joining}>
           {joining ? 'Joining…' : 'Join channel'}
@@ -1969,7 +1964,7 @@ function ChannelFooterCta({
     );
   }
 
-  if (ownJoinRequest?.status === 'pending') {
+  if (ownJoinRequest?.status.tag === 'Pending') {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-md border bg-muted/30 px-4 py-4 text-center">
         <p className="text-sm font-medium">Waiting for admin approval</p>
@@ -2003,14 +1998,10 @@ function ChannelSettingsDialog({
   saving: boolean;
   onSave: (settings: {
     accessMode: ChannelAccessMode;
-    publicJoinPermission: PublicJoinPermission;
     discoverable: boolean;
   }) => void | Promise<void>;
 }) {
   const [accessMode, setAccessMode] = useState<ChannelAccessMode>(channel.accessMode);
-  const [publicJoinPermission, setPublicJoinPermission] = useState<PublicJoinPermission>(
-    channel.publicJoinPermission
-  );
   const [discoverable, setDiscoverable] = useState(channel.discoverable);
 
   return (
@@ -2027,7 +2018,7 @@ function ChannelSettingsDialog({
           className="grid gap-4"
           onSubmit={event => {
             event.preventDefault();
-            void onSave({ accessMode, publicJoinPermission, discoverable });
+            void onSave({ accessMode, discoverable });
           }}
         >
           <div className="space-y-2">
@@ -2044,23 +2035,6 @@ function ChannelSettingsDialog({
               <SelectContent>
                 <SelectItem value="public">Public</SelectItem>
                 <SelectItem value="approval_required">Approval required</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label>Default public join</Label>
-            <Select
-              value={publicJoinPermission}
-              onValueChange={value =>
-                setPublicJoinPermission(value === 'read_write' ? 'read_write' : 'read')
-              }
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="read">Read only</SelectItem>
-                <SelectItem value="read_write">Read/write</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -2096,6 +2070,7 @@ function MembersDialog({
   open,
   onOpenChange,
   members,
+  actorById,
   canManage,
   loading,
   onLoadMore,
@@ -2104,13 +2079,27 @@ function MembersDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  members: ChannelMemberListRow[];
+  members: ChannelMember[];
+  actorById: Map<bigint, Agent>;
   canManage: boolean;
   loading: boolean;
   onLoadMore: () => void;
   onSetPermission: (memberAgentDbId: bigint, permission: string) => void;
   onRemove: (memberAgentDbId: bigint) => void;
 }) {
+  function memberSlug(member: ChannelMember): string {
+    return actorById.get(member.agentDbId)?.slug ?? `agent#${member.agentDbId.toString()}`;
+  }
+  function memberPublicIdentity(member: ChannelMember): string {
+    return (
+      actorById.get(member.agentDbId)?.publicIdentity ?? `agent#${member.agentDbId.toString()}`
+    );
+  }
+  function permissionToValue(permission: ChannelMember['permission']): string {
+    if (permission.tag === 'Admin') return 'admin';
+    if (permission.tag === 'ReadWrite') return 'read_write';
+    return 'read';
+  }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-xl">
@@ -2139,13 +2128,13 @@ function MembersDialog({
                   )}
                 >
                   <AgentAvatar
-                    name={member.agentSlug}
-                    identity={member.agentPublicIdentity}
+                    name={memberSlug(member)}
+                    identity={memberPublicIdentity(member)}
                     size="md"
                   />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <p className="truncate text-sm font-medium">{member.agentSlug}</p>
+                      <p className="truncate text-sm font-medium">{memberSlug(member)}</p>
                       {!member.active ? (
                         <Badge variant="secondary" className="text-[10px]">
                           removed
@@ -2153,14 +2142,14 @@ function MembersDialog({
                       ) : null}
                     </div>
                     <p className="truncate font-mono text-xs text-muted-foreground">
-                      {member.agentPublicIdentity}
+                      {memberPublicIdentity(member)}
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-1.5">
                     {canManage && member.active ? (
                       <>
                         <Select
-                          value={member.permission}
+                          value={permissionToValue(member.permission)}
                           onValueChange={value => onSetPermission(member.agentDbId, value)}
                         >
                           <SelectTrigger className="h-8 w-[110px] text-xs">
@@ -2176,7 +2165,7 @@ function MembersDialog({
                           type="button"
                           size="xs"
                           variant="ghost"
-                          aria-label={`Remove ${member.agentSlug}`}
+                          aria-label={`Remove ${memberSlug(member)}`}
                           onClick={() => onRemove(member.agentDbId)}
                         >
                           <UserMinus size={14} />
@@ -2213,11 +2202,13 @@ function RequestsDialog({
   open,
   onOpenChange,
   requests,
+  actorById,
   onResolve,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  requests: VisibleChannelJoinRequestRow[];
+  requests: ChannelJoinRequest[];
+  actorById: Map<bigint, Agent>;
   onResolve: (
     requestId: bigint,
     action: 'approve' | 'reject',
@@ -2246,6 +2237,7 @@ function RequestsDialog({
                 <RequestApprovalItem
                   key={request.id.toString()}
                   request={request}
+                  actorById={actorById}
                   onResolve={onResolve}
                 />
               ))}
@@ -2259,9 +2251,11 @@ function RequestsDialog({
 
 function RequestApprovalItem({
   request,
+  actorById,
   onResolve,
 }: {
-  request: VisibleChannelJoinRequestRow;
+  request: ChannelJoinRequest;
+  actorById: Map<bigint, Agent>;
   onResolve: (
     requestId: bigint,
     action: 'approve' | 'reject',
@@ -2269,21 +2263,26 @@ function RequestApprovalItem({
   ) => void | Promise<void>;
 }) {
   const [permission, setPermission] = useState(
-    request.permission === 'read_write' ? 'read_write' : 'read'
+    request.permission.tag === 'ReadWrite' ? 'read_write' : 'read'
   );
+  const requester = actorById.get(request.requesterAgentDbId);
+  const requesterSlug =
+    requester?.slug ?? `agent#${request.requesterAgentDbId.toString()}`;
+  const requesterPublicIdentity =
+    requester?.publicIdentity ?? `agent#${request.requesterAgentDbId.toString()}`;
 
   return (
     <li className="flex flex-col gap-3 rounded-md border p-3">
       <div className="flex items-center gap-3">
         <AgentAvatar
-          name={request.requesterSlug}
-          identity={request.requesterPublicIdentity}
+          name={requesterSlug}
+          identity={requesterPublicIdentity}
           size="md"
         />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{request.requesterSlug}</p>
+          <p className="truncate text-sm font-medium">{requesterSlug}</p>
           <p className="truncate font-mono text-xs text-muted-foreground">
-            {request.requesterPublicIdentity}
+            {requesterPublicIdentity}
           </p>
         </div>
         <Badge variant="outline" className="text-[10px]">

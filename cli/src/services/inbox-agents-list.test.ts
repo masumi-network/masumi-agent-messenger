@@ -3,18 +3,18 @@ import { Timestamp } from 'spacetimedb';
 import {
   getMasumiInboxAgentNetwork,
 } from '../../../shared/inbox-agent-registration';
-import type { VisibleAgentRow } from '../../../webapp/src/module_bindings/types';
+import type { Agent } from '../../../webapp/src/module_bindings/types';
 
 const mocks = vi.hoisted(() => ({
   actors: [] as unknown[],
   conn: {
     reducers: {
-      upsertMasumiInboxAgentRegistration: vi.fn(),
+      upsertMasumiRegistration: vi.fn(),
     },
   },
   disconnectConnection: vi.fn(),
   ensureAuthenticatedSession: vi.fn(),
-  readInboxRows: vi.fn(),
+  readAccounts: vi.fn(),
   subscribeInboxTables: vi.fn(),
   unsubscribe: vi.fn(),
   connectAuthenticated: vi.fn(),
@@ -27,7 +27,7 @@ vi.mock('./auth', () => ({
 vi.mock('./spacetimedb', () => ({
   connectAuthenticated: mocks.connectAuthenticated,
   disconnectConnection: mocks.disconnectConnection,
-  readInboxRows: mocks.readInboxRows,
+  readAccounts: mocks.readAccounts,
   subscribeInboxTables: mocks.subscribeInboxTables,
 }));
 
@@ -51,7 +51,7 @@ function jsonResponse(status: number, body: unknown): Response {
 
 function actor(
   row: Omit<
-    VisibleAgentRow,
+    Agent,
     | 'masumiRegistrationNetwork'
     | 'masumiInboxAgentId'
     | 'masumiAgentIdentifier'
@@ -62,34 +62,51 @@ function actor(
     | 'allowAllMessageHeaders'
     | 'supportedMessageContentTypes'
     | 'supportedMessageHeaderNames'
-    | 'currentEncryptionAlgorithm'
-    | 'currentSigningAlgorithm'
   > &
     Partial<
       Pick<
-        VisibleAgentRow,
+        Agent,
         | 'masumiRegistrationNetwork'
         | 'masumiInboxAgentId'
         | 'masumiAgentIdentifier'
-        | 'masumiRegistrationState'
       >
-    >
-): VisibleAgentRow {
+    > & {
+      masumiRegistrationState?: string;
+    }
+): Agent {
   return {
     ...row,
     publicDescription: undefined,
     publicLinkedEmailEnabled: false,
     allowAllMessageContentTypes: false,
     allowAllMessageHeaders: false,
-    supportedMessageContentTypes: undefined,
-    supportedMessageHeaderNames: undefined,
-    currentEncryptionAlgorithm: 'ecdh-p256-v1',
-    currentSigningAlgorithm: 'ecdsa-p256-sha256-v1',
+    supportedMessageContentTypes: [],
+    supportedMessageHeaderNames: [],
     masumiRegistrationNetwork: row.masumiRegistrationNetwork,
     masumiInboxAgentId: row.masumiInboxAgentId,
     masumiAgentIdentifier: row.masumiAgentIdentifier,
-    masumiRegistrationState: row.masumiRegistrationState,
+    masumiRegistrationState: granularStateToRow(row.masumiRegistrationState),
   };
+}
+
+function granularStateToRow(state: string | undefined) {
+  switch (state) {
+    case 'RegistrationRequested':
+    case 'RegistrationInitiated':
+      return { tag: 'PendingRegistration' as const };
+    case 'RegistrationConfirmed':
+      return { tag: 'Registered' as const };
+    case 'RegistrationFailed':
+    case 'DeregistrationFailed':
+      return { tag: 'Failed' as const };
+    case 'DeregistrationRequested':
+    case 'DeregistrationInitiated':
+      return { tag: 'PendingDeregistration' as const };
+    case 'DeregistrationConfirmed':
+      return { tag: 'Deregistered' as const };
+    default:
+      return undefined;
+  }
 }
 
 describe('listOwnedInboxAgents', () => {
@@ -101,7 +118,7 @@ describe('listOwnedInboxAgents', () => {
     global.fetch = originalFetch;
     vi.restoreAllMocks();
     mocks.actors = [];
-    mocks.conn.reducers.upsertMasumiInboxAgentRegistration.mockReset();
+    mocks.conn.reducers.upsertMasumiRegistration.mockReset();
     mocks.disconnectConnection.mockReset();
     mocks.unsubscribe.mockReset();
     mocks.ensureAuthenticatedSession.mockResolvedValue({
@@ -129,7 +146,7 @@ describe('listOwnedInboxAgents', () => {
     mocks.subscribeInboxTables.mockResolvedValue({
       unsubscribe: mocks.unsubscribe,
     });
-    mocks.readInboxRows.mockImplementation(() => ({
+    mocks.readAccounts.mockImplementation(() => ({
       actors: mocks.actors,
     }));
   });
@@ -158,17 +175,13 @@ describe('listOwnedInboxAgents', () => {
     mocks.actors = [
       actor({
         id: 1n,
-        inboxId: 10n,
-        normalizedEmail: 'owner@example.com',
+        accountId: 10n,
+        email: 'owner@example.com',
         slug: 'owner',
-        inboxIdentifier: undefined,
         isDefault: true,
         publicIdentity: 'owner',
         displayName: 'Owner',
-        currentEncryptionPublicKey: 'enc',
-        currentEncryptionKeyVersion: 'enc-v1',
-        currentSigningPublicKey: 'sig',
-        currentSigningKeyVersion: 'sig-v1',
+        currentKeyBundleVersion: 1,
         masumiRegistrationNetwork: configuredNetwork,
         masumiInboxAgentId: 'agent-123',
         masumiAgentIdentifier: 'did:masumi:owner',
@@ -189,18 +202,18 @@ describe('listOwnedInboxAgents', () => {
     expect(result.agents[0]).toMatchObject({
       slug: 'owner',
       agentIdentifier: 'did:masumi:owner',
-      registrationState: 'RegistrationConfirmed',
+      registrationState: 'Registered',
       registration: {
         status: 'registered',
         registrationState: 'RegistrationConfirmed',
       },
     });
-    expect(mocks.conn.reducers.upsertMasumiInboxAgentRegistration).toHaveBeenCalledWith({
+    expect(mocks.conn.reducers.upsertMasumiRegistration).toHaveBeenCalledWith({
       agentDbId: 1n,
       masumiRegistrationNetwork: configuredNetwork,
       masumiInboxAgentId: 'agent-123',
       masumiAgentIdentifier: 'did:masumi:owner',
-      masumiRegistrationState: 'RegistrationConfirmed',
+      masumiRegistrationState: { tag: 'Registered' },
     });
   });
 });

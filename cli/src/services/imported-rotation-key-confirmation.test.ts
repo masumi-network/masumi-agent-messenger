@@ -6,6 +6,7 @@ import {
   emptyImportedRotationKeyConfirmationStore,
   getImportedRotationKeyConfirmationStatusFromStore,
   markImportedRotationSnapshotPendingInStore,
+  parseImportedRotationKeyConfirmationStore,
   sameAgentKeyPairPublicTuple,
 } from '../../../shared/imported-rotation-key-confirmation';
 
@@ -14,13 +15,13 @@ function createKeyPair(suffix: string): AgentKeyPair {
     encryption: {
       publicKey: `enc-pub-${suffix}`,
       privateKey: `enc-priv-${suffix}`,
-      keyVersion: `enc-${suffix}`,
+      keyVersion: 1,
       algorithm: 'ecdh-p256-v1',
     },
     signing: {
       publicKey: `sig-pub-${suffix}`,
       privateKey: `sig-priv-${suffix}`,
-      keyVersion: `sig-${suffix}`,
+      keyVersion: 1,
       algorithm: 'ecdsa-p256-sha256-v1',
     },
   };
@@ -29,7 +30,7 @@ function createKeyPair(suffix: string): AgentKeyPair {
 function createActor(current: AgentKeyPair): SharedActorKeyMaterial {
   return {
     identity: {
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       slug: 'agent',
     },
     current,
@@ -40,7 +41,7 @@ function createActor(current: AgentKeyPair): SharedActorKeyMaterial {
 function createSnapshot(actor: SharedActorKeyMaterial): DeviceKeyShareSnapshot {
   return {
     version: 1,
-    normalizedEmail: actor.identity.normalizedEmail,
+    email: actor.identity.email,
     createdAt: '2026-04-21T00:00:00.000Z',
     actors: [actor],
   };
@@ -105,5 +106,93 @@ describe('imported rotation key confirmation store', () => {
         keyPair
       ).status
     ).toBe('confirmed');
+  });
+
+  it('normalizes legacy key versions in the confirmation store', () => {
+    const keyPair = createKeyPair('legacy');
+    const store = parseImportedRotationKeyConfirmationStore({
+      version: 1,
+      records: [
+        {
+          email: 'agent@example.com',
+          slug: 'agent',
+          encryptionPublicKey: keyPair.encryption.publicKey,
+          encryptionKeyVersion: 'enc-v1',
+          signingPublicKey: keyPair.signing.publicKey,
+          signingKeyVersion: 0,
+          importedAt: '2026-04-21T00:00:00.000Z',
+        },
+      ],
+    });
+
+    expect(store.records[0]?.encryptionKeyVersion).toBe(1);
+    expect(store.records[0]?.signingKeyVersion).toBe(1);
+    expect(
+      getImportedRotationKeyConfirmationStatusFromStore(
+        store,
+        {
+          email: 'agent@example.com',
+          slug: 'agent',
+        },
+        keyPair
+      ).status
+    ).toBe('pending');
+  });
+
+  it('accepts legacy identity fields in the confirmation store', () => {
+    const keyPair = createKeyPair('legacy-identity');
+    const store = parseImportedRotationKeyConfirmationStore({
+      version: 1,
+      records: [
+        {
+          normalizedEmail: 'AGENT@EXAMPLE.COM',
+          slug: 'Agent',
+          inboxIdentifier: 'legacy-account',
+          encryptionPublicKey: keyPair.encryption.publicKey,
+          encryptionKeyVersion: keyPair.encryption.keyVersion,
+          signingPublicKey: keyPair.signing.publicKey,
+          signingKeyVersion: keyPair.signing.keyVersion,
+          importedAt: '2026-04-21T00:00:00.000Z',
+          confirmedAt: null,
+        },
+      ],
+    });
+
+    expect(store.records[0]).toMatchObject({
+      email: 'agent@example.com',
+      slug: 'agent',
+      accountIdentifier: 'legacy-account',
+    });
+    expect(
+      getImportedRotationKeyConfirmationStatusFromStore(
+        store,
+        {
+          email: 'agent@example.com',
+          slug: 'agent',
+        },
+        keyPair
+      ).status
+    ).toBe('pending');
+  });
+
+  it('ignores null legacy optional identifiers in the confirmation store', () => {
+    const keyPair = createKeyPair('legacy-null-identity');
+    const store = parseImportedRotationKeyConfirmationStore({
+      version: 1,
+      records: [
+        {
+          normalizedEmail: 'agent@example.com',
+          slug: 'agent',
+          inboxIdentifier: null,
+          encryptionPublicKey: keyPair.encryption.publicKey,
+          encryptionKeyVersion: keyPair.encryption.keyVersion,
+          signingPublicKey: keyPair.signing.publicKey,
+          signingKeyVersion: keyPair.signing.keyVersion,
+          importedAt: '2026-04-21T00:00:00.000Z',
+        },
+      ],
+    });
+
+    expect(store.records[0]?.accountIdentifier).toBeUndefined();
   });
 });

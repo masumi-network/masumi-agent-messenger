@@ -9,14 +9,23 @@ import {
   type AlgebraicTypeType as __AlgebraicTypeType,
   type Infer as __Infer,
 } from "spacetimedb";
+import {
+  ChannelPermission,
+} from "./types";
+
 
 export default __t.row({
   id: __t.u64(),
   channelId: __t.u64().name("channel_id"),
   agentDbId: __t.u64().name("agent_db_id"),
-  permission: __t.string(),
+  accountId: __t.u64().name("account_id"),
+  get permission() {
+    return ChannelPermission;
+  },
   active: __t.bool(),
+  activeRecencySortKey: __t.i64().name("active_recency_sort_key"),
   lastSentSeq: __t.u64().name("last_sent_seq"),
-  joinedAt: __t.timestamp().name("joined_at"),
+  lastReadMessageId: __t.u64().name("last_read_message_id"),
+  createdAt: __t.timestamp().name("created_at"),
   updatedAt: __t.timestamp().name("updated_at"),
 });

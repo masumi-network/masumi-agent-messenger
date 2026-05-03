@@ -54,25 +54,11 @@ function writeStore(store: PeerKeyTrustStore): void {
   globalThis.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
 }
 
-export function tupleFromVisibleActor(actor: {
-  currentEncryptionPublicKey: string;
-  currentEncryptionKeyVersion: string;
-  currentSigningPublicKey: string;
-  currentSigningKeyVersion: string;
-}): PeerKeyTuple {
-  return {
-    encryptionPublicKey: actor.currentEncryptionPublicKey,
-    encryptionKeyVersion: actor.currentEncryptionKeyVersion,
-    signingPublicKey: actor.currentSigningPublicKey,
-    signingKeyVersion: actor.currentSigningKeyVersion,
-  };
-}
-
 export function tupleFromPublishedActor(actor: {
   encryptionPublicKey: string;
-  encryptionKeyVersion: string;
+  encryptionKeyVersion: number;
   signingPublicKey: string;
-  signingKeyVersion: string;
+  signingKeyVersion: number;
 }): PeerKeyTuple {
   return {
     encryptionPublicKey: actor.encryptionPublicKey,
@@ -137,7 +123,7 @@ export function listTrustedPeers(): PinnedPeer[] {
 
 export function isInboundSignatureTrusted(
   publicIdentity: string,
-  signingKeyVersion: string,
+  signingKeyVersion: number,
   signingPublicKey: string
 ): boolean {
   return isSigningKeyVersionTrusted(

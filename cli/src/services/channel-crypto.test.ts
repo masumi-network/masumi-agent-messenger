@@ -13,7 +13,6 @@ describe('channel crypto helpers', () => {
     const prepared = await prepareChannelMessage({
       channelId: 42n,
       senderPublicIdentity: 'alice',
-      senderSeq: 0n,
       senderMessageId,
       keyPair,
       payload: {
@@ -25,7 +24,6 @@ describe('channel crypto helpers', () => {
     const input = {
       channelId: 42n,
       senderPublicIdentity: 'alice',
-      senderSeq: 0n,
       senderMessageId,
       senderSigningKeyVersion: prepared.senderSigningKeyVersion,
       plaintext: prepared.plaintext,
@@ -57,7 +55,6 @@ describe('channel crypto helpers', () => {
     const prepared = await prepareChannelMessage({
       channelId: 7n,
       senderPublicIdentity: 'alice',
-      senderSeq: 0n,
       senderMessageId,
       keyPair,
       payload: {
@@ -71,7 +68,6 @@ describe('channel crypto helpers', () => {
         input: {
           channelId: 7n,
           senderPublicIdentity: 'mallory',
-          senderSeq: 0n,
           senderMessageId,
           senderSigningKeyVersion: prepared.senderSigningKeyVersion,
           plaintext: prepared.plaintext,

@@ -194,11 +194,11 @@ export function registerDiscoverCommands(program: Command): void {
             },
             {
               key: 'Encryption key',
-              value: result.selected.encryptionKeyVersion ?? 'n/a',
+              value: result.selected.encryptionKeyVersion?.toString() ?? 'n/a',
             },
             {
               key: 'Signing key',
-              value: result.selected.signingKeyVersion ?? 'n/a',
+              value: result.selected.signingKeyVersion?.toString() ?? 'n/a',
             },
             ...(result.publicRoute
               ? [

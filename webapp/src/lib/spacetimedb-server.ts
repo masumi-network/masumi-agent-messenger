@@ -1,13 +1,12 @@
 import type { PublicContactPolicy } from '../../../shared/contact-policy';
 import type { PublicHeaderCapability } from '../../../shared/message-format';
 import { DbConnection, tables } from '../module_bindings';
-import type { Agent, Inbox as InboxRow } from '../module_bindings/types';
+import type { Agent } from '../module_bindings/types';
 import { normalizeInboxSlug } from '../../../shared/inbox-slug';
-import { resolveWorkspaceSnapshot } from './app-shell';
 import { ensureWorkspaceEnvLoaded } from './workspace-env.server';
 import type { AuthenticatedRequestBrowserSession } from './oidc-auth.server';
 import { setGlobalLogLevel } from 'spacetimedb';
-import { limitSpacetimeSubscriptionQuery } from '../../../shared/spacetime-subscription-limits';
+import { prepareSpacetimeSubscriptionQuery } from '../../../shared/spacetime-subscription-limits';
 
 ensureWorkspaceEnvLoaded();
 setGlobalLogLevel('warn');
@@ -19,10 +18,10 @@ export type PublishedPublicRoute = {
   agentIdentifier: string | null;
   linkedEmail: string | null;
   description: string | null;
-  encryptionKeyVersion: string;
+  encryptionKeyVersion: number;
   encryptionAlgorithm: string;
   encryptionPublicKey: unknown;
-  signingKeyVersion: string;
+  signingKeyVersion: number;
   signingAlgorithm: string;
   signingPublicKey: unknown;
   allowAllContentTypes: boolean;
@@ -38,10 +37,10 @@ export type PublishedActorLookup = {
   isDefault: boolean;
   displayName: string | null;
   agentIdentifier: string | null;
-  encryptionKeyVersion: string;
+  encryptionKeyVersion: number;
   encryptionAlgorithm: string;
   encryptionPublicKey: unknown;
-  signingKeyVersion: string;
+  signingKeyVersion: number;
   signingAlgorithm: string;
   signingPublicKey: unknown;
 };
@@ -69,15 +68,6 @@ function withErrorContext(action: string, error: unknown): Error {
   }
 
   return new Error(action);
-}
-
-function fingerprintSessionToken(token: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < token.length; index += 1) {
-    hash ^= token.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16);
 }
 
 async function withConnection<T>(
@@ -123,11 +113,8 @@ async function withAuthenticatedSubscription<T>(params: {
       reject(new Error('SpacetimeDB connection timeout'));
     }, 10000);
 
-    const uri = new URL(HOST);
-    uri.searchParams.set('__session', fingerprintSessionToken(params.sessionToken));
-
     DbConnection.builder()
-      .withUri(uri.toString())
+      .withUri(HOST)
       .withDatabaseName(DB_NAME)
       .withToken(params.sessionToken)
       .onConnect(conn => {
@@ -239,8 +226,7 @@ export async function fetchPublishedPublicRouteBySlug(
             allowlistScope:
               route.contactPolicy.allowlistScope as PublicContactPolicy['allowlistScope'],
             allowlistKinds: route.contactPolicy.allowlistKinds as PublicContactPolicy['allowlistKinds'],
-            messagePreviewVisibleBeforeApproval:
-              route.contactPolicy.messagePreviewVisibleBeforeApproval as false,
+            messagePreviewVisibleBeforeApproval: false,
           },
         });
       })
@@ -270,29 +256,22 @@ export async function resolveOwnedActorBySlugForSession(params: {
       conn
         .subscriptionBuilder()
         .onApplied(() => {
+          void (async () => {
           try {
-            const snapshot = resolveWorkspaceSnapshot({
-              inboxes: Array.from(conn.db.visibleInboxes.iter()) as InboxRow[],
-              actors: Array.from(conn.db.visibleAgents.iter()) as Agent[],
-              contactRequests: [],
-              threadInvites: [],
-              session: params.session,
-              selectedSlug: null,
-            });
-            const ownedActor =
-              snapshot.ownedInboxAgents.find(entry => entry.actor.slug === normalizedSlug)
-                ?.actor ?? null;
+            const ownedActor = (await conn.procedures.readOwnedAgent({
+              slug: normalizedSlug,
+            })) as Agent | null;
             resolve(ownedActor);
           } catch (error) {
             reject(withErrorContext('Resolving owned actor by slug failed', error));
           }
+          })();
         })
         .onError(error => {
           reject(withErrorContext('SpacetimeDB subscription failed', error));
         })
         .subscribe([
-          limitSpacetimeSubscriptionQuery(tables.visibleInboxes, 'visibleInboxes'),
-          limitSpacetimeSubscriptionQuery(tables.visibleAgents, 'visibleAgents'),
+          prepareSpacetimeSubscriptionQuery(tables.visible_accounts, 'visible_accounts'),
         ]);
     },
   });

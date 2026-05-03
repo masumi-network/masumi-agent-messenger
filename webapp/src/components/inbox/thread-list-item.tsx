@@ -10,6 +10,7 @@ export type ThreadListItemParticipant = {
 export function ThreadListItem({
   title,
   participants,
+  participantCount,
   preview,
   timestamp,
   unreadCount = 0,
@@ -21,6 +22,7 @@ export function ThreadListItem({
 }: {
   title: string;
   participants: ThreadListItemParticipant[];
+  participantCount?: number;
   preview?: string | null;
   timestamp?: string | null;
   unreadCount?: number;
@@ -36,6 +38,7 @@ export function ThreadListItem({
   const cleanedPreview = preview
     ? preview.replace(/\s+/g, ' ').trim().slice(0, 120)
     : '';
+  const displayedParticipantCount = participantCount ?? participants.length;
 
   return (
     <button
@@ -88,7 +91,7 @@ export function ThreadListItem({
           >
             {cleanedPreview || (
               <span className="italic text-muted-foreground/70">
-                {participants.length} participant{participants.length === 1 ? '' : 's'}
+                {displayedParticipantCount} participant{displayedParticipantCount === 1 ? '' : 's'}
               </span>
             )}
           </p>

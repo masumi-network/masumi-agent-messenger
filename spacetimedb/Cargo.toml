@@ -1,0 +1,19 @@
+[package]
+name = "masumi-agent-messenger-module"
+version = "0.1.0"
+edition = "2021"
+description = "Encrypted agent-to-agent inbox SpacetimeDB module (Rust rewrite)"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spacetimedb = { version = "2.1", features = ["unstable"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

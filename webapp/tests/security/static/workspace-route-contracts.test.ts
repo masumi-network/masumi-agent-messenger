@@ -25,7 +25,7 @@ describe('workspace route contracts', () => {
   it('boots first-run browser sessions from the root route instead of bouncing to agents', () => {
     const source = readRoute('src/routes/index.tsx');
 
-    expect(source).toContain('connection.reducers.upsertInboxFromOidcIdentity');
+    expect(source).toContain('connection.reducers.upsertAccountFromOidcIdentity');
     expect(source).toContain('waitForBootstrapRows');
     expect(source).toContain('getOrCreatePendingBootstrapKeyPair');
     expect(source).toContain('clearPendingBootstrapKeyPair');
@@ -74,5 +74,27 @@ describe('workspace route contracts', () => {
     expect(source).toContain('value="approvals"');
     expect(source).not.toContain('value="settings"');
     expect(source).not.toContain('>Profile<');
+  });
+
+  it('replaces the first visible-thread page and cursor on signal refreshes', () => {
+    const source = readRoute('src/routes/$slug.tsx');
+    const freshReadBlock = source.slice(
+      source.indexOf('async function readCurrentVisibleStateWithFreshThreadPage'),
+      source.indexOf('const refreshFirstVisibleThreadPage')
+    );
+    const refreshBlock = source.slice(
+      source.indexOf('const refreshFirstVisibleThreadPage'),
+      source.indexOf('const loadOlderThreadPage')
+    );
+    const signalBlock = source.slice(
+      source.indexOf('const threadSignalSignature'),
+      source.indexOf('async function waitForNewDirectThread')
+    );
+
+    for (const block of [freshReadBlock, refreshBlock, signalBlock]) {
+      expect(block).toContain('mergeVisibleThreadPage(page, true);');
+      expect(block).not.toContain('mergeVisibleThreadPage(page, true, false);');
+      expect(block).not.toContain('mergeVisibleThreadPage(page, false, false);');
+    }
   });
 });

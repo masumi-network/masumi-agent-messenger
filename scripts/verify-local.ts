@@ -2,9 +2,9 @@ import { webcrypto } from 'node:crypto';
 import { DbConnection, tables } from '../webapp/src/module_bindings/index.ts';
 import type {
   Agent,
+  Message,
   Thread,
   ThreadSecretEnvelope,
-  VisibleMessageRow,
 } from '../webapp/src/module_bindings/types';
 import {
   decryptMessage,
@@ -19,6 +19,7 @@ import {
   parseDecryptedMessagePlaintext,
 } from '../shared/message-format';
 import { generateDeviceKeyPair } from '../shared/device-sharing';
+import { prepareSpacetimeSubscriptionQuery } from '../shared/spacetime-subscription-limits';
 
 if (!globalThis.crypto) {
   globalThis.crypto = webcrypto as Crypto;
@@ -52,12 +53,8 @@ type ProvisionedClient = ConnectedClient & {
 };
 
 const VISIBLE_QUERIES = [
-  tables.visibleInboxes,
-  tables.visibleAgents,
-  tables.visibleThreads,
-  tables.visibleThreadParticipants,
-  tables.visibleThreadReadStates,
-  tables.visibleThreadSecretEnvelopes,
+  prepareSpacetimeSubscriptionQuery(tables.visible_accounts, 'visible_accounts'),
+  prepareSpacetimeSubscriptionQuery(tables.visible_account_change_signal, 'visible_account_change_signal'),
 ] as const;
 
 function sleep(ms: number): Promise<void> {
@@ -85,9 +82,78 @@ function decodeJwtEmail(token: string): string {
   const claims = JSON.parse(
     Buffer.from(`${normalized}${padding}`, 'base64').toString('utf8')
   ) as Record<string, unknown>;
-  const email = typeof claims.email === 'string' ? claims.email.trim() : '';
+  const email = typeof claims.email === 'string' ? claims.email.trim().toLowerCase() : '';
   if (!email) throw new Error('Token missing email claim');
   return email;
+}
+
+function toEncryptionAlgorithm(_algorithm: string): { tag: 'EcdhP256V1' } {
+  return { tag: 'EcdhP256V1' };
+}
+
+function toSigningAlgorithm(_algorithm: string): { tag: 'EcdsaP256Sha256V1' } {
+  return { tag: 'EcdsaP256Sha256V1' };
+}
+
+function toDeviceEncryptionAlgorithm(_algorithm: string): { tag: 'EcdhP256DeviceV1' } {
+  return { tag: 'EcdhP256DeviceV1' };
+}
+
+function toCipherAlgorithm(_algorithm: string): { tag: 'AesGcm256V1' } {
+  return { tag: 'AesGcm256V1' };
+}
+
+function toWrapAlgorithm(_algorithm: string): { tag: 'EcdhP256AesGcm256V1' } {
+  return { tag: 'EcdhP256AesGcm256V1' };
+}
+
+function cipherAlgorithmLabel(algorithm: string | { tag: string }): string {
+  const tag = typeof algorithm === 'string' ? algorithm : algorithm.tag;
+  return tag === 'AesGcm256V1' ? 'aes-gcm-256-v1' : tag;
+}
+
+function wrapAlgorithmLabel(algorithm: string | { tag: string }): string {
+  const tag = typeof algorithm === 'string' ? algorithm : algorithm.tag;
+  return tag === 'EcdhP256AesGcm256V1' ? 'ecdh-p256-aes-gcm-256-wrap-v1' : tag;
+}
+
+function toReducerEnvelopes(
+  envelopes: Array<{
+    recipientPublicIdentity: string;
+    recipientEncryptionKeyVersion: number;
+    senderEncryptionKeyVersion: number;
+    signingKeyVersion: number;
+    wrappedSecretCiphertext: string;
+    wrappedSecretIv: string;
+    wrapAlgorithm: string;
+    signature: string;
+  }>
+) {
+  return envelopes.map(envelope => ({
+    recipientPublicIdentity: envelope.recipientPublicIdentity,
+    recipientEncryptionKeyVersion: envelope.recipientEncryptionKeyVersion,
+    senderEncryptionKeyVersion: envelope.senderEncryptionKeyVersion,
+    signingKeyVersion: envelope.signingKeyVersion,
+    wrappedSecretCiphertext: envelope.wrappedSecretCiphertext,
+    wrappedSecretIv: envelope.wrappedSecretIv,
+    wrapAlgorithm: toWrapAlgorithm(envelope.wrapAlgorithm),
+    signature: envelope.signature,
+  }));
+}
+
+function actorPublicKeysFromClient(client: ProvisionedClient): ActorPublicKeys {
+  return {
+    actorId: client.actor.id,
+    email: client.actor.email,
+    slug: client.actor.slug,
+    isDefault: client.actor.isDefault,
+    publicIdentity: client.actor.publicIdentity,
+    displayName: client.actor.displayName ?? null,
+    encryptionPublicKey: client.keyPair.encryption.publicKey,
+    encryptionKeyVersion: client.keyPair.encryption.keyVersion,
+    signingPublicKey: client.keyPair.signing.publicKey,
+    signingKeyVersion: client.keyPair.signing.keyVersion,
+  };
 }
 
 async function connectClient(token: string): Promise<ConnectedClient> {
@@ -110,40 +176,88 @@ async function connectClient(token: string): Promise<ConnectedClient> {
   });
 }
 
+function listAccounts(conn: DbConnection) {
+  return Array.from(conn.db.visible_accounts.iter());
+}
+
+async function listAgents(conn: DbConnection): Promise<Agent[]> {
+  const owned: Agent[] = [];
+  let afterId: bigint | undefined;
+  for (;;) {
+    const page = await conn.procedures.listOwnedAgentsPage({ afterId, limit: 250 });
+    owned.push(...page.agents);
+    if (!page.nextAfterId) break;
+    afterId = page.nextAfterId;
+  }
+  const actor = owned.find(row => row.isDefault) ?? owned[0] ?? null;
+  const visibleThreadPage = actor
+    ? await conn.procedures.listVisibleThreads({
+        agentDbId: actor.id,
+        afterSortKey: undefined,
+        limit: 25,
+      })
+    : { actors: [] };
+  const byId = new Map<bigint, Agent>();
+  for (const agent of owned) byId.set(agent.id, agent);
+  for (const agent of visibleThreadPage.actors) byId.set(agent.id, agent);
+  return Array.from(byId.values());
+}
+
+async function listThreads(conn: DbConnection): Promise<Thread[]> {
+  const actors = await listAgents(conn);
+  const actor = actors.find(row => row.isDefault) ?? actors[0] ?? null;
+  if (!actor) return [];
+  return (await conn.procedures.listVisibleThreads({
+    agentDbId: actor.id,
+    afterSortKey: undefined,
+    limit: 25,
+  })).threads;
+}
+
+async function listParticipants(conn: DbConnection) {
+  const actors = await listAgents(conn);
+  const actor = actors.find(row => row.isDefault) ?? actors[0] ?? null;
+  if (!actor) return [];
+  return (await conn.procedures.listVisibleThreads({
+    agentDbId: actor.id,
+    afterSortKey: undefined,
+    limit: 25,
+  })).participantPreviews;
+}
+
 async function ensureBootstrap(client: ConnectedClient, label: string, email: string): Promise<void> {
-  if (listInboxes(client.conn).some(row => row.displayEmail.toLowerCase() === email.toLowerCase())) {
+  if (listAccounts(client.conn).some(row => row.email.toLowerCase() === email)) {
     return;
   }
 
   const bootstrapKeys = await generateAgentKeyPair({
-    encryptionKeyVersion: 'enc-v1',
-    signingKeyVersion: 'sig-v1',
+    encryptionKeyVersion: 1,
+    signingKeyVersion: 1,
   });
   const bootstrapDevice = await generateDeviceKeyPair();
 
   await Promise.resolve(
-    client.conn.reducers.upsertInboxFromOidcIdentity({
+    client.conn.reducers.upsertAccountFromOidcIdentity({
       displayName: `${label} verify bootstrap`,
       defaultSlug: undefined,
       encryptionPublicKey: bootstrapKeys.encryption.publicKey,
       encryptionKeyVersion: bootstrapKeys.encryption.keyVersion,
-      encryptionAlgorithm: bootstrapKeys.encryption.algorithm,
+      encryptionAlgorithm: toEncryptionAlgorithm(bootstrapKeys.encryption.algorithm),
       signingPublicKey: bootstrapKeys.signing.publicKey,
       signingKeyVersion: bootstrapKeys.signing.keyVersion,
-      signingAlgorithm: bootstrapKeys.signing.algorithm,
+      signingAlgorithm: toSigningAlgorithm(bootstrapKeys.signing.algorithm),
       deviceId: `${label}-verify-device-${RUN_SUFFIX}`,
       deviceLabel: `${label} verify device`,
       devicePlatform: 'verify-local',
       deviceEncryptionPublicKey: bootstrapDevice.publicKey,
       deviceEncryptionKeyVersion: bootstrapDevice.keyVersion,
-      deviceEncryptionAlgorithm: bootstrapDevice.algorithm,
+      deviceEncryptionAlgorithm: toDeviceEncryptionAlgorithm(bootstrapDevice.algorithm),
     })
   );
 
   await waitFor(
-    () =>
-      listInboxes(client.conn).some(row => row.displayEmail.toLowerCase() === email.toLowerCase()),
-    `${label} inbox bootstrap`
+    () => listAccounts(client.conn).some(row => row.email.toLowerCase() === email),
+    `${label} account bootstrap`
   );
 }
 
@@ -153,156 +267,79 @@ async function provisionClient(label: string, token: string): Promise<Provisione
   await ensureBootstrap(connected, label, email);
 
   const keyPair = await generateAgentKeyPair({
-    encryptionKeyVersion: 'enc-v1',
-    signingKeyVersion: 'sig-v1',
+    encryptionKeyVersion: 1,
+    signingKeyVersion: 1,
   });
   const slug = `${label}-verify-${RUN_SUFFIX}`;
 
   await Promise.resolve(
-    connected.conn.reducers.createInboxIdentity({
+    connected.conn.reducers.createAgent({
       slug,
       displayName: `${label} verify agent`,
       encryptionPublicKey: keyPair.encryption.publicKey,
-      encryptionKeyVersion: keyPair.encryption.keyVersion,
-      encryptionAlgorithm: keyPair.encryption.algorithm,
+      keyBundleVersion: keyPair.encryption.keyVersion,
+      encryptionAlgorithm: toEncryptionAlgorithm(keyPair.encryption.algorithm),
       signingPublicKey: keyPair.signing.publicKey,
-      signingKeyVersion: keyPair.signing.keyVersion,
-      signingAlgorithm: keyPair.signing.algorithm,
+      signingAlgorithm: toSigningAlgorithm(keyPair.signing.algorithm),
     })
   );
 
   await waitFor(
-    () => listAgents(connected.conn).some(row => row.slug === slug),
-    `${label} identity creation`
+    async () => (await listAgents(connected.conn)).some(row => row.slug === slug),
+    `${label} agent creation`
   );
 
-  const actor = listAgents(connected.conn).find(row => row.slug === slug);
+  const actor = (await listAgents(connected.conn)).find(row => row.slug === slug);
   if (!actor) throw new Error(`${label} agent row missing after creation`);
 
   return { ...connected, label, email, keyPair, actor };
 }
 
-function listInboxes(conn: DbConnection) {
-  return Array.from(conn.db.visibleInboxes.iter());
-}
-
-function listAgents(conn: DbConnection): Agent[] {
-  return Array.from(conn.db.visibleAgents.iter()) as Agent[];
-}
-
-function listThreads(conn: DbConnection): Thread[] {
-  return Array.from(conn.db.visibleThreads.iter()) as Thread[];
-}
-
-async function listMessagesForThread(client: ProvisionedClient, threadId: bigint): Promise<VisibleMessageRow[]> {
+async function listMessagesForThread(client: ProvisionedClient, threadId: bigint): Promise<Message[]> {
   const page = await client.conn.procedures.listThreadMessages({
-    agentDbId: client.actor.id,
     threadId,
     beforeThreadSeq: undefined,
-    limit: 100n,
+    limit: 25,
   });
   return page.messages.sort((left, right) => Number(left.threadSeq - right.threadSeq));
 }
 
-function toActorPublicKeys(actor: Agent): ActorPublicKeys {
-  return {
-    actorId: actor.id,
-    normalizedEmail: actor.normalizedEmail,
-    slug: actor.slug,
-    inboxIdentifier: actor.inboxIdentifier ?? undefined,
-    isDefault: actor.isDefault,
-    publicIdentity: actor.publicIdentity,
-    displayName: actor.displayName ?? null,
-    encryptionPublicKey: actor.currentEncryptionPublicKey,
-    encryptionKeyVersion: actor.currentEncryptionKeyVersion,
-    signingPublicKey: actor.currentSigningPublicKey,
-    signingKeyVersion: actor.currentSigningKeyVersion,
-  };
-}
-
-async function findVersionedKey(
-  conn: DbConnection,
-  viewerAgentDbId: bigint,
-  sender: Agent,
-  kind: 'encryption' | 'signing',
-  version: string
-): Promise<string | null> {
-  if (kind === 'encryption' && sender.currentEncryptionKeyVersion === version) {
-    return sender.currentEncryptionPublicKey;
-  }
-  if (kind === 'signing' && sender.currentSigningKeyVersion === version) {
-    return sender.currentSigningPublicKey;
-  }
-
-  const rows = await conn.procedures.lookupAgentPublicKeys({
-    agentDbId: viewerAgentDbId,
-    requests: [
-      {
-        agentDbId: sender.id,
-        keyKind: kind,
-        keyVersion: version,
-      },
-    ],
+async function findEnvelope(
+  client: ProvisionedClient,
+  message: Message
+): Promise<ThreadSecretEnvelope> {
+  const rows = await client.conn.procedures.listThreadSecretEnvelopes({
+    threadId: message.threadId,
+    membershipVersion: undefined,
+    senderAgentDbId: message.senderAgentDbId,
+    recipientAgentDbId: client.actor.id,
+    secretVersion: message.secretVersion,
   });
-  return rows[0]?.publicKey ?? null;
+  const envelope = rows[0];
+  if (!envelope) throw new Error('Recipient secret envelope missing');
+  return envelope;
 }
 
 async function decryptInbound(params: {
   recipient: ProvisionedClient;
-  message: VisibleMessageRow;
+  sender: ProvisionedClient;
+  message: Message;
 }): Promise<string> {
-  const sender = listAgents(params.recipient.conn).find(
-    row => row.id === params.message.senderAgentDbId
-  );
-  if (!sender) throw new Error('Sender not visible to recipient');
-
-  const envelope = (Array.from(params.recipient.conn.db.visibleThreadSecretEnvelopes.iter()) as ThreadSecretEnvelope[]).find(
-    row =>
-      row.threadId === params.message.threadId &&
-      row.senderAgentDbId === params.message.senderAgentDbId &&
-      row.recipientAgentDbId === params.recipient.actor.id &&
-      row.secretVersion === params.message.secretVersion
-  );
-  if (!envelope) throw new Error('Recipient secret envelope missing');
-
-  const senderEncryptionPublicKey = await findVersionedKey(
-    params.recipient.conn,
-    params.recipient.actor.id,
-    sender,
-    'encryption',
-    envelope.senderEncryptionKeyVersion
-  );
-  const messageSigningPublicKey = await findVersionedKey(
-    params.recipient.conn,
-    params.recipient.actor.id,
-    sender,
-    'signing',
-    params.message.signingKeyVersion
-  );
-  const envelopeSigningPublicKey = await findVersionedKey(
-    params.recipient.conn,
-    params.recipient.actor.id,
-    sender,
-    'signing',
-    envelope.signingKeyVersion
-  );
-  if (!senderEncryptionPublicKey || !messageSigningPublicKey || !envelopeSigningPublicKey) {
-    throw new Error('Missing sender key material');
-  }
+  const envelope = await findEnvelope(params.recipient, params.message);
 
   const plaintext = await decryptMessage({
     recipientKeyPair: params.recipient.keyPair,
     recipientPublicIdentity: params.recipient.actor.publicIdentity,
     message: {
       threadId: params.message.threadId,
-      senderActorId: sender.id,
-      senderPublicIdentity: sender.publicIdentity,
-      senderSeq: params.message.senderSeq,
+      senderActorId: params.sender.actor.id,
+      senderPublicIdentity: params.sender.actor.publicIdentity,
+      senderMessageId: params.message.senderMessageId,
       secretVersion: params.message.secretVersion,
       signingKeyVersion: params.message.signingKeyVersion,
       ciphertext: params.message.ciphertext,
       iv: params.message.iv,
-      cipherAlgorithm: params.message.cipherAlgorithm,
+      cipherAlgorithm: cipherAlgorithmLabel(params.message.cipherAlgorithm),
       signature: params.message.signature,
       replyToMessageId: params.message.replyToMessageId ?? undefined,
     },
@@ -311,7 +348,7 @@ async function decryptInbound(params: {
       threadId: envelope.threadId,
       secretVersion: envelope.secretVersion,
       senderActorId: envelope.senderAgentDbId,
-      senderPublicIdentity: sender.publicIdentity,
+      senderPublicIdentity: params.sender.actor.publicIdentity,
       recipientActorId: envelope.recipientAgentDbId,
       recipientPublicIdentity: params.recipient.actor.publicIdentity,
       recipientEncryptionKeyVersion: envelope.recipientEncryptionKeyVersion,
@@ -319,12 +356,12 @@ async function decryptInbound(params: {
       signingKeyVersion: envelope.signingKeyVersion,
       wrappedSecretCiphertext: envelope.wrappedSecretCiphertext,
       wrappedSecretIv: envelope.wrappedSecretIv,
-      wrapAlgorithm: envelope.wrapAlgorithm,
+      wrapAlgorithm: wrapAlgorithmLabel(envelope.wrapAlgorithm),
       signature: envelope.signature,
     },
-    senderEncryptionPublicKey,
-    messageSigningPublicKey,
-    envelopeSigningPublicKey,
+    senderEncryptionPublicKey: params.sender.keyPair.encryption.publicKey,
+    messageSigningPublicKey: params.sender.keyPair.signing.publicKey,
+    envelopeSigningPublicKey: params.sender.keyPair.signing.publicKey,
   });
 
   const parsed = parseDecryptedMessagePlaintext(plaintext);
@@ -338,7 +375,7 @@ async function sendMessage(params: {
   sender: ProvisionedClient;
   thread: Thread;
   recipients: ActorPublicKeys[];
-  senderSeq: bigint;
+  senderMessageId: bigint;
   body: string;
   existingSecret: SenderSecretState | null;
   rotateSecret: boolean;
@@ -348,7 +385,7 @@ async function sendMessage(params: {
     threadId: params.thread.id,
     senderActorId: params.sender.actor.id,
     senderPublicIdentity: params.sender.actor.publicIdentity,
-    senderSeq: params.senderSeq,
+    senderMessageId: params.senderMessageId,
     payload: { contentType: 'text/plain', body: params.body },
     keyPair: params.sender.keyPair,
     recipients: params.recipients,
@@ -364,13 +401,13 @@ async function sendMessage(params: {
       threadId: params.thread.id,
       secretVersion: prepared.secretVersion,
       signingKeyVersion: prepared.signingKeyVersion,
-      senderSeq: params.senderSeq,
+      senderMessageId: params.senderMessageId,
       ciphertext: prepared.ciphertext,
       iv: prepared.iv,
-      cipherAlgorithm: prepared.cipherAlgorithm,
+      cipherAlgorithm: toCipherAlgorithm(prepared.cipherAlgorithm),
       signature: prepared.signature,
       replyToMessageId: params.replyToMessageId ?? undefined,
-      attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
+      attachedSecretEnvelopes: toReducerEnvelopes(prepared.attachedSecretEnvelopes),
     })
   );
 
@@ -381,141 +418,150 @@ async function main(): Promise<void> {
   const alice = await provisionClient('alice', TOKENS.alice!);
   const bob = await provisionClient('bob', TOKENS.bob!);
 
-  await Promise.resolve(
-    alice.conn.reducers.createDirectThread({
-      agentDbId: alice.actor.id,
-      otherAgentPublicIdentity: bob.actor.publicIdentity,
-      membershipLocked: false,
-      title: `verify-${RUN_SUFFIX}`,
-    })
-  );
+  try {
+    await Promise.resolve(
+      bob.conn.reducers.addContactAllowlistEntry({
+        agentDbId: bob.actor.id,
+        kind: { tag: 'Agent' },
+        agentPublicIdentity: alice.actor.publicIdentity,
+        email: undefined,
+      })
+    );
 
-  await waitFor(
-    () =>
-      listThreads(alice.conn).length > 0 &&
-      listThreads(bob.conn).length > 0 &&
-      listAgents(alice.conn).some(row => row.publicIdentity === bob.actor.publicIdentity),
-    'direct thread visibility'
-  );
+    await Promise.resolve(
+      alice.conn.reducers.createThread({
+        agentDbId: alice.actor.id,
+        kind: { tag: 'Direct' },
+        otherAgentPublicIdentity: bob.actor.publicIdentity,
+        participantPublicIdentities: undefined,
+        title: `verify-${RUN_SUFFIX}`,
+        firstMessage: undefined,
+      })
+    );
 
-  const thread = listThreads(alice.conn).find(candidate => {
-    return candidate.kind === 'direct' && candidate.title === `verify-${RUN_SUFFIX}`;
-  });
-  if (!thread) throw new Error('Verify thread did not become visible');
+    await waitFor(
+      async () =>
+        (await listThreads(alice.conn)).some(row => row.title === `verify-${RUN_SUFFIX}`) &&
+        (await listThreads(bob.conn)).some(row => row.title === `verify-${RUN_SUFFIX}`),
+      'direct thread visibility'
+    );
 
-  const bobFromAlice = listAgents(alice.conn).find(
-    row => row.publicIdentity === bob.actor.publicIdentity
-  );
-  const aliceFromBob = listAgents(bob.conn).find(
-    row => row.publicIdentity === alice.actor.publicIdentity
-  );
-  if (!bobFromAlice || !aliceFromBob) {
-    throw new Error('Peer agent rows did not propagate');
+    const thread = (await listThreads(alice.conn)).find(candidate => candidate.title === `verify-${RUN_SUFFIX}`);
+    if (!thread) throw new Error('Verify thread did not become visible');
+
+    const aliceRecipients = [actorPublicKeysFromClient(alice), actorPublicKeysFromClient(bob)];
+    const bobRecipients = [actorPublicKeysFromClient(bob), actorPublicKeysFromClient(alice)];
+
+    const firstSecret = await sendMessage({
+      sender: alice,
+      thread,
+      recipients: aliceRecipients,
+      senderMessageId: 1n,
+      body: 'hello bob',
+      existingSecret: null,
+      rotateSecret: true,
+    });
+
+    await waitFor(
+      async () => (await listMessagesForThread(bob, thread.id)).length === 1,
+      'first inbound message'
+    );
+    const firstInbound = (await listMessagesForThread(bob, thread.id))[0]!;
+    const bobFirstText = await decryptInbound({
+      recipient: bob,
+      sender: alice,
+      message: firstInbound,
+    });
+    if (bobFirstText !== 'hello bob') {
+      throw new Error(`Unexpected Bob plaintext: ${bobFirstText}`);
+    }
+
+    await sendMessage({
+      sender: alice,
+      thread,
+      recipients: aliceRecipients,
+      senderMessageId: 2n,
+      body: 'second alice message',
+      existingSecret: firstSecret,
+      rotateSecret: false,
+    });
+
+    await waitFor(
+      async () => (await listMessagesForThread(bob, thread.id)).length === 2,
+      'second inbound message'
+    );
+    const secondInbound = (await listMessagesForThread(bob, thread.id))[1]!;
+    if (secondInbound.secretVersion !== firstSecret.secretVersion) {
+      throw new Error('Second message unexpectedly rotated the sender secret');
+    }
+
+    const secondInboundOnAlice = (await listMessagesForThread(alice, thread.id))[1];
+    await sendMessage({
+      sender: bob,
+      thread,
+      recipients: bobRecipients,
+      senderMessageId: 1n,
+      body: 'hi alice',
+      existingSecret: null,
+      rotateSecret: true,
+      replyToMessageId: secondInboundOnAlice?.id ?? null,
+    });
+
+    await waitFor(
+      async () => (await listMessagesForThread(alice, thread.id)).length === 3,
+      'bob reply visible to alice'
+    );
+    const aliceMessages = await listMessagesForThread(alice, thread.id);
+    const replyInbound = aliceMessages[2]!;
+    const aliceReplyText = await decryptInbound({
+      recipient: alice,
+      sender: bob,
+      message: replyInbound,
+    });
+    if (aliceReplyText !== 'hi alice') {
+      throw new Error(`Unexpected Alice plaintext: ${aliceReplyText}`);
+    }
+
+    await Promise.resolve(
+      bob.conn.reducers.updateThreadReadState({
+        agentDbId: bob.actor.id,
+        threadId: thread.id,
+        lastReadThreadSeq: replyInbound.threadSeq,
+        archived: undefined,
+      })
+    );
+
+    await waitFor(
+      async () =>
+        (await listParticipants(alice.conn)).some(row => {
+          return (
+            row.agentDbId === bob.actor.id &&
+            row.threadId === thread.id &&
+            row.lastReadThreadSeq === replyInbound.threadSeq
+          );
+        }),
+      'bob read state propagation'
+    );
+
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          aliceIdentity: alice.identityHex,
+          bobIdentity: bob.identityHex,
+          threadId: thread.id.toString(),
+          messageCount: aliceMessages.length,
+          bobFirstDecrypted: bobFirstText,
+          aliceReplyDecrypted: aliceReplyText,
+        },
+        null,
+        2
+      )
+    );
+  } finally {
+    alice.conn.disconnect();
+    bob.conn.disconnect();
   }
-
-  const aliceRecipients = [toActorPublicKeys(alice.actor), toActorPublicKeys(bobFromAlice)];
-  const bobRecipients = [toActorPublicKeys(bob.actor), toActorPublicKeys(aliceFromBob)];
-
-  const firstSecret = await sendMessage({
-    sender: alice,
-    thread,
-    recipients: aliceRecipients,
-    senderSeq: 1n,
-    body: 'hello bob',
-    existingSecret: null,
-    rotateSecret: true,
-  });
-
-  await waitFor(
-    async () => (await listMessagesForThread(bob, thread.id)).length === 1,
-    'first inbound message'
-  );
-  const firstInbound = (await listMessagesForThread(bob, thread.id))[0]!;
-  const bobFirstText = await decryptInbound({ recipient: bob, message: firstInbound });
-  if (bobFirstText !== 'hello bob') {
-    throw new Error(`Unexpected Bob plaintext: ${bobFirstText}`);
-  }
-
-  await sendMessage({
-    sender: alice,
-    thread,
-    recipients: aliceRecipients,
-    senderSeq: 2n,
-    body: 'second alice message',
-    existingSecret: firstSecret,
-    rotateSecret: false,
-  });
-
-  await waitFor(
-    async () => (await listMessagesForThread(bob, thread.id)).length === 2,
-    'second inbound message'
-  );
-  const secondInbound = (await listMessagesForThread(bob, thread.id))[1]!;
-  if (secondInbound.secretVersion !== firstSecret.secretVersion) {
-    throw new Error('Second message unexpectedly rotated the sender secret');
-  }
-
-  const secondInboundOnAlice = (await listMessagesForThread(alice, thread.id))[1];
-  await sendMessage({
-    sender: bob,
-    thread,
-    recipients: bobRecipients,
-    senderSeq: 1n,
-    body: 'hi alice',
-    existingSecret: null,
-    rotateSecret: true,
-    replyToMessageId: secondInboundOnAlice?.id ?? null,
-  });
-
-  await waitFor(
-    async () => (await listMessagesForThread(alice, thread.id)).length === 3,
-    'bob reply visible to alice'
-  );
-  const aliceMessages = await listMessagesForThread(alice, thread.id);
-  const replyInbound = aliceMessages[2]!;
-  const aliceReplyText = await decryptInbound({ recipient: alice, message: replyInbound });
-  if (aliceReplyText !== 'hi alice') {
-    throw new Error(`Unexpected Alice plaintext: ${aliceReplyText}`);
-  }
-
-  await Promise.resolve(
-    bob.conn.reducers.markThreadRead({
-      agentDbId: bob.actor.id,
-      threadId: thread.id,
-      upToThreadSeq: replyInbound.threadSeq,
-    })
-  );
-
-  await waitFor(
-    () =>
-      Array.from(alice.conn.db.visibleThreadReadStates.iter()).some(row => {
-        return (
-          row.agentDbId === bob.actor.id &&
-          row.threadId === thread.id &&
-          row.lastReadThreadSeq === replyInbound.threadSeq
-        );
-      }),
-    'bob read state propagation'
-  );
-
-  console.log(
-    JSON.stringify(
-      {
-        ok: true,
-        aliceIdentity: alice.identityHex,
-        bobIdentity: bob.identityHex,
-        threadId: thread.id.toString(),
-        messageCount: aliceMessages.length,
-        bobFirstDecrypted: bobFirstText,
-        aliceReplyDecrypted: aliceReplyText,
-      },
-      null,
-      2
-    )
-  );
-
-  alice.conn.disconnect();
-  bob.conn.disconnect();
 }
 
 main().catch(error => {

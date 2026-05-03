@@ -13,11 +13,13 @@ import {
 export default __t.row({
   id: __t.u64(),
   deviceId: __t.string().name("device_id"),
-  label: __t.option(__t.string()),
-  platform: __t.option(__t.string()),
+  accountId: __t.u64().name("account_id"),
+  verificationCodeHash: __t.string().name("verification_code_hash"),
   clientCreatedAt: __t.timestamp().name("client_created_at"),
   expiresAt: __t.timestamp().name("expires_at"),
-  createdAt: __t.timestamp().name("created_at"),
   approvedAt: __t.option(__t.timestamp()).name("approved_at"),
   consumedAt: __t.option(__t.timestamp()).name("consumed_at"),
+  pendingSortKey: __t.i64().name("pending_sort_key"),
+  createdAt: __t.timestamp().name("created_at"),
+  updatedAt: __t.timestamp().name("updated_at"),
 });

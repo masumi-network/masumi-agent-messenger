@@ -4,13 +4,18 @@ import { generateAgentKeyPair } from '../../../shared/agent-crypto';
 import type { MasumiRegistrationResult } from '../../../shared/inbox-agent-registration';
 import { createEmptyMasumiRegistrationResult } from '../../../shared/inbox-agent-registration';
 import { buildPreferredDefaultInboxSlug, normalizeEmail } from '../../../shared/inbox-slug';
-import type { VisibleAgentRow, VisibleInboxRow } from '../../../webapp/src/module_bindings/types';
+import type { Agent, Account } from '../../../webapp/src/module_bindings/types';
 import {
   connectAuthenticated,
   disconnectConnection,
-  readInboxRows,
+  publishedAgentKeyPairFromBundle,
+  publishedAgentKeyPairMatches,
+  readAccounts,
+  readAgentCurrentKeyBundle,
+  readPublishedAgentKeyPair,
   subscribeInboxTables,
   waitForBootstrapRows,
+  type PublishedAgentKeyPair,
 } from './spacetimedb';
 import { saveBootstrapSnapshot, type BootstrapSnapshot, type ResolvedProfile } from './config-store';
 import {
@@ -22,10 +27,12 @@ import type { TaskReporter } from './command-runtime';
 import { resolveStoredActorKeyPairForPublishedActor } from './actor-keys';
 import {
   applyRegistrationMetadataToActor,
+  importOwnedSaasInboxAgents,
   syncMasumiInboxAgentRegistration,
   type ConfirmLinkedEmailPrompt,
   type ConfirmPublicDescriptionPrompt,
   type ConfirmRegistrationPrompt,
+  type OwnedSaasAgentImportSummary,
   type PauseHandler,
   type RegistrationMode,
 } from './masumi-inbox-agent';
@@ -51,7 +58,7 @@ export type ConfirmDefaultSlugPromptResult =
     };
 
 export type ConfirmDefaultSlugPrompt = (params: {
-  normalizedEmail: string;
+  email: string;
   suggestedSlug: string;
 }) => Promise<ConfirmDefaultSlugPromptResult>;
 
@@ -61,6 +68,7 @@ export type BootstrapResult = {
   inbox: BootstrapSnapshot['inbox'];
   actor: BootstrapSnapshot['actor'];
   agentRegistration: MasumiRegistrationResult;
+  ownedAgentImport: OwnedSaasAgentImportSummary;
   deviceId: string;
   localKeysReady: boolean;
   keySource: BootstrapKeySource;
@@ -74,16 +82,16 @@ export type BootstrapResult = {
 function toBootstrapSnapshot(params: {
   email: string;
   identityHex: string;
-  inbox: VisibleInboxRow;
-  actor: VisibleAgentRow;
+  inbox: Account;
+  actor: Agent;
+  actorKeys: PublishedAgentKeyPair;
 }): BootstrapSnapshot {
   return {
     email: params.email,
     spacetimeIdentity: params.identityHex,
     inbox: {
       id: params.inbox.id.toString(),
-      normalizedEmail: params.inbox.normalizedEmail,
-      displayEmail: params.inbox.displayEmail,
+      email: params.inbox.email,
     },
     actor: {
       id: params.actor.id.toString(),
@@ -93,20 +101,20 @@ function toBootstrapSnapshot(params: {
       masumiRegistrationNetwork: params.actor.masumiRegistrationNetwork ?? undefined,
       masumiInboxAgentId: params.actor.masumiInboxAgentId ?? undefined,
       masumiAgentIdentifier: params.actor.masumiAgentIdentifier ?? undefined,
-      masumiRegistrationState: params.actor.masumiRegistrationState ?? undefined,
+      masumiRegistrationState: params.actor.masumiRegistrationState?.tag ?? undefined,
     },
     keyVersions: {
-      encryption: params.actor.currentEncryptionKeyVersion,
-      signing: params.actor.currentSigningKeyVersion,
+      encryption: params.actorKeys.encryption.keyVersion,
+      signing: params.actorKeys.signing.keyVersion,
     },
     actorKeys: {
       encryption: {
-        publicKey: params.actor.currentEncryptionPublicKey,
-        keyVersion: params.actor.currentEncryptionKeyVersion,
+        publicKey: params.actorKeys.encryption.publicKey,
+        keyVersion: params.actorKeys.encryption.keyVersion,
       },
       signing: {
-        publicKey: params.actor.currentSigningPublicKey,
-        keyVersion: params.actor.currentSigningKeyVersion,
+        publicKey: params.actorKeys.signing.publicKey,
+        keyVersion: params.actorKeys.signing.keyVersion,
       },
     },
     updatedAt: new Date().toISOString(),
@@ -120,73 +128,49 @@ async function createAgentKeyPair(
 ): Promise<AgentKeyPair> {
   reporter.verbose?.('Generating local agent key bundle');
   const created = await generateAgentKeyPair({
-    encryptionKeyVersion: 'enc-v1',
-    signingKeyVersion: 'sig-v1',
+    encryptionKeyVersion: 1,
+    signingKeyVersion: 1,
   });
   await secretStore.setAgentKeyPair(profileName, created);
   reporter.verbose?.('Stored agent key bundle in OS keychain');
   return created;
 }
 
-type PublishedDefaultActorKeys = {
-  encryption: {
-    publicKey: string;
-    keyVersion: string;
-    algorithm: string;
-  };
-  signing: {
-    publicKey: string;
-    keyVersion: string;
-    algorithm: string;
-  };
-};
-
 function readDefaultActor(
-  normalizedEmail: string,
-  actors: VisibleAgentRow[]
-): VisibleAgentRow | null {
+  email: string,
+  actors: Agent[]
+): Agent | null {
   return (
     actors.find(actor => {
-      return actor.normalizedEmail === normalizedEmail && actor.isDefault;
+      return actor.email === email && actor.isDefault;
     }) ?? null
   );
 }
 
 function matchesPublishedDefaultActor(
-  actor: VisibleAgentRow,
+  published: PublishedAgentKeyPair,
   keyPair: AgentKeyPair
 ): boolean {
-  return (
-    actor.currentEncryptionPublicKey === keyPair.encryption.publicKey &&
-    actor.currentEncryptionKeyVersion === keyPair.encryption.keyVersion &&
-    actor.currentSigningPublicKey === keyPair.signing.publicKey &&
-    actor.currentSigningKeyVersion === keyPair.signing.keyVersion
-  );
-}
-
-function toPublishedDefaultActorKeys(actor: VisibleAgentRow): PublishedDefaultActorKeys {
-  return {
+  return publishedAgentKeyPairMatches(published, {
     encryption: {
-      publicKey: actor.currentEncryptionPublicKey,
-      keyVersion: actor.currentEncryptionKeyVersion,
-      algorithm: actor.currentEncryptionAlgorithm,
+      publicKey: keyPair.encryption.publicKey,
+      keyVersion: keyPair.encryption.keyVersion,
     },
     signing: {
-      publicKey: actor.currentSigningPublicKey,
-      keyVersion: actor.currentSigningKeyVersion,
-      algorithm: actor.currentSigningAlgorithm,
+      publicKey: keyPair.signing.publicKey,
+      keyVersion: keyPair.signing.keyVersion,
     },
-  };
+  });
 }
 
 function requireVerifiedEmail(claims: IdTokenClaims): string {
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
   }
-  return normalizedEmail;
+  return email;
 }
 
 export async function bootstrapAuthenticatedInbox(params: {
@@ -211,7 +195,7 @@ export async function bootstrapAuthenticatedInbox(params: {
     });
   }
 
-  const normalizedEmail = requireVerifiedEmail(params.claims);
+  const email = requireVerifiedEmail(params.claims);
   const secretStore = params.secretStore ?? createSecretStore();
 
   params.reporter.verbose?.('Connecting to SpacetimeDB');
@@ -229,9 +213,9 @@ export async function bootstrapAuthenticatedInbox(params: {
     try {
       params.reporter.verbose?.('Bootstrapping default inbox');
       const existingLocalKeyPair = await secretStore.getAgentKeyPair(params.profile.name);
-      const { actors } = readInboxRows(conn);
-      const existingDefaultActor = readDefaultActor(normalizedEmail, actors);
-      const suggestedDefaultSlug = buildPreferredDefaultInboxSlug(normalizedEmail, slug =>
+      const { actors } = await readAccounts(conn);
+      const existingDefaultActor = readDefaultActor(email, actors);
+      const suggestedDefaultSlug = buildPreferredDefaultInboxSlug(email, slug =>
         actors.some(actor => actor.slug === slug)
       );
       let setupPublicDescription = params.desiredPublicDescription;
@@ -239,7 +223,7 @@ export async function bootstrapAuthenticatedInbox(params: {
       if (!existingDefaultActor) {
         const defaultSetup = params.confirmDefaultSlug
           ? await params.confirmDefaultSlug({
-              normalizedEmail,
+              email,
               suggestedSlug: suggestedDefaultSlug,
             })
           : suggestedDefaultSlug;
@@ -254,8 +238,13 @@ export async function bootstrapAuthenticatedInbox(params: {
         }
       }
       const publishedKeyPair = existingDefaultActor
-        ? toPublishedDefaultActorKeys(existingDefaultActor)
+        ? await readPublishedAgentKeyPair(conn, existingDefaultActor)
         : null;
+      if (existingDefaultActor && !publishedKeyPair) {
+        throw userError('Published default inbox key bundle is missing.', {
+          code: 'BOOTSTRAP_KEYS_UNAVAILABLE',
+        });
+      }
 
       let localKeyPair = existingLocalKeyPair;
       let keySource: BootstrapKeySource = 'existing_local';
@@ -275,9 +264,8 @@ export async function bootstrapAuthenticatedInbox(params: {
           profile: params.profile,
           secretStore,
           identity: {
-            normalizedEmail,
+            email,
             slug: existingDefaultActor.slug,
-            inboxIdentifier: existingDefaultActor.inboxIdentifier ?? undefined,
           },
           published: publishedKeyPair!,
         });
@@ -286,7 +274,7 @@ export async function bootstrapAuthenticatedInbox(params: {
           localKeyPair = resolvedLocalKeys.keyPair;
           if (
             !existingLocalKeyPair ||
-            !matchesPublishedDefaultActor(existingDefaultActor, existingLocalKeyPair)
+            !matchesPublishedDefaultActor(publishedKeyPair!, existingLocalKeyPair)
           ) {
             params.reporter.verbose?.('Recovered matching local agent key bundle for the published default inbox');
           } else {
@@ -295,9 +283,10 @@ export async function bootstrapAuthenticatedInbox(params: {
         } else {
           params.reporter.info(
             resolvedLocalKeys.status === 'mismatch'
-              ? 'Local agent key bundle does not match the published default inbox keys. Recover the correct private keys, import a backup, or rotate keys before this CLI profile can decrypt messages.'
+              ? 'Local agent key bundle does not match the published default inbox keys. Recover the correct private keys, import a backup, or reset keys before this CLI profile can decrypt messages.'
               : 'Default inbox already exists. Reusing published public keys and keeping local private key recovery pending for this CLI profile.'
           );
+          localKeyPair = null;
           recoveryRequired = true;
           recoveryReason = resolvedLocalKeys.status;
           recoveryOptions = ['device_share', 'backup_import', 'rotate'];
@@ -315,27 +304,26 @@ export async function bootstrapAuthenticatedInbox(params: {
         params.profile.name,
         secretStore
       );
-      await conn.reducers.upsertInboxFromOidcIdentity({
+      await conn.reducers.upsertAccountFromOidcIdentity({
         displayName: params.displayName?.trim() || params.claims.name?.trim() || undefined,
         defaultSlug,
         encryptionPublicKey: keyPair.encryption.publicKey,
-        encryptionKeyVersion: keyPair.encryption.keyVersion,
-        encryptionAlgorithm: keyPair.encryption.algorithm,
+        keyBundleVersion: keyPair.encryption.keyVersion,
+        encryptionAlgorithm: { tag: 'EcdhP256V1' },
         signingPublicKey: keyPair.signing.publicKey,
-        signingKeyVersion: keyPair.signing.keyVersion,
-        signingAlgorithm: keyPair.signing.algorithm,
+        signingAlgorithm: { tag: 'EcdsaP256Sha256V1' },
         deviceId: deviceMaterial.deviceId,
         deviceLabel: `CLI (${process.platform})`,
         devicePlatform: process.platform,
         deviceEncryptionPublicKey: deviceMaterial.keyPair.publicKey,
         deviceEncryptionKeyVersion: deviceMaterial.keyPair.keyVersion,
-        deviceEncryptionAlgorithm: deviceMaterial.keyPair.algorithm,
+        deviceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
       });
 
       params.reporter.info('Syncing inbox...');
       const { inbox, actor } = await waitForBootstrapRows({
         conn,
-        normalizedEmail,
+        email,
         encryptionPublicKey: keyPair.encryption.publicKey,
         encryptionKeyVersion: keyPair.encryption.keyVersion,
         signingPublicKey: keyPair.signing.publicKey,
@@ -362,12 +350,26 @@ export async function bootstrapAuthenticatedInbox(params: {
       });
       resolvedActor = applyRegistrationMetadataToActor(actor, syncedRegistration.metadata);
       agentRegistration = syncedRegistration.registration;
+      const resolvedBundle = await readAgentCurrentKeyBundle(conn, resolvedActor);
+      const actorKeys = resolvedBundle
+        ? publishedAgentKeyPairFromBundle(resolvedBundle)
+        : {
+            encryption: {
+              publicKey: keyPair.encryption.publicKey,
+              keyVersion: keyPair.encryption.keyVersion,
+            },
+            signing: {
+              publicKey: keyPair.signing.publicKey,
+              keyVersion: keyPair.signing.keyVersion,
+            },
+          };
 
       const snapshot = toBootstrapSnapshot({
-        email: normalizedEmail,
+        email: email,
         identityHex,
         inbox,
         actor: resolvedActor,
+        actorKeys,
       });
       await saveBootstrapSnapshot(params.profile.name, snapshot);
       if (localKeyPair) {
@@ -380,6 +382,18 @@ export async function bootstrapAuthenticatedInbox(params: {
           keyPair: localKeyPair,
         });
       }
+      const ownedAgentImport = await importOwnedSaasInboxAgents({
+        profile: {
+          ...params.profile,
+          bootstrapSnapshot: snapshot,
+        },
+        session: params.session,
+        conn,
+        email,
+        reporter: params.reporter,
+        secretStore,
+        apply: true,
+      });
       params.reporter.success(`Inbox synced for ${actor.slug}`);
       if (!localKeyPair) {
         params.reporter.info(
@@ -393,6 +407,7 @@ export async function bootstrapAuthenticatedInbox(params: {
         inbox: snapshot.inbox,
         actor: snapshot.actor,
         agentRegistration,
+        ownedAgentImport,
         deviceId: deviceMaterial.deviceId,
         localKeysReady: Boolean(localKeyPair),
         keySource,

@@ -20,11 +20,12 @@ import {
   type DeviceShareRequestLookupConnection,
 } from '@/lib/device-share';
 import { markImportedRotationSnapshotKeysPending } from '@/lib/imported-rotation-key-confirmation';
+import { fromHex, toHex } from '@/lib/crypto';
 import type { UseKeyVaultResult } from '@/hooks/use-key-vault';
 import { reducers } from '@/module_bindings';
 import type {
   Agent,
-  VisibleDeviceKeyBundleRow,
+  DeviceKeyBundle,
 } from '@/module_bindings/types';
 import { matchesPublishedActorKeys } from '../workspace/actor-settings';
 import { isTimestampInFuture } from '../../../../shared/spacetime-time';
@@ -40,8 +41,13 @@ type PendingDeviceRequest = {
   expiresAt: string;
 };
 
-function deviceKeyBundleNeverExpires(bundle: { expiryMode: { tag: string } }): boolean {
-  return bundle.expiryMode.tag === 'NeverExpires' || bundle.expiryMode.tag === 'neverExpires';
+function deviceKeyBundleRequiresRotationConfirmation(bundle: unknown): boolean {
+  const purpose =
+    typeof bundle === 'object' && bundle !== null && 'purpose' in bundle
+      ? (bundle as { purpose?: string | { tag?: string } }).purpose
+      : null;
+  const tag = typeof purpose === 'string' ? purpose : purpose?.tag;
+  return tag === 'RotationShare';
 }
 
 async function loadKnownCurrentKeysForSnapshot(
@@ -64,24 +70,33 @@ export type SecurityLiveConnection = DeviceShareRequestLookupConnection & {
     claimDeviceKeyBundle(params: {
       deviceId: string;
     }): Promise<
-      Array<{
+      ReadonlyArray<{
         sourceEncryptionPublicKey: string;
-        bundleCiphertext: string;
-        bundleIv: string;
-        bundleAlgorithm: string;
+        bundleCiphertext: Uint8Array;
+        bundleIv: Uint8Array;
+        bundleAlgorithm: { tag: string };
       }>
     >;
   };
 };
 
+function bundleAlgorithmLabel(algorithm: { tag: string }): string {
+  switch (algorithm.tag) {
+    case 'AesGcm256V1':
+      return 'aes-gcm-256-device-share-v1';
+    default:
+      return algorithm.tag;
+  }
+}
+
 export function useSecurityRecovery(params: {
   existingDefaultActor: Agent | null;
-  normalizedEmail: string;
+  email: string;
   liveConnection: SecurityLiveConnection | null;
   canWrite: boolean;
   writeReason: string | null;
   vault: UseKeyVaultResult;
-  deviceShareBundles: VisibleDeviceKeyBundleRow[];
+  deviceShareBundles: DeviceKeyBundle[];
 }) {
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -98,7 +113,7 @@ export function useSecurityRecovery(params: {
 
   const registerDeviceReducer = useReducer(reducers.registerDevice);
   const createDeviceShareRequestReducer = useReducer(reducers.createDeviceShareRequest);
-  const approveDeviceShareReducer = useReducer(reducers.approveDeviceShare);
+  const approveDeviceShareReducer = useReducer(reducers.approveDeviceShareRequest);
   const revokeDeviceReducer = useReducer(reducers.revokeDevice);
 
   useEffect(() => {
@@ -120,7 +135,7 @@ export function useSecurityRecovery(params: {
     }
 
     let cancelled = false;
-    void loadStoredDeviceKeyMaterial(params.normalizedEmail)
+    void loadStoredDeviceKeyMaterial(params.email)
       .then(device => {
         if (!cancelled) {
           setCurrentDeviceId(device?.deviceId ?? null);
@@ -135,7 +150,7 @@ export function useSecurityRecovery(params: {
     return () => {
       cancelled = true;
     };
-  }, [params.normalizedEmail, params.vault.unlocked]);
+  }, [params.email, params.vault.unlocked]);
 
   const inspectDefaultKeyIssue = useCallback(async (): Promise<DefaultKeyIssue> => {
     if (!params.existingDefaultActor) {
@@ -143,7 +158,7 @@ export function useSecurityRecovery(params: {
     }
 
     const keyPair = await loadStoredAgentKeyPair({
-      normalizedEmail: params.normalizedEmail,
+      email: params.email,
       slug: params.existingDefaultActor.slug,
     });
 
@@ -154,7 +169,7 @@ export function useSecurityRecovery(params: {
     return matchesPublishedActorKeys(params.existingDefaultActor, keyPair)
       ? null
       : 'mismatch';
-  }, [params.existingDefaultActor, params.normalizedEmail]);
+  }, [params.existingDefaultActor, params.email]);
 
   useEffect(() => {
     if (!params.vault.unlocked || !params.existingDefaultActor) {
@@ -203,7 +218,7 @@ export function useSecurityRecovery(params: {
       return (
         bundle.targetDeviceId === targetDeviceId &&
         !bundle.consumedAt &&
-        (deviceKeyBundleNeverExpires(bundle) || isTimestampInFuture(bundle.expiresAt))
+        isTimestampInFuture(bundle.expiresAt)
       );
     });
     if (!matchingBundle) {
@@ -233,14 +248,14 @@ export function useSecurityRecovery(params: {
         }
 
         await importClaimedDeviceShare({
-          normalizedEmail: params.normalizedEmail,
+          email: params.email,
           device: pendingDeviceRequest.device,
           sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
-          bundleCiphertext: bundle.bundleCiphertext,
-          bundleIv: bundle.bundleIv,
-          bundleAlgorithm: bundle.bundleAlgorithm,
+          bundleCiphertext: toHex(bundle.bundleCiphertext),
+          bundleIv: toHex(bundle.bundleIv),
+          bundleAlgorithm: bundleAlgorithmLabel(bundle.bundleAlgorithm),
         });
-        await clearPendingDeviceShareKeyMaterial(params.normalizedEmail);
+        await clearPendingDeviceShareKeyMaterial(params.email);
 
         if (!claimIsCurrent() || !pendingRequestStillMatches()) {
           return;
@@ -296,7 +311,7 @@ export function useSecurityRecovery(params: {
     params.deviceShareBundles,
     params.existingDefaultActor,
     params.liveConnection,
-    params.normalizedEmail,
+    params.email,
     pendingDeviceRequest,
   ]);
 
@@ -318,7 +333,7 @@ export function useSecurityRecovery(params: {
       return (
         bundle.targetDeviceId === currentDeviceId &&
         !bundle.consumedAt &&
-        (deviceKeyBundleNeverExpires(bundle) || isTimestampInFuture(bundle.expiresAt))
+        isTimestampInFuture(bundle.expiresAt)
       );
     });
     if (!matchingBundle) {
@@ -336,7 +351,7 @@ export function useSecurityRecovery(params: {
     });
 
     void (async () => {
-      const device = await loadStoredDeviceKeyMaterial(params.normalizedEmail);
+      const device = await loadStoredDeviceKeyMaterial(params.email);
       if (!device || device.deviceId !== currentDeviceId) {
         return;
       }
@@ -350,14 +365,14 @@ export function useSecurityRecovery(params: {
       }
 
       const snapshot = await decryptClaimedDeviceShare({
-        normalizedEmail: params.normalizedEmail,
+        email: params.email,
         device,
         sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
-        bundleCiphertext: bundle.bundleCiphertext,
-        bundleIv: bundle.bundleIv,
-        bundleAlgorithm: bundle.bundleAlgorithm,
+        bundleCiphertext: toHex(bundle.bundleCiphertext),
+        bundleIv: toHex(bundle.bundleIv),
+        bundleAlgorithm: bundleAlgorithmLabel(bundle.bundleAlgorithm),
       });
-      const knownCurrentKeys = deviceKeyBundleNeverExpires(matchingBundle)
+      const knownCurrentKeys = deviceKeyBundleRequiresRotationConfirmation(matchingBundle)
         ? await loadKnownCurrentKeysForSnapshot(snapshot)
         : null;
       await importDeviceShareSnapshot(snapshot);
@@ -378,8 +393,8 @@ export function useSecurityRecovery(params: {
         if (claimIsCurrent()) {
           setError(
             keyIssueError instanceof Error
-              ? `Rotated private keys were imported, but the local key status could not be refreshed. ${keyIssueError.message}`
-              : 'Rotated private keys were imported, but the local key status could not be refreshed.'
+              ? `Reset private keys were imported, but the local key status could not be refreshed. ${keyIssueError.message}`
+              : 'Reset private keys were imported, but the local key status could not be refreshed.'
           );
         }
         return;
@@ -393,7 +408,7 @@ export function useSecurityRecovery(params: {
       setFeedback(
         nextIssue
           ? 'A key bundle arrived, but the default inbox keys are still incomplete for this browser.'
-          : 'Rotated private keys imported on this device.'
+          : 'Reset private keys imported on this device.'
       );
     })()
       .catch(claimError => {
@@ -419,12 +434,12 @@ export function useSecurityRecovery(params: {
     params.deviceShareBundles,
     params.existingDefaultActor,
     params.liveConnection,
-    params.normalizedEmail,
+    params.email,
     params.vault.unlocked,
   ]);
 
   async function ensureCurrentDeviceRegistration(): Promise<DeviceKeyMaterial> {
-    const device = await getOrCreateDeviceKeyMaterial(params.normalizedEmail);
+    const device = await getOrCreateDeviceKeyMaterial(params.email);
     await Promise.resolve(
       registerDeviceReducer({
         deviceId: device.deviceId,
@@ -432,7 +447,7 @@ export function useSecurityRecovery(params: {
         platform: typeof navigator !== 'undefined' ? navigator.platform : undefined,
         deviceEncryptionPublicKey: device.keyPair.publicKey,
         deviceEncryptionKeyVersion: device.keyPair.keyVersion,
-        deviceEncryptionAlgorithm: device.keyPair.algorithm,
+        deviceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
       })
     );
     return device;
@@ -459,7 +474,7 @@ export function useSecurityRecovery(params: {
     setFeedback(null);
 
     try {
-      const prepared = await prepareLocalDeviceShareRequest(params.normalizedEmail);
+      const prepared = await prepareLocalDeviceShareRequest(params.email);
       await Promise.resolve(
         registerDeviceReducer({
           deviceId: prepared.device.deviceId,
@@ -467,7 +482,7 @@ export function useSecurityRecovery(params: {
           platform: typeof navigator !== 'undefined' ? navigator.platform : undefined,
           deviceEncryptionPublicKey: prepared.device.keyPair.publicKey,
           deviceEncryptionKeyVersion: prepared.device.keyPair.keyVersion,
-          deviceEncryptionAlgorithm: prepared.device.keyPair.algorithm,
+          deviceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
         })
       );
       await Promise.resolve(
@@ -537,7 +552,7 @@ export function useSecurityRecovery(params: {
       setVerifyingDeviceRequest(false);
 
       const approvedShare = await buildApprovedDeviceShare({
-        normalizedEmail: params.normalizedEmail,
+        email: params.email,
         targetDeviceId: request.deviceId,
         targetDeviceEncryptionPublicKey: request.deviceEncryptionPublicKey,
         sourceDevice,
@@ -547,16 +562,14 @@ export function useSecurityRecovery(params: {
       await Promise.resolve(
         approveDeviceShareReducer({
           requestId: request.requestId,
-          sourceDeviceId: approvedShare.sourceDeviceId,
           sourceEncryptionPublicKey: approvedShare.sourceEncryptionPublicKey,
           sourceEncryptionKeyVersion: approvedShare.sourceEncryptionKeyVersion,
-          sourceEncryptionAlgorithm: approvedShare.sourceEncryptionAlgorithm,
-          bundleCiphertext: approvedShare.bundleCiphertext,
-          bundleIv: approvedShare.bundleIv,
-          bundleAlgorithm: approvedShare.bundleAlgorithm,
+          sourceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
+          bundleCiphertext: fromHex(approvedShare.bundleCiphertext),
+          bundleIv: fromHex(approvedShare.bundleIv),
+          bundleAlgorithm: { tag: 'AesGcm256V1' },
           sharedAgentCount: BigInt(approvedShare.sharedActorCount),
           sharedKeyVersionCount: BigInt(approvedShare.sharedKeyVersionCount),
-          expiresAt: Timestamp.fromDate(approvedShare.expiresAt),
         })
       );
 

@@ -144,6 +144,33 @@ function describePreviousKeyConfirmStatus(
   return 'no pending import found';
 }
 
+function describeManagedImport(
+  result: LoginResult extends { ownedAgentImport?: infer T } ? T : never
+): string {
+  if (!result) {
+    return 'not checked';
+  }
+  const imported = 'imported' in result ? Number(result.imported) : 0;
+  const synced = 'synced' in result ? Number(result.synced) : 0;
+  const checked = 'checked' in result ? Number(result.checked) : 0;
+  const warnings =
+    'warnings' in result && Array.isArray(result.warnings)
+      ? result.warnings.length
+      : 0;
+  return `${imported.toString()} imported, ${synced.toString()} synced, ${checked.toString()} checked${
+    warnings ? `, ${warnings.toString()} warning${warnings === 1 ? '' : 's'}` : ''
+  }`;
+}
+
+function renderManagedImportWarnings(
+  result: LoginResult extends { ownedAgentImport?: infer T } ? T : never
+): string[] {
+  if (!result || !('warnings' in result) || !Array.isArray(result.warnings)) {
+    return [];
+  }
+  return result.warnings.map(warning => yellow(`Warning: ${String(warning)}`));
+}
+
 function buildAccountDefaultSlugPrompt(
   options: GlobalOptions
 ): { confirmDefaultSlug?: ConfirmDefaultSlugPrompt } {
@@ -152,9 +179,9 @@ function buildAccountDefaultSlugPrompt(
   }
 
   return {
-    confirmDefaultSlug: async ({ normalizedEmail, suggestedSlug }) => {
+    confirmDefaultSlug: async ({ email, suggestedSlug }) => {
       const slug = await promptText({
-        question: `Public agent slug for ${normalizedEmail}`,
+        question: `Public agent slug for ${email}`,
         defaultValue: suggestedSlug,
       });
       const selectedSlug = slug.trim() || suggestedSlug;
@@ -271,11 +298,12 @@ function registerAccountLoginCommand(command: Command): void {
                   color: result.localKeysReady ? green : yellow,
                 },
                 { key: 'Key source', value: result.keySource },
-              ]),
+                { key: 'Managed imports', value: describeManagedImport(result.ownedAgentImport) },
+              ]).concat(renderManagedImportWarnings(result.ownedAgentImport)),
           celebration: isPendingDeviceLoginResult(result)
             ? undefined
             : (getBirthdayCelebration({
-                email: result.inbox.displayEmail,
+                email: result.inbox.email,
                 displayName: result.actor.displayName,
               }) ?? undefined),
         }),
@@ -399,7 +427,8 @@ function registerAccountLoginCommand(command: Command): void {
               value: result.localKeysReady ? 'ready' : 'pending recovery',
               color: result.localKeysReady ? green : yellow,
             },
-          ]),
+            { key: 'Managed imports', value: describeManagedImport(result.ownedAgentImport) },
+          ]).concat(renderManagedImportWarnings(result.ownedAgentImport)),
         }),
       });
     });
@@ -594,9 +623,9 @@ function registerAccountDeviceCommands(command: Command): void {
                       name: deviceItem.label ?? deviceItem.deviceId,
                       platform: deviceItem.platform ?? '',
                       status:
-                        deviceItem.status === 'active'
+                        deviceItem.status.tag === 'Approved'
                           ? badge('active', green)
-                          : badge(deviceItem.status, yellow),
+                          : badge(deviceItem.status.tag, yellow),
                       pending:
                         deviceItem.pendingRequestCount > 0
                           ? badge(`${deviceItem.pendingRequestCount} pending`, yellow)
@@ -654,15 +683,15 @@ function registerAccountBackupCommands(command: Command): void {
         preferPlainReporter: true,
         run: async ({ reporter }) => {
           const profile = await loadProfile(options.profile);
-          const normalizedEmail =
-            profile.bootstrapSnapshot?.inbox.normalizedEmail ?? 'masumi-agent-messenger';
+          const email =
+            profile.bootstrapSnapshot?.inbox.email ?? 'masumi-agent-messenger';
           const filePath =
             options.file ??
             (options.json
-              ? defaultBackupFilePath(normalizedEmail)
+              ? defaultBackupFilePath(email)
               : await promptText({
                   question: 'Backup file path',
-                  defaultValue: defaultBackupFilePath(normalizedEmail),
+                  defaultValue: defaultBackupFilePath(email),
                 }));
           const passphrase =
             options.passphrase ??
@@ -697,7 +726,7 @@ function registerAccountBackupCommands(command: Command): void {
           summary: 'Encrypted key backup created.',
           details: renderKeyValue([
             { key: 'File', value: result.filePath },
-            { key: 'Email', value: result.normalizedEmail },
+            { key: 'Email', value: result.email },
             { key: 'Agents', value: result.actorCount },
             { key: 'Key versions', value: result.keyVersionCount },
           ]),
@@ -750,7 +779,7 @@ function registerAccountBackupCommands(command: Command): void {
           summary: 'Encrypted key backup imported.',
           details: renderKeyValue([
             { key: 'File', value: result.filePath },
-            { key: 'Email', value: result.normalizedEmail },
+            { key: 'Email', value: result.email },
             { key: 'Agents', value: result.actorCount },
             { key: 'Key versions', value: result.keyVersionCount },
           ]),
@@ -770,7 +799,7 @@ function registerAccountKeysCommands(command: Command): void {
 
   keys
     .command('confirm')
-    .description('Confirm automatically imported rotated private keys before sending')
+    .description('Confirm automatically imported reset private keys before sending')
     .option('--slug <slug>', 'Agent slug to confirm')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as KeysConfirmOptions;
@@ -785,8 +814,8 @@ function registerAccountKeysCommands(command: Command): void {
         toHuman: result => ({
           summary:
             result.previousStatus === 'pending'
-              ? 'Imported rotated keys confirmed.'
-              : 'Imported rotated keys checked.',
+              ? 'Imported reset keys confirmed.'
+              : 'Imported reset keys checked.',
           details: renderKeyValue([
             { key: 'Profile', value: result.profile, color: dim },
             { key: 'Agent', value: result.slug },
@@ -903,7 +932,7 @@ export function registerAccountCommands(program: Command): void {
                 value: result.connected ? green('yes') : yellow('no'),
               },
               ...(result.inbox
-                ? [{ key: 'Email', value: result.inbox.displayEmail }]
+                ? [{ key: 'Email', value: result.inbox.email }]
                 : []),
               ...(result.actor
                 ? [
@@ -929,12 +958,12 @@ export function registerAccountCommands(program: Command): void {
                 : []),
               {
                 key: 'Encryption key',
-                value: result.keyVersions.encryption ?? 'n/a',
+                value: result.keyVersions.encryption?.toString() ?? 'n/a',
                 color: dim,
               },
               {
                 key: 'Signing key',
-                value: result.keyVersions.signing ?? 'n/a',
+                value: result.keyVersions.signing?.toString() ?? 'n/a',
                 color: dim,
               },
             ]),
@@ -1057,7 +1086,7 @@ export function registerAccountCommands(program: Command): void {
             ? green('Account synced.')
             : yellow('Account synced. Local private keys still need recovery.'),
           details: renderKeyValue([
-            { key: 'Email', value: result.inbox.displayEmail },
+            { key: 'Email', value: result.inbox.email },
             { key: 'Agent', value: result.actor.slug, color: cyan },
             {
               key: 'Local keys',

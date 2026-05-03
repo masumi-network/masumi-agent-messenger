@@ -11,7 +11,7 @@ import {
 } from "spacetimedb";
 
 import {
-  VisibleThreadSecretEnvelopeRow,
+  ThreadSecretEnvelope,
 } from "./types";
 
 export const params = {
@@ -19,6 +19,9 @@ export const params = {
   threadId: __t.u64(),
   membershipVersion: __t.option(__t.u64()),
   senderAgentDbId: __t.option(__t.u64()),
-  secretVersion: __t.option(__t.string()),
+  recipientAgentDbId: __t.option(__t.u64()),
+  secretVersion: __t.option(__t.u32()),
+  afterId: __t.option(__t.u64()),
+  limit: __t.option(__t.u32()),
 };
-export const returnType = __t.array(VisibleThreadSecretEnvelopeRow)
+export const returnType = __t.array(ThreadSecretEnvelope)

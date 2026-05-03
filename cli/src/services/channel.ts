@@ -4,11 +4,11 @@ import {
   verifySignedChannelMessage,
   type ChannelMessageSignatureInput,
 } from '../../../shared/channel-crypto';
-import { randomSenderMessageId, type AgentKeyPair } from '../../../shared/agent-crypto';
+import { fromHex, toHex } from '../../../shared/crypto-utils';
+import { randomSenderMessageId } from '../../../shared/agent-crypto';
 import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
-import { LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY } from '../../../shared/message-limits';
-import { limitSpacetimeSubscriptionQuery } from '../../../shared/spacetime-subscription-limits';
+import { prepareSpacetimeSubscriptionQuery } from '../../../shared/spacetime-subscription-limits';
 import {
   formatEncryptedMessageBody,
   isJsonContentType,
@@ -18,12 +18,9 @@ import {
 } from '../../../shared/message-format';
 import type {
   Agent,
-  ChannelMemberListRow,
-  PublicChannelMirrorRow,
-  PublicChannelPageRow,
-  VisibleChannelJoinRequestRow,
-  VisibleChannelMembershipRow,
-  VisibleChannelRow,
+  ChannelJoinRequest,
+  ChannelMember,
+  Channel,
 } from '../../../webapp/src/module_bindings/types';
 import { tables, type DbConnection, type SubscriptionHandle } from '../../../webapp/src/module_bindings';
 import { getStoredActorKeyPair } from './actor-keys';
@@ -31,29 +28,33 @@ import { ensureAuthenticatedSession } from './auth';
 import type { TaskReporter } from './command-runtime';
 import { loadProfile } from './config-store';
 import { connectivityError, userError } from './errors';
+import { requireImportedRotationKeyConfirmed } from './imported-rotation-key-confirmation';
 import { createSecretStore } from './secret-store';
 import {
   connectAnonymous,
   connectAuthenticated,
   disconnectConnection,
+  readAllOwnedAgents,
+  readPendingChannelJoinRequests,
 } from './spacetimedb';
 
 type ChannelQuery = Query<TypedTableDef> | string;
-const limitSubscription = limitSpacetimeSubscriptionQuery;
+const limitSubscription = prepareSpacetimeSubscriptionQuery;
 
 export type ChannelListItem = {
   id: string;
   slug: string;
   title: string | null;
   description: string | null;
-  publicJoinPermission: string;
+  accessMode: 'public' | 'approval_required';
   discoverable: boolean;
-  lastMessageSeq: string;
+  messageCount: string;
+  lastMessageAt: string;
 };
 
 export type ChannelMessageItem = {
   id: string;
-  channelSeq: string;
+  messageId: string;
   sender: string;
   createdAt?: string | null;
   text: string | null;
@@ -87,7 +88,7 @@ export type ChannelMemberListItem = {
   agentSlug: string;
   agentDisplayName: string | null;
   agentCurrentEncryptionPublicKey: string;
-  agentCurrentEncryptionKeyVersion: string;
+  agentCurrentKeyBundleVersion: string;
   permission: string;
   active: boolean;
   lastSentSeq: string;
@@ -125,7 +126,6 @@ export type ChannelMutationResult = {
   channelId?: string;
   permission?: string;
   accessMode?: string;
-  publicJoinPermission?: string;
   discoverable?: boolean;
   status: string;
 };
@@ -134,14 +134,55 @@ export type ChannelApprovalPermissionPrompt = (request: ChannelJoinRequestItem) 
 
 type ChannelSnapshot = {
   actors: Agent[];
-  visibleChannels: VisibleChannelRow[];
-  memberships: VisibleChannelMembershipRow[];
-  requests: VisibleChannelJoinRequestRow[];
+  visible_channels: Channel[];
+  memberships: ChannelMember[];
+  requests: ChannelJoinRequest[];
 };
 
+type ChannelAccessModeInput = 'public' | 'approval_required';
+
+function enumTag(value: { tag: string } | string | null | undefined): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  return value?.tag ?? '';
+}
+
+function channelAccessModeToReducer(mode: ChannelAccessModeInput): { tag: 'Public' } | { tag: 'ApprovalRequired' } {
+  return mode === 'approval_required' ? { tag: 'ApprovalRequired' } : { tag: 'Public' };
+}
+
+function channelAccessModeToCli(mode: { tag: string } | string | null | undefined): ChannelAccessModeInput {
+  const tag = enumTag(mode);
+  return tag === 'ApprovalRequired' || tag === 'approval_required' ? 'approval_required' : 'public';
+}
+
+function channelPermissionToReducer(
+  permission: string
+): { tag: 'Read' } | { tag: 'ReadWrite' } | { tag: 'Admin' } {
+  if (permission === 'read_write' || permission === 'ReadWrite') return { tag: 'ReadWrite' };
+  if (permission === 'admin' || permission === 'Admin') return { tag: 'Admin' };
+  if (permission === 'read' || permission === 'Read') return { tag: 'Read' };
+  throw userError('Permission must be read, read_write, or admin.', {
+    code: 'INVALID_CHANNEL_PERMISSION',
+  });
+}
+
+function channelPermissionToCli(permission: { tag: string } | string | null | undefined): string {
+  const tag = enumTag(permission);
+  if (tag === 'ReadWrite') return 'read_write';
+  if (tag === 'Admin') return 'admin';
+  if (tag === 'Read') return 'read';
+  return tag || 'read';
+}
+
+function channelMessageCount(channel: Channel): bigint {
+  return channel.messageCount;
+}
+
 type JoinedPublicChannelSnapshot = {
-  channel: VisibleChannelRow;
-  membership: VisibleChannelMembershipRow;
+  channel: Channel;
+  membership: ChannelMember;
 };
 
 function subscribeQueries(
@@ -167,56 +208,61 @@ function subscribeQueries(
   });
 }
 
-function readChannelSnapshot(conn: DbConnection): ChannelSnapshot {
+async function readChannelSnapshot(conn: DbConnection): Promise<ChannelSnapshot> {
+  const [actors, requests] = await Promise.all([
+    readAllOwnedAgents(conn),
+    readPendingChannelJoinRequests(conn),
+  ]);
   return {
-    actors: Array.from(conn.db.visibleAgents.iter()) as Agent[],
-    visibleChannels: Array.from(conn.db.visibleChannels.iter()) as VisibleChannelRow[],
+    actors,
+    visible_channels: Array.from(conn.db.visible_channels.iter()) as Channel[],
     memberships: Array.from(
-      conn.db.visibleChannelMemberships.iter()
-    ) as VisibleChannelMembershipRow[],
-    requests: Array.from(
-      conn.db.visibleChannelJoinRequests.iter()
-    ) as VisibleChannelJoinRequestRow[],
+      conn.db.visible_channel_memberships.iter()
+    ) as ChannelMember[],
+    requests,
   };
 }
 
-async function readPublicChannelMirrorBySlug(
+async function lookupPublicChannelBySlug(
   conn: DbConnection,
   normalizedSlug: string
-): Promise<PublicChannelMirrorRow | null> {
-  const rows = await conn.procedures.readPublicChannel({
-    channelId: undefined,
-    channelSlug: normalizedSlug,
-  });
-  return rows[0] ?? null;
+): Promise<Channel | null> {
+  return (await conn.procedures.lookupPublicChannelBySlug({
+    slug: normalizedSlug,
+  })) ?? null;
 }
 
 async function readVisibleChannelStateSnapshot(
   conn: DbConnection,
   params: {
-    actorId: bigint;
     channelId?: bigint;
     channelSlug?: string;
     requestId?: bigint;
   }
 ): Promise<ChannelSnapshot> {
   const state = await conn.procedures.readVisibleChannelState({
-    agentDbId: params.actorId,
     channelId: params.channelId,
     channelSlug: params.channelSlug,
-    requestId: params.requestId,
   });
+  const [actors, requests] = await Promise.all([
+    readAllOwnedAgents(conn),
+    readPendingChannelJoinRequests(conn),
+  ]);
   return {
-    actors: state.actors,
-    visibleChannels: state.channels,
-    memberships: state.memberships,
-    requests: state.requests,
+    actors,
+    visible_channels: state ? [state.channel] : [],
+    memberships: state?.member ? [state.member] : [],
+    requests: params.requestId
+      ? requests.filter(request => request.id === params.requestId)
+      : state
+        ? requests.filter(request => request.channelId === state.channel.id)
+        : requests,
   };
 }
 
 async function readOwnedChannelActor(params: {
   conn: DbConnection;
-  normalizedEmail: string;
+  email: string;
   actorSlug?: string;
 }): Promise<Agent> {
   const normalizedSlug =
@@ -226,26 +272,28 @@ async function readOwnedChannelActor(params: {
       code: 'INVALID_AGENT_SLUG',
     });
   }
-  const actors = await params.conn.procedures.readOwnedAgent({
-    agentSlug: normalizedSlug,
+  if (!normalizedSlug) {
+    throw userError('Pass --agent <slug> for channel actions.', {
+      code: 'AGENT_SLUG_REQUIRED',
+    });
+  }
+  const actor = await params.conn.procedures.readOwnedAgent({
+    slug: normalizedSlug,
   });
-  const actor = actors[0] ?? null;
   if (!actor) {
     throw userError(
-      normalizedSlug
-        ? `No owned agent found for slug \`${normalizedSlug}\`.`
-        : 'No default agent found. Run `masumi-agent-messenger account sync` first.',
+      `No owned agent found for slug \`${normalizedSlug}\`.`,
       {
-        code: normalizedSlug ? 'OWNED_ACTOR_NOT_FOUND' : 'INBOX_BOOTSTRAP_REQUIRED',
+        code: 'OWNED_ACTOR_NOT_FOUND',
       }
     );
   }
-  if (actor.normalizedEmail !== params.normalizedEmail) {
+  if (actor.email !== params.email) {
     throw userError('Current OIDC session email does not match the selected agent.', {
       code: 'OIDC_EMAIL_MISMATCH',
     });
   }
-  if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)) {
+  if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState?.tag)) {
     throw userError(
       `Agent \`${actor.slug}\` is deregistering or deregistered and cannot be used for channels.`,
       {
@@ -262,7 +310,7 @@ function findJoinedPublicChannelSnapshot(params: {
   actorId: bigint;
 }): JoinedPublicChannelSnapshot | null {
   const channel =
-    params.snapshot.visibleChannels.find(row => row.slug === params.slug) ?? null;
+    params.snapshot.visible_channels.find(row => row.slug === params.slug) ?? null;
   if (!channel) {
     return null;
   }
@@ -309,30 +357,43 @@ async function waitForJoinedPublicChannel(params: {
   });
 }
 
-function publicChannelToListItem(channel: PublicChannelMirrorRow | PublicChannelPageRow): ChannelListItem {
+function channelToListItem(channel: Channel): ChannelListItem {
   return {
-    id: channel.channelId.toString(),
+    id: channel.id.toString(),
     slug: channel.slug,
     title: channel.title ?? null,
     description: channel.description ?? null,
-    publicJoinPermission: channel.publicJoinPermission ?? 'read',
+    accessMode: channelAccessModeToCli(channel.accessMode),
     discoverable: channel.discoverable,
-    lastMessageSeq: channel.lastMessageSeq.toString(),
+    messageCount: channelMessageCount(channel).toString(),
+    lastMessageAt: formatTimestamp(channel.lastMessageAt),
   };
 }
 
-function channelJoinRequestToItem(request: VisibleChannelJoinRequestRow): ChannelJoinRequestItem {
+function channelJoinRequestToItem(
+  request: ChannelJoinRequest,
+  params: {
+    channel?: Channel | null;
+    requester?: Agent | null;
+    ownedAgentIds?: Set<bigint>;
+    adminChannelIds?: Set<bigint>;
+  } = {}
+): ChannelJoinRequestItem {
+  const channel = params.channel ?? null;
+  const requester = params.requester ?? null;
+  const isOutgoing = params.ownedAgentIds?.has(request.requesterAgentDbId) ?? false;
+  const isIncoming = params.adminChannelIds?.has(request.channelId) ?? false;
   return {
     id: request.id.toString(),
     channelId: request.channelId.toString(),
-    channelSlug: request.channelSlug,
-    channelTitle: request.channelTitle ?? null,
+    channelSlug: channel?.slug ?? `channel:${request.channelId.toString()}`,
+    channelTitle: channel?.title ?? null,
     requesterAgentDbId: request.requesterAgentDbId.toString(),
-    requesterSlug: request.requesterSlug,
-    requesterDisplayName: request.requesterDisplayName ?? null,
-    permission: request.permission,
-    status: request.status,
-    direction: request.direction,
+    requesterSlug: requester?.slug ?? `agent:${request.requesterAgentDbId.toString()}`,
+    requesterDisplayName: requester?.displayName ?? null,
+    permission: channelPermissionToCli(request.permission),
+    status: enumTag(request.status).toLowerCase(),
+    direction: isOutgoing && !isIncoming ? 'outgoing' : 'incoming',
     createdAt: formatTimestamp(request.createdAt),
     updatedAt: formatTimestamp(request.updatedAt),
   };
@@ -378,16 +439,14 @@ function buildTextPayload(message: string, contentType?: string): EncryptedMessa
 function toMessageSignatureInput(message: {
   channelId: bigint;
   senderPublicIdentity: string;
-  senderSeq: bigint;
-  senderMessageId?: bigint;
-  senderSigningKeyVersion: string;
+  senderMessageId: bigint;
+  senderSigningKeyVersion: number;
   plaintext: string;
   replyToMessageId?: bigint | null;
 }): ChannelMessageSignatureInput {
   return {
     channelId: message.channelId,
     senderPublicIdentity: message.senderPublicIdentity,
-    senderSeq: message.senderSeq,
     senderMessageId: message.senderMessageId,
     senderSigningKeyVersion: message.senderSigningKeyVersion,
     plaintext: message.plaintext,
@@ -395,24 +454,15 @@ function toMessageSignatureInput(message: {
   };
 }
 
-function buildChannelSigningKey(agentDbId: bigint, signingKeyVersion: string): string {
+function buildChannelSigningKey(agentDbId: bigint, signingKeyVersion: number): string {
   return `${agentDbId.toString()}:${signingKeyVersion}`;
-}
-
-function readStoredChannelSigningPublicKey(value: string): string | null {
-  const normalized = value.trim();
-  if (normalized === LEGACY_CHANNEL_SENDER_SIGNING_PUBLIC_KEY) {
-    return null;
-  }
-  return normalized ? normalized : null;
 }
 
 async function resolveChannelMessageSigningKeys(
   conn: DbConnection | null,
   messages: Array<{
     senderAgentDbId?: bigint;
-    senderSigningKeyVersion: string;
-    senderSigningPublicKey: string;
+    senderSigningKeyVersion: number;
   }>
 ): Promise<Map<string, string>> {
   const resolved = new Map<string, string>();
@@ -424,15 +474,8 @@ async function resolveChannelMessageSigningKeys(
     new Map(
       messages
         .filter(
-          (
-            message
-          ): message is {
-            senderAgentDbId: bigint;
-            senderSigningKeyVersion: string;
-            senderSigningPublicKey: string;
-          } =>
-            message.senderAgentDbId !== undefined &&
-            !readStoredChannelSigningPublicKey(message.senderSigningPublicKey)
+          (message): message is { senderAgentDbId: bigint; senderSigningKeyVersion: number } =>
+            message.senderAgentDbId !== undefined
         )
         .map(message => [
           buildChannelSigningKey(message.senderAgentDbId, message.senderSigningKeyVersion),
@@ -452,7 +495,7 @@ async function resolveChannelMessageSigningKeys(
     requests,
   })) as Array<{
     agentDbId: bigint;
-    signingKeyVersion: string;
+    signingKeyVersion: number;
     signingPublicKey: string;
   }>;
 
@@ -471,15 +514,12 @@ export async function verifyChannelMessages(
   messages: Array<{
     id: bigint;
     channelId: bigint;
-    channelSeq: bigint;
     senderAgentDbId?: bigint;
     senderPublicIdentity: string;
-    senderSeq: bigint;
-    senderMessageId?: bigint;
-    senderSigningPublicKey: string;
-    senderSigningKeyVersion: string;
+    senderMessageId: bigint;
+    senderSigningKeyVersion: number;
     plaintext: string;
-    signature: string;
+    signature: string | Uint8Array;
     replyToMessageId?: bigint | null;
     createdAt?: { toDate(): Date } | null;
   }>
@@ -488,12 +528,11 @@ export async function verifyChannelMessages(
   return Promise.all(
     messages.map(async message => {
       const senderSigningPublicKey =
-        readStoredChannelSigningPublicKey(message.senderSigningPublicKey) ??
-        (message.senderAgentDbId !== undefined
+        message.senderAgentDbId !== undefined
           ? resolvedSigningKeys.get(
               buildChannelSigningKey(message.senderAgentDbId, message.senderSigningKeyVersion)
             ) ?? null
-          : null);
+          : null;
 
       try {
         if (!senderSigningPublicKey) {
@@ -502,12 +541,12 @@ export async function verifyChannelMessages(
 
         const verified = await verifySignedChannelMessage({
           input: toMessageSignatureInput(message),
-          signature: message.signature,
+          signature: typeof message.signature === 'string' ? message.signature : toHex(message.signature),
           senderSigningPublicKey,
         });
         return {
           id: message.id.toString(),
-          channelSeq: message.channelSeq.toString(),
+          messageId: message.id.toString(),
           sender: message.senderPublicIdentity,
           createdAt: message.createdAt?.toDate().toISOString() ?? null,
           text: formatEncryptedMessageBody(verified.payload),
@@ -517,7 +556,7 @@ export async function verifyChannelMessages(
       } catch (error) {
         return {
           id: message.id.toString(),
-          channelSeq: message.channelSeq.toString(),
+          messageId: message.id.toString(),
           sender: message.senderPublicIdentity,
           createdAt: message.createdAt?.toDate().toISOString() ?? null,
           text: null,
@@ -529,17 +568,20 @@ export async function verifyChannelMessages(
   );
 }
 
-function channelMemberToListItem(member: ChannelMemberListRow): ChannelMemberListItem {
+function channelMemberToListItem(
+  member: ChannelMember,
+  agent: Agent | null = null
+): ChannelMemberListItem {
   return {
     id: member.id.toString(),
     channelId: member.channelId.toString(),
     agentDbId: member.agentDbId.toString(),
-    agentPublicIdentity: member.agentPublicIdentity,
-    agentSlug: member.agentSlug,
-    agentDisplayName: member.agentDisplayName ?? null,
-    agentCurrentEncryptionPublicKey: member.agentCurrentEncryptionPublicKey,
-    agentCurrentEncryptionKeyVersion: member.agentCurrentEncryptionKeyVersion,
-    permission: member.permission,
+    agentPublicIdentity: agent?.publicIdentity ?? '',
+    agentSlug: agent?.slug ?? `agent:${member.agentDbId.toString()}`,
+    agentDisplayName: agent?.displayName ?? null,
+    agentCurrentEncryptionPublicKey: '',
+    agentCurrentKeyBundleVersion: agent?.currentKeyBundleVersion?.toString() ?? '',
+    permission: channelPermissionToCli(member.permission),
     active: member.active,
     lastSentSeq: member.lastSentSeq.toString(),
   };
@@ -572,151 +614,107 @@ function parseRequiredU64(value: string, label: string): bigint {
   return parsed;
 }
 
-function matchesPublishedActorKeys(actor: Agent, keyPair: AgentKeyPair): boolean {
-  return (
-    actor.currentEncryptionPublicKey === keyPair.encryption.publicKey &&
-    actor.currentEncryptionKeyVersion === keyPair.encryption.keyVersion &&
-    actor.currentSigningPublicKey === keyPair.signing.publicKey &&
-    actor.currentSigningKeyVersion === keyPair.signing.keyVersion
-  );
-}
-
-function requireDefaultActor(actors: Agent[], normalizedEmail: string): Agent {
-  const actor = actors.find(row => row.isDefault && row.normalizedEmail === normalizedEmail);
-  if (!actor) {
-    throw userError('No default agent found. Run `masumi-agent-messenger account sync` first.', {
-      code: 'INBOX_BOOTSTRAP_REQUIRED',
+function parseOptionalU32(value: string | undefined, label: string): number | undefined {
+  const parsed = parseOptionalU64(value, label);
+  if (parsed === undefined) {
+    return undefined;
+  }
+  if (parsed > BigInt(Number.MAX_SAFE_INTEGER) || parsed > 0xffffffffn) {
+    throw userError(`${label} must be a 32-bit unsigned integer.`, {
+      code: 'INVALID_UINT_ARGUMENT',
     });
   }
-  return actor;
-}
-
-function requireOwnedActor(params: {
-  actors: Agent[];
-  normalizedEmail: string;
-  actorSlug?: string;
-}): Agent {
-  const defaultActor = requireDefaultActor(params.actors, params.normalizedEmail);
-  if (!params.actorSlug) {
-    if (isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState)) {
-      throw userError(
-        `Agent \`${defaultActor.slug}\` is deregistering or deregistered and cannot be used for channels.`,
-        {
-          code: 'AGENT_DEREGISTERED',
-        }
-      );
-    }
-    return defaultActor;
-  }
-  const normalizedSlug = normalizeInboxSlug(params.actorSlug);
-  if (!normalizedSlug) {
-    throw userError('Agent slug is invalid.', {
-      code: 'INVALID_AGENT_SLUG',
-    });
-  }
-  const actor = params.actors.find(row => {
-    return row.inboxId === defaultActor.inboxId && row.slug === normalizedSlug;
-  });
-  if (!actor) {
-    throw userError(`No owned agent found for slug \`${normalizedSlug}\`.`, {
-      code: 'OWNED_ACTOR_NOT_FOUND',
-    });
-  }
-  if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)) {
-    throw userError(
-      `Agent \`${actor.slug}\` is deregistering or deregistered and cannot be used for channels.`,
-      {
-        code: 'AGENT_DEREGISTERED',
-      }
-    );
-  }
-  return actor;
+  return Number(parsed);
 }
 
 function requireChannelAdminActor(params: {
   actors: Agent[];
-  memberships: VisibleChannelMembershipRow[];
-  normalizedEmail: string;
+  memberships: ChannelMember[];
+  email: string;
   channelId: bigint;
   actorSlug?: string;
   preferredActor?: Agent;
 }): Agent {
-  const preferredActor = params.preferredActor;
-  const defaultActor = preferredActor?.isDefault
-    ? preferredActor
-    : params.actorSlug
-      ? null
-      : requireDefaultActor(params.actors, params.normalizedEmail);
-  const candidates = params.actorSlug
-    ? [
-        preferredActor ??
-          requireOwnedActor({
-            actors: params.actors,
-            normalizedEmail: params.normalizedEmail,
-            actorSlug: params.actorSlug,
-          }),
-      ]
-    : [
-        defaultActor,
-        ...(defaultActor
-          ? params.actors.filter(
-              actor => actor.inboxId === defaultActor.inboxId && actor.id !== defaultActor.id
-            )
-          : []),
-      ].filter((candidate): candidate is Agent => {
-        if (!candidate) {
-          return false;
-        }
-        return !isDeregisteringOrDeregisteredInboxAgentState(candidate.masumiRegistrationState);
-      });
-  const adminActor = candidates.find(actor =>
-    params.memberships.some(
-      membership =>
-        membership.channelId === params.channelId &&
-        membership.agentDbId === actor.id &&
-        membership.active &&
-        membership.permission === 'admin'
-    )
+  const actor = params.preferredActor;
+  if (!actor) {
+    throw userError('Pass --agent <slug> for channel admin actions.', {
+      code: 'AGENT_SLUG_REQUIRED',
+    });
+  }
+  const hasAdminMembership = params.memberships.some(
+    membership =>
+      membership.channelId === params.channelId &&
+      membership.agentDbId === actor.id &&
+      membership.active &&
+      enumTag(membership.permission) === 'Admin'
   );
 
-  if (!adminActor) {
+  if (!hasAdminMembership) {
     throw userError('No owned admin agent found for this channel.', {
       code: 'CHANNEL_ADMIN_REQUIRED',
     });
   }
 
-  return adminActor;
+  return actor;
 }
 
 async function requireLocalKeyPair(params: {
+  conn: DbConnection;
   profile: Awaited<ReturnType<typeof ensureAuthenticatedSession>>['profile'];
   actor: Agent;
 }) {
   const secretStore = createSecretStore();
+  const identity = {
+    email: params.actor.email,
+    slug: params.actor.slug,
+  };
   const keyPair = await getStoredActorKeyPair({
     profile: params.profile,
     secretStore,
-    identity: {
-      normalizedEmail: params.actor.normalizedEmail,
-      slug: params.actor.slug,
-      inboxIdentifier: params.actor.inboxIdentifier ?? undefined,
-    },
+    identity,
   });
   if (!keyPair) {
     throw userError(`No local private keys found for \`${params.actor.slug}\`.`, {
       code: 'AGENT_KEYPAIR_REQUIRED',
     });
   }
-  if (!matchesPublishedActorKeys(params.actor, keyPair)) {
+  const publishedKeys = await params.conn.procedures.lookupAgentPublicKeys({
+    requests: [
+      {
+        agentDbId: params.actor.id,
+        keyKind: { tag: 'Encryption' },
+        keyVersion: params.actor.currentKeyBundleVersion,
+      },
+      {
+        agentDbId: params.actor.id,
+        keyKind: { tag: 'Signing' },
+        keyVersion: params.actor.currentKeyBundleVersion,
+      },
+    ],
+  });
+  const publishedEncryptionKey =
+    publishedKeys.find(row => row.keyKind.tag === 'Encryption')?.publicKey ?? null;
+  const publishedSigningKey =
+    publishedKeys.find(row => row.keyKind.tag === 'Signing')?.publicKey ?? null;
+  if (
+    publishedEncryptionKey !== keyPair.encryption.publicKey ||
+    publishedSigningKey !== keyPair.signing.publicKey ||
+    params.actor.currentKeyBundleVersion !== keyPair.encryption.keyVersion ||
+    params.actor.currentKeyBundleVersion !== keyPair.signing.keyVersion
+  ) {
     throw userError(
-      `Local private keys do not match the published keys for \`${params.actor.slug}\`. Restore or rotate keys before using this channel.`,
+      `Local private keys do not match the published keys for \`${params.actor.slug}\`. Restore or reset keys before using this channel.`,
       { code: 'AGENT_KEYPAIR_MISMATCH' }
     );
   }
+  await requireImportedRotationKeyConfirmed({
+    identity,
+    keyPair,
+  });
   return keyPair;
 }
 
-function sortPublicChannels<T extends PublicChannelMirrorRow | PublicChannelPageRow>(channels: T[]): T[] {
+function sortChannels<T extends Channel>(channels: T[]): T[] {
   return [...channels].sort((left, right) => {
     if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch) {
       return -1;
@@ -724,8 +722,8 @@ function sortPublicChannels<T extends PublicChannelMirrorRow | PublicChannelPage
     if (left.lastMessageAt.microsSinceUnixEpoch < right.lastMessageAt.microsSinceUnixEpoch) {
       return 1;
     }
-    if (left.channelId > right.channelId) return -1;
-    if (left.channelId < right.channelId) return 1;
+    if (left.id > right.id) return -1;
+    if (left.id < right.id) return 1;
     return left.slug.localeCompare(right.slug);
   });
 }
@@ -735,8 +733,8 @@ async function connectForAuthenticatedChannels(params: {
   reporter: TaskReporter;
 }, options: { includeJoinRequests?: boolean } = {}) {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -749,11 +747,10 @@ async function connectForAuthenticatedChannels(params: {
   let subscription: SubscriptionHandle;
   try {
     const queries: ChannelQuery[] = [
-      limitSubscription(tables.visibleAgents, 'visibleAgents'),
+      limitSubscription(tables.visible_channels, 'visible_channels'),
+      limitSubscription(tables.visible_channel_memberships, 'visible_channel_memberships'),
     ];
-    if (options.includeJoinRequests) {
-      queries.push(limitSubscription(tables.visibleChannelJoinRequests, 'visibleChannelJoinRequests'));
-    }
+    void options.includeJoinRequests;
     subscription = await subscribeQueries(
       conn,
       queries,
@@ -765,35 +762,33 @@ async function connectForAuthenticatedChannels(params: {
   }
   return {
     profile,
-    normalizedEmail,
+    email,
     conn,
     subscription,
   };
 }
 
-export async function listPublicChannels(params: {
+export async function listDiscoverableChannels(params: {
   profileName: string;
   limit?: string;
   reporter: TaskReporter;
 }): Promise<ChannelListResult> {
-  const profile = await loadProfile(params.profileName);
-  const { conn } = await connectAnonymous({
-    host: profile.spacetimeHost,
-    databaseName: profile.spacetimeDbName,
-  });
+  const connected = await connectForAuthenticatedChannels(params);
+  const { profile, conn, subscription } = connected;
   try {
-    const pageRows = await conn.procedures.listPublicChannels({
-      beforeLastMessageAtMicros: undefined,
+    const pageRows = await conn.procedures.listDiscoverableChannels({
+      beforeLastMessageAt: undefined,
       beforeChannelId: undefined,
-      limit: parseOptionalU64(params.limit, 'limit') ?? 25n,
+      limit: parseOptionalU32(params.limit, 'limit') ?? 25,
     });
-    const channels = sortPublicChannels(pageRows).map(publicChannelToListItem);
-    params.reporter.success(`Loaded ${channels.length.toString()} public channel${channels.length === 1 ? '' : 's'}`);
+    const channels = sortChannels(pageRows).map(channelToListItem);
+    params.reporter.success(`Loaded ${channels.length.toString()} discoverable channel${channels.length === 1 ? '' : 's'}`);
     return {
       profile: profile.name,
       channels,
     };
   } finally {
+    subscription.unsubscribe();
     disconnectConnection(conn);
   }
 }
@@ -810,24 +805,23 @@ export async function readPublicChannelMessages(params: {
     databaseName: profile.spacetimeDbName,
   });
   try {
-    const channel = await readPublicChannelMirrorBySlug(conn, normalizedSlug);
+    const channel = await lookupPublicChannelBySlug(conn, normalizedSlug);
     if (!channel) {
       throw userError(`Public channel \`${normalizedSlug}\` was not found.`, {
         code: 'CHANNEL_NOT_FOUND',
       });
     }
     const rows = await conn.procedures.listPublicChannelMessages({
-      channelId: channel.channelId,
-      channelSlug: undefined,
-      beforeChannelSeq: undefined,
-      limit: 25n,
+      channelSlug: normalizedSlug,
+      beforeMessageId: undefined,
+      limit: 25,
     });
     const messages = await verifyChannelMessages(
       conn,
       [...rows]
         .sort((left, right) => {
-          if (left.channelSeq < right.channelSeq) return -1;
-          if (left.channelSeq > right.channelSeq) return 1;
+          if (left.id < right.id) return -1;
+          if (left.id > right.id) return 1;
           return Number(left.id - right.id);
         })
         .map(message => ({
@@ -860,11 +854,11 @@ export async function showPublicChannel(params: {
     databaseName: profile.spacetimeDbName,
   });
   try {
-    const channel = await readPublicChannelMirrorBySlug(conn, normalizedSlug);
+    const channel = await lookupPublicChannelBySlug(conn, normalizedSlug);
     params.reporter.success(channel ? `Loaded #${channel.slug}` : `Channel ${normalizedSlug} not found`);
     return {
       profile: profile.name,
-      channel: channel ? publicChannelToListItem(channel) : null,
+      channel: channel ? channelToListItem(channel) : null,
     };
   } finally {
     disconnectConnection(conn);
@@ -875,45 +869,54 @@ export async function readAuthenticatedChannelMessages(params: {
   profileName: string;
   actorSlug?: string;
   slug: string;
-  beforeChannelSeq?: string;
+  beforeMessageId?: string;
   limit?: string;
   reporter: TaskReporter;
 }): Promise<ChannelMessagesResult> {
   const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const { profile, email, conn, subscription } = connected;
   try {
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const actor = await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const channelState = await readVisibleChannelStateSnapshot(conn, {
-      actorId: actor.id,
       channelSlug: normalizedSlug,
     });
     const visibleChannel =
-      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
+      channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
     const publicChannel = visibleChannel
       ? null
-      : await readPublicChannelMirrorBySlug(conn, normalizedSlug);
+      : await lookupPublicChannelBySlug(conn, normalizedSlug);
     if (!visibleChannel && !publicChannel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
       });
     }
-    const channelId = visibleChannel?.id ?? publicChannel?.channelId;
+    const channelId = visibleChannel?.id ?? publicChannel?.id;
+    if (channelId === undefined) {
+      throw userError(`Channel \`${params.slug}\` is not visible.`, {
+        code: 'CHANNEL_NOT_FOUND',
+      });
+    }
     const channelSlug = visibleChannel?.slug ?? publicChannel?.slug ?? normalizedSlug;
-    const rows = await conn.procedures.listChannelMessages({
-      agentDbId: actor.id,
-      channelId,
-      channelSlug: undefined,
-      beforeChannelSeq: parseOptionalU64(params.beforeChannelSeq, 'beforeChannelSeq'),
-      limit: parseOptionalU64(params.limit, 'limit') ?? 25n,
-    });
+    const rows =
+      visibleChannel && channelState.memberships.some(row => row.agentDbId === actor.id && row.active)
+        ? await conn.procedures.listChannelMessages({
+            channelId,
+            beforeMessageId: parseOptionalU64(params.beforeMessageId, 'beforeMessageId'),
+            limit: parseOptionalU32(params.limit, 'limit') ?? 25,
+          })
+        : await conn.procedures.listPublicChannelMessages({
+            channelSlug,
+            beforeMessageId: parseOptionalU64(params.beforeMessageId, 'beforeMessageId'),
+            limit: parseOptionalU32(params.limit, 'limit') ?? 25,
+          });
     const sortedRows = [...rows].sort((left, right) => {
-      if (left.channelSeq < right.channelSeq) return -1;
-      if (left.channelSeq > right.channelSeq) return 1;
+      if (left.id < right.id) return -1;
+      if (left.id > right.id) return 1;
       return Number(left.id - right.id);
     });
     const messages = await verifyChannelMessages(conn, sortedRows);
@@ -940,37 +943,35 @@ export async function listChannelMembers(params: {
   reporter: TaskReporter;
 }): Promise<ChannelMembersResult> {
   const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const { profile, email, conn, subscription } = connected;
   try {
-    const actor = await readOwnedChannelActor({
+    await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const channelState = await readVisibleChannelStateSnapshot(conn, {
-      actorId: actor.id,
       channelSlug: normalizedSlug,
     });
     const channel =
-      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
+      channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
       });
     }
     const members = await conn.procedures.listChannelMembers({
-      agentDbId: actor.id,
       channelId: channel.id,
-      channelSlug: undefined,
-      afterMemberId: parseOptionalU64(params.afterMemberId, 'afterMemberId'),
-      limit: parseOptionalU64(params.limit, 'limit') ?? 25n,
+      afterId: parseOptionalU64(params.afterMemberId, 'afterMemberId'),
+      limit: parseOptionalU32(params.limit, 'limit') ?? 25,
     });
+    const agentsById = new Map(channelState.actors.map(agent => [agent.id, agent] as const));
     params.reporter.success(`Loaded ${members.length.toString()} channel member${members.length === 1 ? '' : 's'}`);
     return {
       profile: profile.name,
       slug: channel.slug,
-      members: members.map(channelMemberToListItem),
+      members: members.map(member => channelMemberToListItem(member, agentsById.get(member.agentDbId) ?? null)),
     };
   } finally {
     subscription.unsubscribe();
@@ -985,17 +986,16 @@ export async function createChannel(params: {
   title?: string;
   description?: string;
   accessMode: 'public' | 'approval_required';
-  publicJoinPermission?: string;
   discoverable: boolean;
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
   const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const { profile, email, conn, subscription } = connected;
   try {
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const actor = await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     await conn.reducers.createChannel({
@@ -1003,15 +1003,15 @@ export async function createChannel(params: {
       slug: normalizedSlug,
       title: params.title?.trim() || undefined,
       description: params.description?.trim() || undefined,
-      accessMode: params.accessMode,
-      publicJoinPermission: params.publicJoinPermission,
+      accessMode: channelAccessModeToReducer(params.accessMode),
       discoverable: params.discoverable,
+      defaultPermission: undefined,
     });
     params.reporter.success(`Created channel ${params.slug}`);
     return {
       profile: profile.name,
       slug: normalizedSlug,
-      publicJoinPermission: params.publicJoinPermission ?? 'read',
+      accessMode: params.accessMode,
       status: 'created',
     };
   } finally {
@@ -1025,13 +1025,11 @@ export async function updateChannelSettings(params: {
   actorSlug?: string;
   slug: string;
   accessMode?: 'public' | 'approval_required';
-  publicJoinPermission?: string;
   discoverable?: boolean;
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
   if (
     params.accessMode === undefined &&
-    params.publicJoinPermission === undefined &&
     params.discoverable === undefined
   ) {
     throw userError('Pass at least one channel setting to update.', {
@@ -1040,20 +1038,19 @@ export async function updateChannelSettings(params: {
   }
 
   const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const { profile, email, conn, subscription } = connected;
   try {
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const actor = await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const channelState = await readVisibleChannelStateSnapshot(conn, {
-      actorId: actor.id,
       channelSlug: normalizedSlug,
     });
     const channel =
-      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
+      channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
@@ -1062,7 +1059,7 @@ export async function updateChannelSettings(params: {
     const adminActor = requireChannelAdminActor({
       actors: channelState.actors,
       memberships: channelState.memberships,
-      normalizedEmail,
+      email,
       channelId: channel.id,
       actorSlug: params.actorSlug,
       preferredActor: actor,
@@ -1071,10 +1068,11 @@ export async function updateChannelSettings(params: {
     await conn.reducers.updateChannelSettings({
       agentDbId: adminActor.id,
       channelId: channel.id,
-      channelSlug: undefined,
-      accessMode: params.accessMode,
-      publicJoinPermission: params.publicJoinPermission,
+      title: undefined,
+      description: undefined,
+      accessMode: params.accessMode ? channelAccessModeToReducer(params.accessMode) : undefined,
       discoverable: params.discoverable,
+      defaultPermission: undefined,
     });
     params.reporter.success(`Updated channel settings for ${params.slug}`);
     return {
@@ -1082,7 +1080,6 @@ export async function updateChannelSettings(params: {
       slug: channel.slug,
       channelId: channel.id.toString(),
       accessMode: params.accessMode,
-      publicJoinPermission: params.publicJoinPermission,
       discoverable: params.discoverable,
       status: 'settings-updated',
     };
@@ -1099,30 +1096,34 @@ export async function joinPublicChannel(params: {
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
   const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const { profile, email, conn, subscription } = connected;
   try {
     const actor = await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
+    const publicChannel = await lookupPublicChannelBySlug(conn, normalizedSlug);
+    if (!publicChannel) {
+      throw userError(`Public channel \`${normalizedSlug}\` was not found.`, {
+        code: 'CHANNEL_NOT_FOUND',
+      });
+    }
     await conn.reducers.joinPublicChannel({
       agentDbId: actor.id,
-      channelId: undefined,
-      channelSlug: normalizedSlug,
+      channelId: publicChannel.id,
     });
     const { channel: joinedChannel, membership: joinedMembership } =
       await waitForJoinedPublicChannel({
         read: () =>
           readVisibleChannelStateSnapshot(conn, {
-            actorId: actor.id,
             channelSlug: normalizedSlug,
           }),
         slug: normalizedSlug,
         actorId: actor.id,
       });
-    const permission = joinedMembership.permission;
+    const permission = channelPermissionToCli(joinedMembership.permission);
     params.reporter.success(`Joined public channel ${params.slug}`);
     return {
       profile: profile.name,
@@ -1145,23 +1146,32 @@ export async function requestChannelJoin(params: {
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
   const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const { profile, email, conn, subscription } = connected;
   try {
     const actor = await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
+    const normalizedSlug = normalizeChannelSlugInput(params.slug);
+    const state = await conn.procedures.readVisibleChannelState({
+      channelId: undefined,
+      channelSlug: normalizedSlug,
+    });
+    if (!state) {
+      throw userError(`Channel \`${normalizedSlug}\` is not visible.`, {
+        code: 'CHANNEL_NOT_FOUND',
+      });
+    }
     await conn.reducers.requestChannelJoin({
       agentDbId: actor.id,
-      channelId: undefined,
-      channelSlug: normalizeChannelSlugInput(params.slug),
-      permission: params.permission,
+      channelId: state.channel.id,
+      requestedPermission: channelPermissionToReducer(params.permission),
     });
     params.reporter.success(`Requested access to ${params.slug}`);
     return {
       profile: profile.name,
-      slug: normalizeChannelSlugInput(params.slug),
+      slug: normalizedSlug,
       status: 'requested',
     };
   } finally {
@@ -1183,8 +1193,8 @@ export async function sendChannelMessage(params: {
   // uniqueness is enforced server-side, so there is no client-side
   // bookkeeping that requires a live view.
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1198,16 +1208,15 @@ export async function sendChannelMessage(params: {
   try {
     const actor = await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const channelState = await readVisibleChannelStateSnapshot(conn, {
-      actorId: actor.id,
       channelSlug: normalizedSlug,
     });
     const channel =
-      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
+      channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
@@ -1222,12 +1231,11 @@ export async function sendChannelMessage(params: {
         code: 'CHANNEL_MEMBERSHIP_REQUIRED',
       });
     }
-    const keyPair = await requireLocalKeyPair({ profile, actor });
+    const keyPair = await requireLocalKeyPair({ conn, profile, actor });
     const senderMessageId = randomSenderMessageId();
     const prepared = await prepareChannelMessage({
       channelId: channel.id,
       senderPublicIdentity: actor.publicIdentity,
-      senderSeq: 0n,
       senderMessageId,
       keyPair,
       payload: buildTextPayload(params.message, params.contentType),
@@ -1236,11 +1244,10 @@ export async function sendChannelMessage(params: {
     await conn.reducers.sendChannelMessage({
       agentDbId: actor.id,
       channelId: channel.id,
-      senderSeq: 0n,
       senderMessageId,
       senderSigningKeyVersion: prepared.senderSigningKeyVersion,
       plaintext: prepared.plaintext,
-      signature: prepared.signature,
+      signature: fromHex(prepared.signature),
       replyToMessageId: undefined,
     });
     params.reporter.success(`Sent message to ${params.slug}`);
@@ -1272,23 +1279,24 @@ export async function listChannelJoinRequests(params: {
   const connected = await connectForAuthenticatedChannels(params, {
     includeJoinRequests: !params.slug,
   });
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const { profile, email, conn, subscription } = connected;
   try {
-    const snapshot = readChannelSnapshot(conn);
+    const snapshot = await readChannelSnapshot(conn);
     const channelSlug = params.slug ? normalizeChannelSlugInput(params.slug) : null;
-    const actor = await readOwnedChannelActor({
-      conn,
-      normalizedEmail,
-      actorSlug: params.actorSlug,
-    });
+    const actor = params.actorSlug
+      ? await readOwnedChannelActor({
+          conn,
+          email,
+          actorSlug: params.actorSlug,
+        })
+      : null;
     const channelState = channelSlug
       ? await readVisibleChannelStateSnapshot(conn, {
-          actorId: actor.id,
           channelSlug,
         })
       : snapshot;
     const selectedChannel = channelSlug
-      ? channelState.visibleChannels.find(row => row.slug === channelSlug) ?? null
+      ? channelState.visible_channels.find(row => row.slug === channelSlug) ?? null
       : null;
     const selectedChannelId = selectedChannel?.id ?? null;
 
@@ -1307,21 +1315,42 @@ export async function listChannelJoinRequests(params: {
       requireChannelAdminActor({
         actors: channelState.actors,
         memberships: channelState.memberships,
-        normalizedEmail,
+        email,
         channelId: selectedChannelId,
         actorSlug: params.actorSlug,
-        preferredActor: actor,
+        preferredActor: actor ?? undefined,
       });
     }
 
-    const filtered = channelState.requests.filter(request => {
+    const ownedAgentIds = new Set(channelState.actors.map(agent => agent.id));
+    const adminChannelIds = new Set(
+      channelState.memberships
+        .filter(membership => membership.active && enumTag(membership.permission) === 'Admin')
+        .map(membership => membership.channelId)
+    );
+    const channelsById = new Map(channelState.visible_channels.map(channel => [channel.id, channel] as const));
+    const agentsById = new Map(channelState.actors.map(agent => [agent.id, agent] as const));
+    const resolved = params.includeResolved
+      ? await conn.procedures.listResolvedChannelJoinRequests({
+          afterSortKey: undefined,
+          limit: 25,
+        }).then(page => page.joinRequests)
+      : [];
+    const requestRows = [...channelState.requests, ...resolved].filter(
+      (request, index, rows) => rows.findIndex(candidate => candidate.id === request.id) === index
+    );
+    const filtered = requestRows.filter(request => {
       if (selectedChannelId !== null && request.channelId !== selectedChannelId) {
         return false;
       }
-      if (params.direction && request.direction !== params.direction) {
+      const direction =
+        ownedAgentIds.has(request.requesterAgentDbId) && !adminChannelIds.has(request.channelId)
+          ? 'outgoing'
+          : 'incoming';
+      if (params.direction && direction !== params.direction) {
         return false;
       }
-      if (!params.includeResolved && request.status !== 'pending') {
+      if (!params.includeResolved && enumTag(request.status) !== 'Pending') {
         return false;
       }
       return true;
@@ -1333,7 +1362,14 @@ export async function listChannelJoinRequests(params: {
         if (left.createdAt.microsSinceUnixEpoch > right.createdAt.microsSinceUnixEpoch) return -1;
         return 0;
       })
-      .map(channelJoinRequestToItem);
+      .map(request =>
+        channelJoinRequestToItem(request, {
+          channel: channelsById.get(request.channelId) ?? null,
+          requester: agentsById.get(request.requesterAgentDbId) ?? null,
+          ownedAgentIds,
+          adminChannelIds,
+        })
+      );
     params.reporter.success(
       `Loaded ${requests.length.toString()} channel join request${requests.length === 1 ? '' : 's'}`
     );
@@ -1351,51 +1387,50 @@ export async function approveChannelJoin(params: {
   profileName: string;
   actorSlug?: string;
   requestId: string;
-  permission?: string;
-  selectPermission?: ChannelApprovalPermissionPrompt;
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
-  const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const connected = await connectForAuthenticatedChannels(params, {
+    includeJoinRequests: true,
+  });
+  const { profile, email, conn, subscription } = connected;
   try {
     const adminActor = await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const requestId = parseRequiredU64(params.requestId, 'requestId');
-    const requestState = await readVisibleChannelStateSnapshot(conn, {
-      actorId: adminActor.id,
-      requestId,
-    });
-    const request = requestState.requests.find(row => row.id === requestId);
+    const snapshot = await readChannelSnapshot(conn);
+    const request = snapshot.requests.find(row => row.id === requestId);
     if (!request) {
       throw userError(`Channel join request ${params.requestId} is not visible.`, {
         code: 'CHANNEL_REQUEST_NOT_FOUND',
       });
     }
     const channel =
-      requestState.visibleChannels.find(row => row.id === request.channelId) ?? null;
+      snapshot.visible_channels.find(row => row.id === request.channelId) ?? null;
     if (!channel) {
       throw userError(`Channel join request ${params.requestId} channel is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
       });
     }
-    const permission =
-      params.permission ??
-      (params.selectPermission
-        ? await params.selectPermission(channelJoinRequestToItem(request))
-        : request.permission || 'read');
+    requireChannelAdminActor({
+      actors: snapshot.actors,
+      memberships: snapshot.memberships,
+      email,
+      channelId: request.channelId,
+      actorSlug: params.actorSlug,
+      preferredActor: adminActor,
+    });
     await conn.reducers.approveChannelJoin({
       agentDbId: adminActor.id,
       requestId,
-      permission,
     });
     params.reporter.success(`Approved channel join request ${params.requestId}`);
     return {
       profile: profile.name,
       channelId: request.channelId.toString(),
-      permission,
+      permission: channelPermissionToCli(request.permission),
       status: 'approved',
     };
   } finally {
@@ -1410,15 +1445,32 @@ export async function rejectChannelJoin(params: {
   requestId: string;
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
-  const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const connected = await connectForAuthenticatedChannels(params, {
+    includeJoinRequests: true,
+  });
+  const { profile, email, conn, subscription } = connected;
   try {
     const adminActor = await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const requestId = parseRequiredU64(params.requestId, 'requestId');
+    const snapshot = await readChannelSnapshot(conn);
+    const request = snapshot.requests.find(row => row.id === requestId);
+    if (!request) {
+      throw userError(`Channel join request ${params.requestId} is not visible.`, {
+        code: 'CHANNEL_REQUEST_NOT_FOUND',
+      });
+    }
+    requireChannelAdminActor({
+      actors: snapshot.actors,
+      memberships: snapshot.memberships,
+      email,
+      channelId: request.channelId,
+      actorSlug: params.actorSlug,
+      preferredActor: adminActor,
+    });
     await conn.reducers.rejectChannelJoin({
       agentDbId: adminActor.id,
       requestId,
@@ -1434,7 +1486,7 @@ export async function rejectChannelJoin(params: {
   }
 }
 
-export async function setChannelMemberPermission(params: {
+export async function updateChannelMemberPermission(params: {
   profileName: string;
   actorSlug?: string;
   slug: string;
@@ -1443,30 +1495,29 @@ export async function setChannelMemberPermission(params: {
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
   const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const { profile, email, conn, subscription } = connected;
   try {
     const adminActor = await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const channelState = await readVisibleChannelStateSnapshot(conn, {
-      actorId: adminActor.id,
       channelSlug: normalizedSlug,
     });
     const channel =
-      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
+      channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
       });
     }
-    await conn.reducers.setChannelMemberPermission({
+    await conn.reducers.updateChannelMemberPermission({
       agentDbId: adminActor.id,
       channelId: channel.id,
-      memberAgentDbId: parseRequiredU64(params.memberAgentDbId, 'memberAgentDbId'),
-      permission: params.permission,
+      targetAgentDbId: parseRequiredU64(params.memberAgentDbId, 'memberAgentDbId'),
+      permission: channelPermissionToReducer(params.permission),
     });
     params.reporter.success(`Updated member permission in ${params.slug}`);
     return {
@@ -1489,20 +1540,19 @@ export async function removeChannelMember(params: {
   reporter: TaskReporter;
 }): Promise<ChannelMutationResult> {
   const connected = await connectForAuthenticatedChannels(params);
-  const { profile, normalizedEmail, conn, subscription } = connected;
+  const { profile, email, conn, subscription } = connected;
   try {
     const actor = await readOwnedChannelActor({
       conn,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const channelState = await readVisibleChannelStateSnapshot(conn, {
-      actorId: actor.id,
       channelSlug: normalizedSlug,
     });
     const channel =
-      channelState.visibleChannels.find(row => row.slug === normalizedSlug) ?? null;
+      channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
@@ -1511,7 +1561,7 @@ export async function removeChannelMember(params: {
     await conn.reducers.removeChannelMember({
       agentDbId: actor.id,
       channelId: channel.id,
-      memberAgentDbId: parseRequiredU64(params.memberAgentDbId, 'memberAgentDbId'),
+      targetAgentDbId: parseRequiredU64(params.memberAgentDbId, 'memberAgentDbId'),
     });
     params.reporter.success(`Removed member from ${params.slug}`);
     return {

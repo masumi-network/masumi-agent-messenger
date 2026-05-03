@@ -7,41 +7,49 @@ import {
 
 export type ActorLike = {
   id: bigint;
-  inboxId: bigint;
-  normalizedEmail: string;
+  accountId: bigint;
+  email: string;
   slug: string;
   isDefault: boolean;
   publicIdentity: string;
   displayName?: string | null;
 };
 
+export type ThreadKindLike = string | { tag: string };
+
 export type ThreadLike = {
   id: bigint;
-  kind: string;
-  dedupeKey?: string;
+  kind: ThreadKindLike;
+  /** Sorted pair of agent db ids for direct threads; both `0n` for group threads. */
+  directLowAgentDbId: bigint;
+  directHighAgentDbId: bigint;
   title?: string | null;
   lastMessageAt: TimestampLike;
-  lastMessageSeq: bigint;
 };
+
+export function sortDirectAgentPair(a: bigint, b: bigint): { low: bigint; high: bigint } {
+  return a < b ? { low: a, high: b } : { low: b, high: a };
+}
 
 export type ThreadParticipantLike = {
   id?: bigint;
   threadId: bigint;
   agentDbId: bigint;
   active?: boolean;
+  lastReadMessageId?: bigint | null;
+  archived?: boolean;
 };
 
-export type ThreadReadStateLike = {
-  threadId: bigint;
-  agentDbId: bigint;
-  lastReadThreadSeq?: bigint | null;
-  archived: boolean;
-};
+function isDirectThreadKind(kind: ThreadKindLike): boolean {
+  if (typeof kind === 'string') {
+    return kind === 'direct' || kind === 'Direct';
+  }
+  return kind.tag === 'Direct';
+}
 
 export type MessageLike = {
-  id?: bigint;
+  id: bigint;
   threadId: bigint;
-  threadSeq: bigint;
   senderAgentDbId: bigint;
   createdAt: TimestampLike;
 };
@@ -84,21 +92,29 @@ export function buildParticipantsByThreadId<Participant extends ThreadParticipan
 
 export function findDefaultActorByEmail<Actor extends ActorLike>(
   actors: Actor[],
-  normalizedEmail: string
+  email: string
 ): Actor | null {
   return (
-    actors.find(actor => actor.normalizedEmail === normalizedEmail && actor.isDefault) ?? null
+    actors.find(actor => actor.email === email && actor.isDefault) ?? null
   );
 }
 
 export function buildOwnActorIds<Actor extends ActorLike>(
   actors: Actor[],
-  inboxId: bigint
+  accountId: bigint
 ): Set<bigint> {
   return new Set(
-    actors.filter(actor => actor.inboxId === inboxId).map(actor => actor.id)
+    actors.filter(actor => actor.accountId === accountId).map(actor => actor.id)
   );
 }
+
+export function findActorIdByPublicIdentity<Actor extends ActorLike>(
+  actors: Actor[],
+  publicIdentity: string
+): bigint | null {
+  return actors.find(actor => actor.publicIdentity === publicIdentity)?.id ?? null;
+}
+
 
 export function buildDirectThreadKey(
   left: PublicIdentityLike,
@@ -141,18 +157,34 @@ export function isClientGeneratedThreadId(threadId: bigint): boolean {
   return (threadId & DIRECT_THREAD_ID_NAMESPACE) === DIRECT_THREAD_ID_NAMESPACE;
 }
 
-export function findDirectThreads<
-  Actor extends PublicIdentityLike,
-  Thread extends ThreadLike & { dedupeKey: string },
->(threads: Thread[], ownActor: Actor, otherPublicIdentity: string): Thread[] {
-  const dedupeKey = buildDirectThreadKey(ownActor, { publicIdentity: otherPublicIdentity });
+export function findDirectThreads<Thread extends ThreadLike>(
+  threads: Thread[],
+  ownActorId: bigint,
+  otherActorId: bigint
+): Thread[] {
+  const { low, high } = sortDirectAgentPair(ownActorId, otherActorId);
   return threads
-    .filter(thread => thread.kind === 'direct' && thread.dedupeKey === dedupeKey)
+    .filter(
+      thread =>
+        isDirectThreadKind(thread.kind) &&
+        thread.directLowAgentDbId === low &&
+        thread.directHighAgentDbId === high
+    )
     .sort(
       (left, right) =>
         Number(right.lastMessageAt.microsSinceUnixEpoch - left.lastMessageAt.microsSinceUnixEpoch) ||
         Number(right.id - left.id)
     );
+}
+
+export function isDirectThreadBetween<Thread extends ThreadLike>(
+  thread: Thread,
+  ownActorId: bigint,
+  otherActorId: bigint
+): boolean {
+  if (!isDirectThreadKind(thread.kind)) return false;
+  const { low, high } = sortDirectAgentPair(ownActorId, otherActorId);
+  return thread.directLowAgentDbId === low && thread.directHighAgentDbId === high;
 }
 
 export function summarizeThread<Actor extends ActorLike, Thread extends ThreadLike, Participant extends ThreadParticipantLike>(
@@ -186,7 +218,7 @@ export function resolveDirectCounterparty<
     ownActorIds: Set<bigint>;
   }
 ): Actor | null {
-  if (params.thread.kind !== 'direct') {
+  if (!isDirectThreadKind(params.thread.kind)) {
     return null;
   }
 
@@ -206,46 +238,50 @@ export function resolveDirectCounterparty<
 
 export function selectUnreadIncomingMessages<
   Actor extends ActorLike,
-  ReadState extends ThreadReadStateLike,
+  Participant extends ThreadParticipantLike,
   Message extends MessageLike,
 >(
   params: {
     actors: Actor[];
-    readStates: ReadState[];
+    participants: Participant[];
     messages: Message[];
-    normalizedEmail: string;
+    email: string;
   }
 ): UnreadIncomingSelection<Actor, Message> | null {
-  const defaultActor = findDefaultActorByEmail(params.actors, params.normalizedEmail);
+  const defaultActor = findDefaultActorByEmail(params.actors, params.email);
   if (!defaultActor) {
     return null;
   }
 
-  const ownActorIds = buildOwnActorIds(params.actors, defaultActor.inboxId);
+  const ownActorIds = buildOwnActorIds(params.actors, defaultActor.accountId);
   const archivedThreadIds = new Set(
-    params.readStates
-      .filter(readState => readState.agentDbId === defaultActor.id && readState.archived)
-      .map(readState => readState.threadId)
+    params.participants
+      .filter(participant => participant.agentDbId === defaultActor.id && participant.archived)
+      .map(participant => participant.threadId)
   );
 
   const lastReadByThreadId = new Map<bigint, bigint>();
-  for (const readState of params.readStates) {
-    if (readState.agentDbId !== defaultActor.id || readState.archived) {
+  for (const participant of params.participants) {
+    if (
+      participant.agentDbId !== defaultActor.id ||
+      participant.active === false ||
+      participant.archived
+    ) {
       continue;
     }
-    lastReadByThreadId.set(readState.threadId, readState.lastReadThreadSeq ?? 0n);
+    lastReadByThreadId.set(participant.threadId, participant.lastReadMessageId ?? 0n);
   }
 
   const unreadMessages = params.messages
     .filter(message => !archivedThreadIds.has(message.threadId))
     .filter(message => !ownActorIds.has(message.senderAgentDbId))
-    .filter(message => message.threadSeq > (lastReadByThreadId.get(message.threadId) ?? 0n))
+    .filter(message => message.id > (lastReadByThreadId.get(message.threadId) ?? 0n))
     .sort((left, right) => {
       const byTime = compareTimestampsDesc(left.createdAt, right.createdAt);
       if (byTime !== 0) {
         return byTime;
       }
-      return Number(right.threadSeq - left.threadSeq);
+      return Number((right.id ?? 0n) - (left.id ?? 0n));
     });
 
   return {
@@ -269,22 +305,22 @@ export function buildDirectInboxEntries<
   Actor extends ActorLike,
   Thread extends ThreadLike,
   Participant extends ThreadParticipantLike,
-  ReadState extends ThreadReadStateLike,
+  Message extends MessageLike,
 >(
   params: {
     actors: Actor[];
     threads: Thread[];
     participants: Participant[];
-    readStates: ReadState[];
-    ownInboxId: bigint | null;
+    messages: Message[];
+    ownAccountId: bigint | null;
     dateFormat?: 'iso' | 'locale';
   }
 ): DirectInboxEntry<Actor>[] {
-  if (params.ownInboxId === null) {
+  if (params.ownAccountId === null) {
     return [];
   }
 
-  const ownActorIds = buildOwnActorIds(params.actors, params.ownInboxId);
+  const ownActorIds = buildOwnActorIds(params.actors, params.ownAccountId);
   const actorsById = new Map(params.actors.map(actor => [actor.id, actor] as const));
   const participantsByThreadId = buildParticipantsByThreadId(params.participants);
   const unreadCountByThreadId = new Map<bigint, number>();
@@ -297,25 +333,28 @@ export function buildDirectInboxEntries<
       continue;
     }
 
-    const relevantReadStates = params.readStates.filter(readState => {
-      return (
-        readState.threadId === thread.id &&
-        ownParticipants.some(participant => participant.agentDbId === readState.agentDbId) &&
-        !readState.archived
-      );
+    const activeOwnParticipants = ownParticipants.filter(participant => {
+      return participant.active !== false && !participant.archived;
     });
-    const lastReadThreadSeq = relevantReadStates.reduce((max, readState) => {
-      const current = readState.lastReadThreadSeq ?? 0n;
+    if (activeOwnParticipants.length === 0) {
+      unreadCountByThreadId.set(thread.id, 0);
+      continue;
+    }
+    const lastReadMessageId = activeOwnParticipants.reduce((max, participant) => {
+      const current = participant.lastReadMessageId ?? 0n;
       return current > max ? current : max;
     }, 0n);
-    unreadCountByThreadId.set(
-      thread.id,
-      thread.lastMessageSeq > lastReadThreadSeq ? Number(thread.lastMessageSeq - lastReadThreadSeq) : 0
-    );
+    const unreadCount = params.messages.filter(
+      message =>
+        message.threadId === thread.id &&
+        !ownActorIds.has(message.senderAgentDbId) &&
+        message.id > lastReadMessageId
+    ).length;
+    unreadCountByThreadId.set(thread.id, unreadCount);
   }
 
   const grouped = new Map<bigint, DirectInboxEntry<Actor>>();
-  for (const thread of params.threads.filter(thread => thread.kind === 'direct')) {
+  for (const thread of params.threads.filter(thread => isDirectThreadKind(thread.kind))) {
     const counterparty = resolveDirectCounterparty({
       thread,
       participantsByThreadId,

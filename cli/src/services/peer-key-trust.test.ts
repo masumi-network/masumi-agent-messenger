@@ -20,23 +20,23 @@ import { autoPinPeerIfUnknown as autoPinPeerIfUnknownInStore } from './peer-key-
 
 const tupleA: PeerKeyTuple = {
   encryptionPublicKey: 'enc-A',
-  encryptionKeyVersion: 'v1',
+  encryptionKeyVersion: 1,
   signingPublicKey: 'sig-A',
-  signingKeyVersion: 'v1',
+  signingKeyVersion: 1,
 };
 
 const tupleBRotatedKeys: PeerKeyTuple = {
   encryptionPublicKey: 'enc-B',
-  encryptionKeyVersion: 'v2',
+  encryptionKeyVersion: 2,
   signingPublicKey: 'sig-B',
-  signingKeyVersion: 'v2',
+  signingKeyVersion: 2,
 };
 
 const tupleCSigningOnly: PeerKeyTuple = {
   encryptionPublicKey: 'enc-A',
-  encryptionKeyVersion: 'v1',
+  encryptionKeyVersion: 1,
   signingPublicKey: 'sig-C',
-  signingKeyVersion: 'v3',
+  signingKeyVersion: 3,
 };
 
 describe('peer-key-trust', () => {
@@ -91,13 +91,13 @@ describe('peer-key-trust', () => {
     const pinned = pinPeerKeys(emptyPeerKeyTrustStore(), 'alice', tupleA, '2026-04-18T10:00:00Z');
     const rotated = confirmPeerRotation(pinned, 'alice', tupleBRotatedKeys, '2026-04-18T11:00:00Z');
     expect(
-      isSigningKeyVersionTrusted(rotated, 'alice', 'v1', 'sig-A')
+      isSigningKeyVersionTrusted(rotated, 'alice', 1, 'sig-A')
     ).toBe(true);
     expect(
-      isSigningKeyVersionTrusted(rotated, 'alice', 'v2', 'sig-B')
+      isSigningKeyVersionTrusted(rotated, 'alice', 2, 'sig-B')
     ).toBe(true);
     expect(
-      isSigningKeyVersionTrusted(rotated, 'alice', 'v2', 'sig-WRONG')
+      isSigningKeyVersionTrusted(rotated, 'alice', 2, 'sig-WRONG')
     ).toBe(false);
   });
 
@@ -121,6 +121,57 @@ describe('peer-key-trust', () => {
     const store = pinPeerKeys(emptyPeerKeyTrustStore(), 'alice', tupleA, '2026-04-18');
     const roundTripped = parsePeerKeyTrustStore(JSON.parse(JSON.stringify(store)));
     expect(roundTripped).toEqual(store);
+  });
+
+  it('parsePersistedPeerKeyTrustStore migrates legacy string key versions', () => {
+    const store = parsePersistedPeerKeyTrustStore({
+      version: 1,
+      peers: {
+        alice: {
+          publicIdentity: 'alice',
+          pinnedAt: '2026-04-18',
+          current: {
+            ...tupleA,
+            encryptionKeyVersion: 'enc-v1',
+            signingKeyVersion: 'sig-v1',
+          },
+          history: [
+            {
+              ...tupleA,
+              encryptionKeyVersion: 'enc-v1',
+              signingKeyVersion: 'sig-v1',
+              confirmedAt: '2026-04-18',
+            },
+          ],
+        },
+      },
+    });
+
+    expect(store.peers.alice?.current).toEqual(tupleA);
+    expect(store.peers.alice?.history[0]).toEqual({
+      ...tupleA,
+      confirmedAt: '2026-04-18',
+    });
+  });
+
+  it('parsePersistedPeerKeyTrustStore rebuilds legacy entries without history', () => {
+    const store = parsePersistedPeerKeyTrustStore({
+      version: 1,
+      peers: {
+        alice: {
+          publicIdentity: 'alice',
+          pinnedAt: '2026-04-18',
+          current: tupleA,
+        },
+      },
+    });
+
+    expect(store.peers.alice?.history).toEqual([
+      {
+        ...tupleA,
+        confirmedAt: '2026-04-18',
+      },
+    ]);
   });
 
   it('parsePeerKeyTrustStore returns an empty store on malformed input', () => {

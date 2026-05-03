@@ -15,7 +15,14 @@ import {
   type EncryptedMessagePayload,
   type JsonLike,
 } from './message-format';
-import { validateSerializedMessagePlaintext } from './message-limits';
+import {
+  ensureCiphertextBytes,
+  ensureMessageIvBytes,
+  ensureSignatureBytes,
+  ensureWrappedSecretCiphertextBytes,
+  ensureWrappedSecretIvBytes,
+  validateSerializedMessagePlaintext,
+} from './message-limits';
 
 const ENCRYPTION_ALGORITHM = 'ecdh-p256-v1';
 const SIGNING_ALGORITHM = 'ecdsa-p256-sha256-v1';
@@ -24,10 +31,26 @@ const ENVELOPE_CIPHER_ALGORITHM = 'aes-gcm-256-wrap-v1';
 
 const senderSecretCache = new Map<string, string>();
 
+type SpacetimeEnumValue = {
+  tag: string;
+};
+
+export function normalizeMessageCipherAlgorithm(value: string | SpacetimeEnumValue): string {
+  const tag = typeof value === 'string' ? value : value.tag;
+  if (tag === 'AesGcm256V1') return MESSAGE_CIPHER_ALGORITHM;
+  return tag;
+}
+
+export function normalizeEnvelopeWrapAlgorithm(value: string | SpacetimeEnumValue): string {
+  const tag = typeof value === 'string' ? value : value.tag;
+  if (tag === 'EcdhP256AesGcm256V1') return ENVELOPE_CIPHER_ALGORITHM;
+  return tag;
+}
+
 export type StoredKeyPair = {
   publicKey: string;
   privateKey: string;
-  keyVersion: string;
+  keyVersion: number;
   algorithm: string;
 };
 
@@ -37,30 +60,30 @@ export type AgentKeyPair = {
 };
 
 export type ActorIdentity = {
-  normalizedEmail: string;
+  email: string;
   slug: string;
-  inboxIdentifier?: string;
+  accountIdentifier?: string;
 };
 
 export type ActorPublicKeys = {
   actorId?: bigint;
-  normalizedEmail: string;
+  email: string;
   slug: string;
-  inboxIdentifier?: string;
+  accountIdentifier?: string;
   isDefault?: boolean;
   publicIdentity: string;
   displayName?: string | null;
   encryptionPublicKey: string;
-  encryptionKeyVersion: string;
+  encryptionKeyVersion: number;
   signingPublicKey: string;
-  signingKeyVersion: string;
+  signingKeyVersion: number;
 };
 
 export type SecretEnvelopePayload = {
   recipientPublicIdentity: string;
-  recipientEncryptionKeyVersion: string;
-  senderEncryptionKeyVersion: string;
-  signingKeyVersion: string;
+  recipientEncryptionKeyVersion: number;
+  senderEncryptionKeyVersion: number;
+  signingKeyVersion: number;
   wrappedSecretCiphertext: string;
   wrappedSecretIv: string;
   wrapAlgorithm: string;
@@ -68,13 +91,13 @@ export type SecretEnvelopePayload = {
 };
 
 export type SenderSecretState = {
-  secretVersion: string;
+  secretVersion: number;
   secretHex: string;
 };
 
 export type PreparedEncryptedMessage = {
-  secretVersion: string;
-  signingKeyVersion: string;
+  secretVersion: number;
+  signingKeyVersion: number;
   ciphertext: string;
   iv: string;
   cipherAlgorithm: string;
@@ -87,7 +110,7 @@ export type PreparedEncryptedMessage = {
 export type InboundSecretEnvelope = SecretEnvelopePayload & {
   id: bigint;
   threadId: bigint;
-  secretVersion: string;
+  secretVersion: number;
   senderActorId: bigint;
   senderPublicIdentity: string;
   recipientActorId: bigint;
@@ -97,13 +120,10 @@ export type InboundEncryptedMessage = {
   threadId: bigint;
   senderActorId: bigint;
   senderPublicIdentity: string;
-  senderSeq: bigint;
-  // Random per-sender opaque id used for replay protection. `0n` indicates a
-  // legacy message that was signed before this field existed; in that case the
-  // signature payload omits it for backwards-compatible verification.
-  senderMessageId?: bigint;
-  secretVersion: string;
-  signingKeyVersion: string;
+  // Random per-sender opaque id used for replay protection.
+  senderMessageId: bigint;
+  secretVersion: number;
+  signingKeyVersion: number;
   ciphertext: string;
   iv: string;
   cipherAlgorithm: string;
@@ -111,24 +131,67 @@ export type InboundEncryptedMessage = {
   replyToMessageId?: bigint;
 };
 
-function secretCacheKey(threadId: bigint, senderPublicIdentity: string, secretVersion: string): string {
+function secretCacheKey(threadId: bigint, senderPublicIdentity: string, secretVersion: number): string {
   return `${threadId.toString()}:${senderPublicIdentity}:${secretVersion}`;
 }
 
-function normalizeVersion(version: string | undefined, prefix: string): string {
-  if (!version) return `${prefix}1`;
-  const suffix = version.startsWith(prefix) ? version.slice(prefix.length) : '';
-  const parsed = Number.parseInt(suffix, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) return `${prefix}1`;
-  return `${prefix}${parsed}`;
+export function normalizeKeyVersion(version: number | string | null | undefined): number {
+  if (typeof version === 'string') {
+    const match = version.trim().match(/(\d+)$/u);
+    const parsed = match ? Number.parseInt(match[1], 10) : NaN;
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      return parsed;
+    }
+    return 1;
+  }
+
+  if (version === undefined || version === null || !Number.isFinite(version) || version < 1) {
+    return 1;
+  }
+  return Math.floor(version);
 }
 
-export function nextKeyVersion(version: string | undefined, prefix: string): string {
-  if (!version) return `${prefix}1`;
-  const suffix = version.startsWith(prefix) ? version.slice(prefix.length) : '';
-  const parsed = Number.parseInt(suffix, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) return `${prefix}1`;
-  return `${prefix}${parsed + 1}`;
+function normalizeVersion(version: number | undefined): number {
+  return normalizeKeyVersion(version);
+}
+
+export function normalizeAgentKeyPairVersions(keyPair: AgentKeyPair): AgentKeyPair {
+  const keyBundleVersion = Math.max(
+    normalizeKeyVersion(keyPair.encryption.keyVersion),
+    normalizeKeyVersion(keyPair.signing.keyVersion)
+  );
+
+  if (
+    keyPair.encryption.keyVersion === keyBundleVersion &&
+    keyPair.signing.keyVersion === keyBundleVersion
+  ) {
+    return keyPair;
+  }
+
+  return {
+    encryption: {
+      ...keyPair.encryption,
+      keyVersion: keyBundleVersion,
+    },
+    signing: {
+      ...keyPair.signing,
+      keyVersion: keyBundleVersion,
+    },
+  };
+}
+
+export function nextKeyVersion(version: number | undefined): number {
+  return normalizeVersion(version) + 1;
+}
+
+// Returns 1 when no prior version has been seen, otherwise `latest + 1`.
+// `nextKeyVersion(undefined)` returns 2 by spec ("next of nothing" is undefined);
+// secret rotation needs to start at 1 on the first publish, so use this instead.
+export function firstOrNextSecretVersion(latestSeen: number | null | undefined): number {
+  if (latestSeen === undefined || latestSeen === null || latestSeen <= 0) {
+    return 1;
+  }
+  return Math.floor(latestSeen) + 1;
 }
 
 function normalizeEmail(value: string): string {
@@ -286,22 +349,21 @@ function randomSecretHex(): string {
 }
 
 export function randomSenderMessageId(): bigint {
-  // Reject the legacy sentinels (`0n`, `1n`) so live rows are always
-  // distinguishable from rows that predate this column. The schema default is
-  // `1n`; some legacy data may also report `0n` depending on how it was
-  // serialized, so we exclude both.
+  // Server rejects `sender_message_id == 0` (see
+  // `spacetimedb/src/helpers/messages.rs`). Reroll if `getRandomValues` produces 0
+  // so we never round-trip a value the reducer will refuse.
   for (;;) {
     const buf = new BigUint64Array(1);
     crypto.getRandomValues(buf);
-    if (buf[0] !== 0n && buf[0] !== 1n) {
+    if (buf[0] !== 0n) {
       return buf[0];
     }
   }
 }
 
 export async function generateAgentKeyPair(options?: {
-  encryptionKeyVersion?: string;
-  signingKeyVersion?: string;
+  encryptionKeyVersion?: number;
+  signingKeyVersion?: number;
 }): Promise<AgentKeyPair> {
   const encryptionKeyPair = await crypto.subtle.generateKey(
     { name: 'ECDH', namedCurve: 'P-256' },
@@ -318,13 +380,13 @@ export async function generateAgentKeyPair(options?: {
     encryption: {
       publicKey: await exportPublicKey(encryptionKeyPair.publicKey),
       privateKey: await exportPrivateKey(encryptionKeyPair.privateKey),
-      keyVersion: normalizeVersion(options?.encryptionKeyVersion, 'enc-v'),
+      keyVersion: normalizeVersion(options?.encryptionKeyVersion),
       algorithm: ENCRYPTION_ALGORITHM,
     },
     signing: {
       publicKey: await exportPublicKey(signingKeyPair.publicKey),
       privateKey: await exportPrivateKey(signingKeyPair.privateKey),
-      keyVersion: normalizeVersion(options?.signingKeyVersion, 'sig-v'),
+      keyVersion: normalizeVersion(options?.signingKeyVersion),
       algorithm: SIGNING_ALGORITHM,
     },
   };
@@ -335,16 +397,16 @@ export async function toActorPublicKeys(
   keyPair: AgentKeyPair,
   options?: {
     actorId?: bigint;
-    inboxIdentifier?: string;
+    accountIdentifier?: string;
     isDefault?: boolean;
     displayName?: string | null;
   }
 ): Promise<ActorPublicKeys> {
   return {
     actorId: options?.actorId,
-    normalizedEmail: normalizeEmail(identity.normalizedEmail),
+    email: normalizeEmail(identity.email),
     slug: normalizeSlug(identity.slug),
-    inboxIdentifier: options?.inboxIdentifier?.trim(),
+    accountIdentifier: options?.accountIdentifier?.trim(),
     isDefault: options?.isDefault,
     publicIdentity: actorPublicIdentity(identity),
     displayName: options?.displayName,
@@ -358,7 +420,7 @@ export async function toActorPublicKeys(
 export function cacheSenderSecret(
   threadId: bigint,
   senderPublicIdentity: string,
-  secretVersion: string,
+  secretVersion: number,
   secretHex: string
 ): void {
   senderSecretCache.set(secretCacheKey(threadId, senderPublicIdentity, secretVersion), secretHex);
@@ -367,7 +429,7 @@ export function cacheSenderSecret(
 export function getCachedSenderSecret(
   threadId: bigint,
   senderPublicIdentity: string,
-  secretVersion: string
+  secretVersion: number
 ): SenderSecretState | null {
   const secretHex = senderSecretCache.get(secretCacheKey(threadId, senderPublicIdentity, secretVersion));
   if (!secretHex) return null;
@@ -376,12 +438,12 @@ export function getCachedSenderSecret(
 
 async function buildEnvelopeSignaturePayload(
   threadId: bigint,
-  secretVersion: string,
+  secretVersion: number,
   senderPublicIdentity: string,
   recipientPublicIdentity: string,
-  senderEncryptionKeyVersion: string,
-  recipientEncryptionKeyVersion: string,
-  signingKeyVersion: string,
+  senderEncryptionKeyVersion: number,
+  recipientEncryptionKeyVersion: number,
+  signingKeyVersion: number,
   wrapAlgorithm: string,
   wrappedSecretCiphertext: string,
   wrappedSecretIv: string
@@ -404,7 +466,7 @@ async function buildMessageSignaturePayload(message: InboundEncryptedMessage): P
   const base: JsonLike = {
     threadId: message.threadId.toString(),
     senderPublicIdentity: message.senderPublicIdentity,
-    senderSeq: message.senderSeq.toString(),
+    senderMessageId: message.senderMessageId.toString(),
     secretVersion: message.secretVersion,
     signingKeyVersion: message.signingKeyVersion,
     cipherAlgorithm: message.cipherAlgorithm,
@@ -413,23 +475,12 @@ async function buildMessageSignaturePayload(message: InboundEncryptedMessage): P
       message.replyToMessageId === undefined ? null : message.replyToMessageId.toString(),
     ciphertextHash: await sha256Hex(message.ciphertext),
   };
-  // Bind senderMessageId into the signature only when it is a real client-
-  // generated value. Legacy rows carry the schema sentinel (`1n`) or `0n`,
-  // and their signatures were built before this field existed, so we must
-  // omit the field for them to keep verification working.
-  if (
-    message.senderMessageId !== undefined &&
-    message.senderMessageId !== 0n &&
-    message.senderMessageId !== 1n
-  ) {
-    (base as Record<string, unknown>).senderMessageId = message.senderMessageId.toString();
-  }
   return base;
 }
 
 async function buildRotationEnvelopes(params: {
   threadId: bigint;
-  secretVersion: string;
+  secretVersion: number;
   senderPublicIdentity: string;
   keyPair: AgentKeyPair;
   recipients: ActorPublicKeys[];
@@ -450,16 +501,19 @@ async function buildRotationEnvelopes(params: {
         recipient.encryptionKeyVersion,
       ].join(':')
     );
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const wrappedSecret = await crypto.subtle.encrypt(
+    const iv = ensureWrappedSecretIvBytes(crypto.getRandomValues(new Uint8Array(12)));
+    const wrappedSecretBuffer = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv: toBufferSource(iv) },
       envelopeKey,
       toBufferSource(fromHex(params.senderSecretHex))
     );
-    const wrappedSecretCiphertext = toHex(new Uint8Array(wrappedSecret));
+    const wrappedSecretBytes = ensureWrappedSecretCiphertextBytes(
+      new Uint8Array(wrappedSecretBuffer)
+    );
+    const wrappedSecretCiphertext = toHex(wrappedSecretBytes);
     const wrappedSecretIv = toHex(iv);
     const wrapAlgorithm = ENVELOPE_CIPHER_ALGORITHM;
-    const signature = await signCanonicalPayload(
+    const signatureHex = await signCanonicalPayload(
       params.keyPair.signing.privateKey,
       await buildEnvelopeSignaturePayload(
         params.threadId,
@@ -474,6 +528,7 @@ async function buildRotationEnvelopes(params: {
         wrappedSecretIv
       )
     );
+    ensureSignatureBytes(fromHex(signatureHex));
 
     envelopes.push({
       recipientPublicIdentity: recipient.publicIdentity,
@@ -483,7 +538,7 @@ async function buildRotationEnvelopes(params: {
       wrappedSecretCiphertext,
       wrappedSecretIv,
       wrapAlgorithm,
-      signature,
+      signature: signatureHex,
     });
   }
 
@@ -494,26 +549,28 @@ export async function prepareEncryptedMessage(params: {
   threadId: bigint;
   senderActorId: bigint;
   senderPublicIdentity: string;
-  senderSeq: bigint;
   senderMessageId: bigint;
   payload: EncryptedMessagePayload;
   keyPair: AgentKeyPair;
   recipients: ActorPublicKeys[];
   existingSecret: SenderSecretState | null;
-  latestKnownSecretVersion?: string | null;
+  latestKnownSecretVersion?: number | null;
   rotateSecret: boolean;
   replyToMessageId?: bigint | null;
 }): Promise<PreparedEncryptedMessage> {
+  if (params.senderMessageId === 0n) {
+    throw new Error('senderMessageId must not be 0');
+  }
   const normalizedPayload = normalizeEncryptedMessagePayload(params.payload);
   const serializedPlaintext = validateSerializedMessagePlaintext(
     canonicalJsonStringify(normalizedPayload)
   );
 
-  const baseSecretVersion =
+  const latestSeenSecretVersion =
     params.existingSecret?.secretVersion ?? params.latestKnownSecretVersion ?? undefined;
   const nextSecretVersion =
     !params.existingSecret || params.rotateSecret
-      ? nextKeyVersion(baseSecretVersion, 'secret-v')
+      ? firstOrNextSecretVersion(latestSeenSecretVersion)
       : params.existingSecret.secretVersion;
 
   let senderSecretHex = params.existingSecret?.secretHex ?? null;
@@ -534,20 +591,20 @@ export async function prepareEncryptedMessage(params: {
   }
 
   const messageKey = await importSenderSecret(senderSecretHex);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const iv = ensureMessageIvBytes(crypto.getRandomValues(new Uint8Array(12)));
   const ciphertextBuffer = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: toBufferSource(iv) },
     messageKey,
     toBufferSource(utf8(serializedPlaintext))
   );
-  const ciphertext = toHex(new Uint8Array(ciphertextBuffer));
+  const ciphertextBytes = ensureCiphertextBytes(new Uint8Array(ciphertextBuffer));
+  const ciphertext = toHex(ciphertextBytes);
   const ivHex = toHex(iv);
 
   const message: InboundEncryptedMessage = {
     threadId: params.threadId,
     senderActorId: params.senderActorId,
     senderPublicIdentity: params.senderPublicIdentity,
-    senderSeq: params.senderSeq,
     senderMessageId: params.senderMessageId,
     secretVersion: nextSecretVersion,
     signingKeyVersion: params.keyPair.signing.keyVersion,
@@ -561,6 +618,7 @@ export async function prepareEncryptedMessage(params: {
     params.keyPair.signing.privateKey,
     await buildMessageSignaturePayload(message)
   );
+  ensureSignatureBytes(fromHex(signature));
 
   return {
     secretVersion: nextSecretVersion,

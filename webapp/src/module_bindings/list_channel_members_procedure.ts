@@ -11,14 +11,12 @@ import {
 } from "spacetimedb";
 
 import {
-  ChannelMemberListRow,
+  ChannelMember,
 } from "./types";
 
 export const params = {
-  agentDbId: __t.u64(),
-  channelId: __t.option(__t.u64()),
-  channelSlug: __t.option(__t.string()),
-  afterMemberId: __t.option(__t.u64()),
-  limit: __t.u64(),
+  channelId: __t.u64(),
+  afterId: __t.option(__t.u64()),
+  limit: __t.option(__t.u32()),
 };
-export const returnType = __t.array(ChannelMemberListRow)
+export const returnType = __t.array(ChannelMember)

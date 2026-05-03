@@ -10,24 +10,35 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 import {
-  DeviceKeyBundleExpiryMode,
+  DeviceEncryptionAlgorithm,
+  DeviceBundleAlgorithm,
+  DeviceKeyBundlePurpose,
 } from "./types";
 
 
 export default __t.row({
   id: __t.u64(),
   targetDeviceId: __t.string().name("target_device_id"),
-  sourceDeviceId: __t.option(__t.string()).name("source_device_id"),
+  sourceDeviceId: __t.string().name("source_device_id"),
+  accountId: __t.u64().name("account_id"),
   sourceEncryptionPublicKey: __t.string().name("source_encryption_public_key"),
-  sourceEncryptionKeyVersion: __t.string().name("source_encryption_key_version"),
-  sourceEncryptionAlgorithm: __t.string().name("source_encryption_algorithm"),
-  bundleAlgorithm: __t.string().name("bundle_algorithm"),
+  sourceEncryptionKeyVersion: __t.u32().name("source_encryption_key_version"),
+  get sourceEncryptionAlgorithm() {
+    return DeviceEncryptionAlgorithm.name("source_encryption_algorithm");
+  },
+  bundleCiphertext: __t.byteArray().name("bundle_ciphertext"),
+  bundleIv: __t.byteArray().name("bundle_iv"),
+  get bundleAlgorithm() {
+    return DeviceBundleAlgorithm.name("bundle_algorithm");
+  },
+  get purpose() {
+    return DeviceKeyBundlePurpose;
+  },
   sharedAgentCount: __t.u64().name("shared_agent_count"),
   sharedKeyVersionCount: __t.u64().name("shared_key_version_count"),
-  createdAt: __t.timestamp().name("created_at"),
   expiresAt: __t.timestamp().name("expires_at"),
   consumedAt: __t.option(__t.timestamp()).name("consumed_at"),
-  get expiryMode() {
-    return DeviceKeyBundleExpiryMode.name("expiry_mode");
-  },
+  pendingSortKey: __t.i64().name("pending_sort_key"),
+  createdAt: __t.timestamp().name("created_at"),
+  updatedAt: __t.timestamp().name("updated_at"),
 });

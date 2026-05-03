@@ -9,18 +9,31 @@ import {
   type AlgebraicTypeType as __AlgebraicTypeType,
   type Infer as __Infer,
 } from "spacetimedb";
+import {
+  ChannelAccessMode,
+  ChannelPermission,
+} from "./types";
+
 
 export default __t.row({
   id: __t.u64(),
   slug: __t.string(),
   title: __t.option(__t.string()),
   description: __t.option(__t.string()),
-  accessMode: __t.string().name("access_mode"),
-  publicJoinPermission: __t.string().name("public_join_permission"),
+  get accessMode() {
+    return ChannelAccessMode.name("access_mode");
+  },
   discoverable: __t.bool(),
+  publicDiscoverableSortKey: __t.i64().name("public_discoverable_sort_key"),
+  publicDiscoverableIdDescSortKey: __t.u64().name("public_discoverable_id_desc_sort_key"),
+  publicDiscoverablePageSortKey: __t.string().name("public_discoverable_page_sort_key"),
+  get defaultPermission() {
+    return ChannelPermission.name("default_permission");
+  },
   creatorAgentDbId: __t.u64().name("creator_agent_db_id"),
-  lastMessageSeq: __t.u64().name("last_message_seq"),
+  lastMessageId: __t.u64().name("last_message_id"),
+  messageCount: __t.u64().name("message_count"),
+  lastMessageAt: __t.timestamp().name("last_message_at"),
   createdAt: __t.timestamp().name("created_at"),
   updatedAt: __t.timestamp().name("updated_at"),
-  lastMessageAt: __t.timestamp().name("last_message_at"),
 });
