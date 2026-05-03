@@ -3,28 +3,30 @@ import { Timestamp } from 'spacetimedb';
 import type { ShellRows } from './spacetimedb';
 import { buildRootShellViewModel } from './root-shell-model';
 import type {
-  VisibleAgentRow,
-  VisibleThreadParticipantRow,
-  VisibleThreadReadStateRow,
-  VisibleThreadRow,
-  VisibleContactRequestRow,
-  VisibleContactAllowlistEntryRow,
-  VisibleDeviceRow,
-  VisibleDeviceShareRequestRow,
-  VisibleChannelJoinRequestRow,
-  VisibleChannelMembershipRow,
-  VisibleChannelRow,
+  Agent,
+  ThreadParticipant,
+  Thread,
+  ContactRequest,
+  ContactAllowlistEntry,
+  Device,
+  DeviceShareRequest,
+  ChannelJoinRequest,
+  ChannelMember,
+  Channel,
 } from '../../../webapp/src/module_bindings/types';
+
+// Read-state merged into ThreadParticipant; alias kept so legacy fixture builders compile.
+type VisibleThreadReadStateRow = ThreadParticipant;
 
 function ts(iso: string) {
   return Timestamp.fromDate(new Date(iso));
 }
 
-function makeActor(overrides: Partial<VisibleAgentRow>): VisibleAgentRow {
+function makeActor(overrides: Partial<Agent>): Agent {
   return {
     id: 0n,
-    inboxId: 0n,
-    normalizedEmail: 'agent@example.com',
+    accountId: 0n,
+    email: 'agent@example.com',
     slug: 'agent',
     isDefault: false,
     publicIdentity: 'agent-public',
@@ -34,30 +36,31 @@ function makeActor(overrides: Partial<VisibleAgentRow>): VisibleAgentRow {
     publicDescription: null,
     publicLinkedEmailEnabled: false,
     ...overrides,
-  } as VisibleAgentRow;
+  } as Agent;
 }
 
-function makeThread(overrides: Partial<VisibleThreadRow>): VisibleThreadRow {
+function makeThread(overrides: Partial<Thread>): Thread {
   return {
     id: 0n,
-    dedupeKey: 'direct:agent:other',
-    kind: 'direct',
-    membershipLocked: false,
+    kind: { tag: 'Direct' as const },
+    directLowAgentDbId: 1n,
+    directHighAgentDbId: 2n,
     title: null,
     creatorAgentDbId: 0n,
     membershipVersion: 1n,
-    nextThreadSeq: 0n,
+    lastMessageId: 0n,
+    messageCount: 0n,
+    activeParticipantCount: 0n,
     lastMessageAt: ts('2026-04-15T10:00:00.000Z'),
-    lastMessageSeq: 0n,
     createdAt: ts('2026-04-15T10:00:00.000Z'),
     updatedAt: ts('2026-04-15T10:00:00.000Z'),
     ...overrides,
-  } as VisibleThreadRow;
+  } as Thread;
 }
 
 function makeParticipant(
-  overrides: Partial<VisibleThreadParticipantRow>
-): VisibleThreadParticipantRow {
+  overrides: Partial<ThreadParticipant>
+): ThreadParticipant {
   return {
     id: 0n,
     threadId: 0n,
@@ -65,7 +68,7 @@ function makeParticipant(
     active: true,
     lastSentSeq: 0n,
     ...overrides,
-  } as VisibleThreadParticipantRow;
+  } as ThreadParticipant;
 }
 
 function makeReadState(
@@ -75,67 +78,62 @@ function makeReadState(
     id: 0n,
     threadId: 0n,
     agentDbId: 0n,
-    lastReadThreadSeq: 0n,
+    lastReadMessageId: 0n,
     archived: false,
     ...overrides,
   } as VisibleThreadReadStateRow;
 }
 
 function makeContactRequest(
-  overrides: Partial<VisibleContactRequestRow>
-): VisibleContactRequestRow {
+  overrides: Partial<ContactRequest>
+): ContactRequest {
   return {
     id: 0n,
     threadId: 0n,
     requesterAgentDbId: 0n,
     targetAgentDbId: 0n,
-    direction: 'incoming',
-    status: 'pending',
-    messageCount: 0n,
-    requesterSlug: 'requester',
-    requesterDisplayName: null,
+    status: { tag: 'Pending' as const },
+    requesterResolvedSortKey: 0n,
+    targetResolvedSortKey: 0n,
     targetSlug: 'target',
-    targetDisplayName: null,
     updatedAt: ts('2026-04-15T10:00:00.000Z'),
     ...overrides,
-  } as VisibleContactRequestRow;
+  } as ContactRequest;
 }
 
 function makeAllowlistEntry(
-  overrides: Partial<VisibleContactAllowlistEntryRow>
-): VisibleContactAllowlistEntryRow {
+  overrides: Partial<ContactAllowlistEntry>
+): ContactAllowlistEntry {
   return {
     id: 0n,
-    inboxId: 0n,
-    kind: 'agent',
+    accountId: 0n,
+    kind: { tag: 'Agent' as const },
     agentPublicIdentity: 'friend-public',
-    agentDisplayName: 'Friend',
     agentSlug: 'friend',
-    displayEmail: null,
-    normalizedEmail: null,
+    email: null,
     createdAt: ts('2026-04-15T10:00:00.000Z'),
     ...overrides,
-  } as VisibleContactAllowlistEntryRow;
+  } as ContactAllowlistEntry;
 }
 
-function makeDevice(overrides: Partial<VisibleDeviceRow>): VisibleDeviceRow {
+function makeDevice(overrides: Partial<Device>): Device {
   return {
     id: 0n,
-    inboxId: 0n,
+    accountId: 0n,
     deviceId: 'device-1',
     label: 'Laptop',
     platform: 'macos',
-    status: 'approved',
+    status: { tag: 'Approved' as const },
     approvedAt: ts('2026-04-15T09:00:00.000Z'),
     revokedAt: null,
     lastSeenAt: ts('2026-04-15T10:00:00.000Z'),
     ...overrides,
-  } as VisibleDeviceRow;
+  } as Device;
 }
 
 function makeDeviceRequest(
-  overrides: Partial<VisibleDeviceShareRequestRow>
-): VisibleDeviceShareRequestRow {
+  overrides: Partial<DeviceShareRequest>
+): DeviceShareRequest {
   return {
     id: 0n,
     deviceId: 'device-1',
@@ -145,66 +143,64 @@ function makeDeviceRequest(
     createdAt: ts('2026-04-15T10:30:00.000Z'),
     approvedAt: null,
     consumedAt: null,
+    pendingSortKey: 0n,
     ...overrides,
-  } as VisibleDeviceShareRequestRow;
+  } as DeviceShareRequest;
 }
 
-function makeChannel(overrides: Partial<VisibleChannelRow>): VisibleChannelRow {
+function makeChannel(overrides: Partial<Channel>): Channel {
   return {
     id: 0n,
     slug: 'ops',
     title: null,
     description: null,
-    accessMode: 'public',
+    accessMode: { tag: 'Public' as const },
     discoverable: true,
     creatorAgentDbId: 0n,
-    lastMessageSeq: 0n,
+    publicDiscoverableSortKey: 0n,
+    defaultPermission: { tag: 'ReadWrite' as const },
+    lastMessageId: 0n,
+    messageCount: 0n,
     createdAt: ts('2026-04-15T10:00:00.000Z'),
     updatedAt: ts('2026-04-15T10:00:00.000Z'),
     lastMessageAt: ts('2026-04-15T10:00:00.000Z'),
     ...overrides,
-  } as VisibleChannelRow;
+  } as Channel;
 }
 
 function makeChannelMembership(
-  overrides: Partial<VisibleChannelMembershipRow>
-): VisibleChannelMembershipRow {
+  overrides: Partial<ChannelMember>
+): ChannelMember {
   return {
     id: 0n,
     channelId: 0n,
     agentDbId: 0n,
-    permission: 'read',
+    permission: { tag: 'Read' as const },
     active: true,
+    activeRecencySortKey: 0n,
     lastSentSeq: 0n,
-    joinedAt: ts('2026-04-15T10:00:00.000Z'),
+    createdAt: ts('2026-04-15T10:00:00.000Z'),
     updatedAt: ts('2026-04-15T10:00:00.000Z'),
     ...overrides,
-  } as VisibleChannelMembershipRow;
+  } as ChannelMember;
 }
 
 function makeChannelJoinRequest(
-  overrides: Partial<VisibleChannelJoinRequestRow>
-): VisibleChannelJoinRequestRow {
+  overrides: Partial<ChannelJoinRequest>
+): ChannelJoinRequest {
   return {
     id: 0n,
     channelId: 0n,
-    channelSlug: 'ops',
-    channelTitle: null,
     requesterAgentDbId: 0n,
-    requesterPublicIdentity: 'requester-public',
-    requesterSlug: 'requester',
-    requesterDisplayName: null,
-    requesterCurrentEncryptionPublicKey: 'requester-encryption-public',
-    requesterCurrentEncryptionKeyVersion: 'enc-v1',
-    permission: 'read',
-    status: 'pending',
-    direction: 'incoming',
+    permission: { tag: 'Read' as const },
+    status: { tag: 'Pending' as const },
+    channelResolvedSortKey: 0n,
+    requesterResolvedSortKey: 0n,
     createdAt: ts('2026-04-15T10:00:00.000Z'),
     updatedAt: ts('2026-04-15T10:00:00.000Z'),
     resolvedAt: null,
-    resolvedByAgentDbId: null,
     ...overrides,
-  } as VisibleChannelJoinRequestRow;
+  } as ChannelJoinRequest;
 }
 
 function makeRows(overrides: Partial<ShellRows> = {}): ShellRows {
@@ -235,16 +231,16 @@ describe('buildRootShellViewModel', () => {
       actors: [
         makeActor({
           id: 1n,
-          inboxId: 10n,
-          normalizedEmail: 'agent@example.com',
+          accountId: 10n,
+          email: 'agent@example.com',
           slug: 'agent',
           publicIdentity: 'agent-public',
           isDefault: true,
         }),
         makeActor({
           id: 2n,
-          inboxId: 10n,
-          normalizedEmail: 'agent@example.com',
+          accountId: 10n,
+          email: 'agent@example.com',
           slug: 'support',
           publicIdentity: 'support-public',
         }),
@@ -253,7 +249,7 @@ describe('buildRootShellViewModel', () => {
 
     const model = buildRootShellViewModel({
       rows,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       securityState: {
         status: 'healthy',
         title: 'Private keys are ready',
@@ -272,13 +268,53 @@ describe('buildRootShellViewModel', () => {
     ]);
   });
 
+  it('treats backend registered masumi rows as managed agents', () => {
+    const rows = makeRows({
+      actors: [
+        makeActor({
+          id: 1n,
+          accountId: 10n,
+          email: 'agent@example.com',
+          slug: 'agent',
+          publicIdentity: 'agent-public',
+          isDefault: true,
+          masumiRegistrationNetwork: 'Preprod',
+          masumiInboxAgentId: 'managed-agent-id',
+          masumiAgentIdentifier: 'did:masumi:agent',
+          masumiRegistrationState: { tag: 'Registered' },
+        }),
+      ],
+    });
+
+    const model = buildRootShellViewModel({
+      rows,
+      email: 'agent@example.com',
+      securityState: {
+        status: 'healthy',
+        title: 'Private keys are ready',
+        description: 'Local keys match the published inbox keys.',
+      },
+      connectionHealth: 'live',
+    });
+
+    expect(model?.agents.agentSummaries[0]).toMatchObject({
+      slug: 'agent',
+      managed: true,
+      registered: true,
+      deregistered: false,
+    });
+    expect(model?.dashboard.attentionItems.map(item => item.id)).not.toContain(
+      'agent:registration'
+    );
+  });
+
   it('does not flag a normal initial connect as reconnecting', () => {
     const rows = makeRows({
       actors: [
         makeActor({
           id: 1n,
-          inboxId: 10n,
-          normalizedEmail: 'agent@example.com',
+          accountId: 10n,
+          email: 'agent@example.com',
           slug: 'agent',
           publicIdentity: 'agent-public',
           isDefault: true,
@@ -288,7 +324,7 @@ describe('buildRootShellViewModel', () => {
 
     const model = buildRootShellViewModel({
       rows,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       securityState: {
         status: 'healthy',
         title: 'Private keys are ready',
@@ -305,16 +341,16 @@ describe('buildRootShellViewModel', () => {
   it('derives live dashboard state for the selected inbox slug', () => {
     const supportActor = makeActor({
       id: 2n,
-      inboxId: 10n,
-      normalizedEmail: 'agent@example.com',
+      accountId: 10n,
+      email: 'agent@example.com',
       slug: 'support',
       publicIdentity: 'support-public',
       displayName: 'Support',
     });
     const externalActor = makeActor({
       id: 3n,
-      inboxId: 20n,
-      normalizedEmail: 'friend@example.com',
+      accountId: 20n,
+      email: 'friend@example.com',
       slug: 'friend',
       publicIdentity: 'friend-public',
       displayName: 'Friend',
@@ -323,8 +359,8 @@ describe('buildRootShellViewModel', () => {
       actors: [
         makeActor({
           id: 1n,
-          inboxId: 10n,
-          normalizedEmail: 'agent@example.com',
+          accountId: 10n,
+          email: 'agent@example.com',
           slug: 'agent',
           publicIdentity: 'agent-public',
           isDefault: true,
@@ -335,9 +371,9 @@ describe('buildRootShellViewModel', () => {
       threads: [
         makeThread({
           id: 100n,
-          kind: 'direct',
+          kind: { tag: 'Direct' as const },
           lastMessageAt: ts('2026-04-15T10:05:00.000Z'),
-          lastMessageSeq: 2n,
+          lastMessageId: 3n,
         }),
       ],
       participants: [
@@ -355,7 +391,7 @@ describe('buildRootShellViewModel', () => {
         makeReadState({
           threadId: 100n,
           agentDbId: supportActor.id,
-          lastReadThreadSeq: 1n,
+          lastReadMessageId: 2n,
         }),
       ],
       contactRequests: [
@@ -364,8 +400,6 @@ describe('buildRootShellViewModel', () => {
           threadId: 100n,
           requesterAgentDbId: externalActor.id,
           targetAgentDbId: supportActor.id,
-          direction: 'incoming',
-          requesterSlug: 'friend',
           targetSlug: 'support',
         }),
         makeContactRequest({
@@ -373,21 +407,19 @@ describe('buildRootShellViewModel', () => {
           threadId: 101n,
           requesterAgentDbId: 1n,
           targetAgentDbId: externalActor.id,
-          direction: 'outgoing',
-          requesterSlug: 'agent',
           targetSlug: 'friend',
         }),
       ],
       allowlistEntries: [
         makeAllowlistEntry({
           id: 700n,
-          inboxId: 10n,
+          accountId: 10n,
         }),
       ],
       devices: [
         makeDevice({
           id: 800n,
-          inboxId: 10n,
+          accountId: 10n,
           deviceId: 'device-shell',
         }),
       ],
@@ -401,7 +433,7 @@ describe('buildRootShellViewModel', () => {
 
     const model = buildRootShellViewModel({
       rows,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       activeInboxSlug: 'support',
       securityState: {
         status: 'missing',
@@ -460,16 +492,16 @@ describe('buildRootShellViewModel', () => {
   it('omits the pending-approval attention item when only outgoing requests are pending', () => {
     const supportActor = makeActor({
       id: 2n,
-      inboxId: 10n,
-      normalizedEmail: 'agent@example.com',
+      accountId: 10n,
+      email: 'agent@example.com',
       slug: 'support',
       publicIdentity: 'support-public',
       isDefault: true,
     });
     const externalActor = makeActor({
       id: 3n,
-      inboxId: 20n,
-      normalizedEmail: 'friend@example.com',
+      accountId: 20n,
+      email: 'friend@example.com',
       slug: 'friend',
       publicIdentity: 'friend-public',
     });
@@ -482,8 +514,6 @@ describe('buildRootShellViewModel', () => {
           threadId: 100n,
           requesterAgentDbId: supportActor.id,
           targetAgentDbId: externalActor.id,
-          direction: 'outgoing',
-          requesterSlug: 'support',
           targetSlug: 'friend',
         }),
       ],
@@ -491,7 +521,7 @@ describe('buildRootShellViewModel', () => {
 
     const model = buildRootShellViewModel({
       rows,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       activeInboxSlug: 'support',
       securityState: {
         status: 'healthy',
@@ -510,23 +540,23 @@ describe('buildRootShellViewModel', () => {
   it('derives selectable channels and admin approval rows', () => {
     const defaultActor = makeActor({
       id: 1n,
-      inboxId: 10n,
-      normalizedEmail: 'agent@example.com',
+      accountId: 10n,
+      email: 'agent@example.com',
       slug: 'agent',
       publicIdentity: 'agent-public',
       isDefault: true,
     });
     const supportActor = makeActor({
       id: 2n,
-      inboxId: 10n,
-      normalizedEmail: 'agent@example.com',
+      accountId: 10n,
+      email: 'agent@example.com',
       slug: 'support',
       publicIdentity: 'support-public',
     });
     const requester = makeActor({
       id: 3n,
-      inboxId: 20n,
-      normalizedEmail: 'friend@example.com',
+      accountId: 20n,
+      email: 'friend@example.com',
       slug: 'friend',
       publicIdentity: 'friend-public',
     });
@@ -538,7 +568,7 @@ describe('buildRootShellViewModel', () => {
           id: 200n,
           slug: 'ops',
           title: 'Ops',
-          accessMode: 'approval_required',
+          accessMode: { tag: 'ApprovalRequired' as const },
           lastMessageAt: ts('2026-04-15T10:10:00.000Z'),
         }),
         makeChannel({
@@ -558,43 +588,37 @@ describe('buildRootShellViewModel', () => {
         makeChannelMembership({
           channelId: 200n,
           agentDbId: supportActor.id,
-          permission: 'admin',
+          permission: { tag: 'Admin' as const },
         }),
         makeChannelMembership({
           channelId: 201n,
           agentDbId: defaultActor.id,
-          permission: 'read',
+          permission: { tag: 'Read' as const },
         }),
         makeChannelMembership({
           channelId: 202n,
           agentDbId: defaultActor.id,
-          permission: 'read_write',
+          permission: { tag: 'ReadWrite' as const },
         }),
       ],
       channelJoinRequests: [
         makeChannelJoinRequest({
           id: 300n,
           channelId: 200n,
-          channelSlug: 'ops',
-          channelTitle: 'Ops',
           requesterAgentDbId: requester.id,
-          requesterSlug: 'friend',
-          permission: 'read_write',
+          permission: { tag: 'ReadWrite' as const },
         }),
         makeChannelJoinRequest({
           id: 301n,
           channelId: 201n,
-          channelSlug: 'read-only',
-          channelTitle: 'Read Only',
           requesterAgentDbId: requester.id,
-          requesterSlug: 'friend',
         }),
       ],
     });
 
     const model = buildRootShellViewModel({
       rows,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       activeInboxSlug: 'agent',
       securityState: {
         status: 'healthy',
@@ -628,7 +652,7 @@ describe('buildRootShellViewModel', () => {
 
     const supportModel = buildRootShellViewModel({
       rows,
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       activeInboxSlug: 'support',
       securityState: {
         status: 'healthy',
@@ -649,8 +673,6 @@ describe('buildRootShellViewModel', () => {
     expect(supportModel?.channels.approvals).toEqual([
       expect.objectContaining({
         id: '300',
-        channelSlug: 'ops',
-        requesterSlug: 'friend',
         permission: 'read_write',
         adminAgentSlug: 'support',
       }),

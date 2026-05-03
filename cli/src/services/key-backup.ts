@@ -20,7 +20,7 @@ import { createSecretStore, type SecretStore } from './secret-store';
 export type BackupInboxKeysResult = {
   profile: string;
   filePath: string;
-  normalizedEmail: string;
+  email: string;
   actorCount: string;
   keyVersionCount: string;
 };
@@ -33,7 +33,7 @@ function defaultSecretStore(): SecretStore {
 
 type ResolvedBackupNamespace = {
   profile: Awaited<ReturnType<typeof loadProfile>>;
-  normalizedEmail: string;
+  email: string;
 };
 
 function isAuthRequiredError(error: unknown): boolean {
@@ -55,8 +55,8 @@ async function resolveBackupNamespaceForExport(params: {
       reporter: params.reporter,
       secretStore: params.secretStore,
     });
-    const normalizedEmail = normalizeEmail(auth.claims.email ?? '');
-    if (!normalizedEmail) {
+    const email = normalizeEmail(auth.claims.email ?? '');
+    if (!email) {
       throw userError('Current OIDC session is missing a verified email claim.', {
         code: 'OIDC_EMAIL_MISSING',
       });
@@ -64,7 +64,7 @@ async function resolveBackupNamespaceForExport(params: {
 
     return {
       profile: auth.profile,
-      normalizedEmail,
+      email,
     };
   } catch (error) {
     if (!isAuthRequiredError(error)) {
@@ -72,8 +72,8 @@ async function resolveBackupNamespaceForExport(params: {
     }
 
     const profile = await loadProfile(params.profileName);
-    const normalizedEmail = profile.bootstrapSnapshot?.inbox.normalizedEmail ?? '';
-    if (!normalizedEmail) {
+    const email = profile.bootstrapSnapshot?.inbox.email ?? '';
+    if (!email) {
       throw userError(
         'No inbox email namespace is known for this profile yet. Run `masumi-agent-messenger account login` first.',
         {
@@ -85,7 +85,7 @@ async function resolveBackupNamespaceForExport(params: {
 
     return {
       profile,
-      normalizedEmail,
+      email,
     };
   }
 }
@@ -98,7 +98,7 @@ export async function backupInboxKeys(params: {
   secretStore?: SecretStore;
 }): Promise<BackupInboxKeysResult> {
   const secretStore = params.secretStore ?? defaultSecretStore();
-  const { profile, normalizedEmail } = await resolveBackupNamespaceForExport({
+  const { profile, email } = await resolveBackupNamespaceForExport({
     profileName: params.profileName,
     reporter: params.reporter,
     secretStore,
@@ -117,7 +117,7 @@ export async function backupInboxKeys(params: {
   return {
     profile: profile.name,
     filePath: resolvedPath,
-    normalizedEmail,
+    email,
     actorCount: countSharedActors(snapshot).toString(),
     keyVersionCount: countSharedKeyVersions(snapshot).toString(),
   };
@@ -137,9 +137,9 @@ export async function restoreInboxKeys(params: {
   const json = await readFile(resolvedPath, 'utf8');
   const snapshot = await decryptEncryptedNamespaceKeyBackup(json, params.passphrase);
   const expectedNormalizedEmail =
-    params.expectedNormalizedEmail?.trim().toLowerCase() || snapshot.normalizedEmail;
+    params.expectedNormalizedEmail?.trim().toLowerCase() || snapshot.email;
 
-  if (snapshot.normalizedEmail !== expectedNormalizedEmail) {
+  if (snapshot.email !== expectedNormalizedEmail) {
     throw userError('This encrypted backup belongs to a different inbox email namespace.', {
       code: 'BACKUP_NAMESPACE_MISMATCH',
     });
@@ -154,12 +154,12 @@ export async function restoreInboxKeys(params: {
   return {
     profile: profile.name,
     filePath: resolvedPath,
-    normalizedEmail: snapshot.normalizedEmail,
+    email: snapshot.email,
     actorCount: countSharedActors(snapshot).toString(),
     keyVersionCount: countSharedKeyVersions(snapshot).toString(),
   };
 }
 
-export function defaultBackupFilePath(normalizedEmail: string): string {
-  return path.resolve(buildNamespaceKeyBackupFileName(normalizedEmail));
+export function defaultBackupFilePath(email: string): string {
+  return path.resolve(buildNamespaceKeyBackupFileName(email));
 }

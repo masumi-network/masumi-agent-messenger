@@ -41,17 +41,17 @@ export function RotationShareDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto border-border bg-background/95">
         <DialogHeader>
-          <DialogTitle>Rotate Keys Across Devices</DialogTitle>
+          <DialogTitle>Reset Keys Across Devices</DialogTitle>
           <DialogDescription>
             Choose which approved devices should receive the new private keys and which ones should
-            be revoked as part of this rotation.
+            be revoked as part of this reset.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <div className="rounded-md border border-border px-4 py-4 text-sm text-muted-foreground">
             This browser will keep the new keys automatically. Other approved devices can either be
-            synced with the rotated keys or revoked during the same update.
+            synced with the reset keys or revoked during the same update.
           </div>
 
           <div className="space-y-3">
@@ -69,7 +69,7 @@ export function RotationShareDialog({
                     <p className="text-sm font-medium">
                       {device.label?.trim() || device.deviceId}
                     </p>
-                    <Badge variant="outline">{device.status}</Badge>
+                    <Badge variant="outline">{device.status.tag}</Badge>
                     {isCurrentDevice ? <Badge variant="secondary">this browser</Badge> : null}
                   </div>
                   <p className="text-xs text-muted-foreground">
@@ -88,7 +88,7 @@ export function RotationShareDialog({
                       <span className="space-y-1">
                         <span className="flex items-center gap-2 text-sm font-medium">
                           <DeviceMobile className="h-4 w-4" />
-                          Sync rotated keys
+                          Sync reset keys
                         </span>
                         <span className="block text-xs text-muted-foreground">
                           Deliver the new private keys to this approved device.
@@ -110,7 +110,7 @@ export function RotationShareDialog({
                           Revoke this device
                         </span>
                         <span className="block text-xs text-muted-foreground">
-                          Remove this device’s access during the same rotation.
+                          Remove this device’s access during the same reset.
                         </span>
                       </span>
                     </label>
@@ -124,7 +124,7 @@ export function RotationShareDialog({
             <p className="font-medium text-foreground">Summary</p>
             <p className="mt-1 text-muted-foreground">
               {selectedShareCount > 0
-                ? `Sync ${selectedShareCount.toString()} device(s) with the rotated keys.`
+                ? `Sync ${selectedShareCount.toString()} device(s) with the reset keys.`
                 : 'Do not sync any other approved devices.'}{' '}
               {selectedRevokeCount > 0
                 ? `Revoke ${selectedRevokeCount.toString()} device(s).`
@@ -140,10 +140,10 @@ export function RotationShareDialog({
           <Button type="button" onClick={() => void onConfirm()} disabled={busy}>
             <ArrowCounterClockwise className="h-4 w-4" />
             {busy
-              ? 'Rotating…'
+              ? 'Resetting…'
               : selectedShareCount > 0 || selectedRevokeCount > 0
-                ? 'Rotate and update devices'
-                : 'Rotate only this browser'}
+                ? 'Reset and update devices'
+                : 'Reset only this browser'}
           </Button>
         </DialogFooter>
       </DialogContent>

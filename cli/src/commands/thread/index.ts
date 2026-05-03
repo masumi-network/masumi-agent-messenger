@@ -14,6 +14,7 @@ import {
 } from '../../services/thread';
 import type { PaginatedThreadHistoryResult } from '../../services/thread';
 import {
+  cancelContactRequest,
   listContactRequests,
   listThreadInvites,
   resolveContactRequest,
@@ -69,6 +70,7 @@ type ThreadOptions = GlobalOptions & {
   outgoing?: boolean;
   requestId?: string;
   after?: string;
+  throughMessageId?: string;
 };
 
 function parseOptionalInteger(value: string | undefined): number | undefined {
@@ -243,7 +245,14 @@ export function registerThreadCommands(program: Command): void {
     .option('--after <cursor>', 'Cursor returned by the previous page')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as ThreadOptions;
-      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
+      const actorSlug = options.agent
+        ? await resolvePreferredAgentSlug(options.profile, options.agent)
+        : undefined;
+      if (!actorSlug) {
+        throw userError('Pass --agent <slug> to start a thread.', {
+          code: 'AGENT_SLUG_REQUIRED',
+        });
+      }
       await runCommandAction({
         title: 'Masumi thread list',
         options,
@@ -359,7 +368,7 @@ export function registerThreadCommands(program: Command): void {
               key: 'Participants',
               value: result.thread.participants.join(', ') || 'none',
             },
-            { key: 'Last sequence', value: result.lastMessageSeq, color: dim },
+            { key: 'Last message id', value: result.lastMessageId, color: dim },
             {
               key: 'Last activity',
               value:
@@ -409,7 +418,7 @@ export function registerThreadCommands(program: Command): void {
                   'masumi-agent-messenger thread reply <threadId> "hi"'
                 ),
           details: (() => {
-            const lastReadThreadSeq = BigInt(result.lastReadThreadSeq);
+            const lastReadMessageId = BigInt(result.lastReadMessageId);
             let prevDate: string | null = null;
             let prevSecretVersion: string | null = null;
             let unreadBoundaryInserted = false;
@@ -422,8 +431,8 @@ export function registerThreadCommands(program: Command): void {
                 prevDate = dateLabel;
               }
 
-              const threadSeq = BigInt(message.threadSeq);
-              if (!unreadBoundaryInserted && threadSeq > lastReadThreadSeq) {
+              const messageId = BigInt(message.messageId);
+              if (!unreadBoundaryInserted && messageId > lastReadMessageId) {
                 lines.push(yellow('— Unread —'));
                 unreadBoundaryInserted = true;
               }
@@ -1119,11 +1128,11 @@ export function registerThreadCommands(program: Command): void {
     .argument('<threadId>', 'Thread id')
     .option('--agent <slug>', 'Owned agent slug performing the change')
     .option(
-      '--through-seq <seq>',
-      'Mark read up to and including this thread sequence number (defaults to the latest)'
+      '--through-message-id <id>',
+      'Mark read up to and including this message id (defaults to the latest)'
     )
     .action(async function (this: Command, threadId: string) {
-      const options = this.optsWithGlobals() as ThreadOptions & { throughSeq?: string };
+      const options = this.optsWithGlobals() as ThreadOptions & { throughMessageId?: string };
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi thread read',
@@ -1133,7 +1142,7 @@ export function registerThreadCommands(program: Command): void {
             profileName: options.profile,
             actorSlug,
             threadId: threadId,
-            throughSeq: options.throughSeq,
+            throughMessageId: options.throughMessageId,
             reporter,
           }),
         toHuman: result => ({
@@ -1352,6 +1361,47 @@ export function registerThreadCommands(program: Command): void {
                 : renderTable(rows, columns),
           };
         },
+      });
+    });
+
+  approval
+    .command('cancel')
+    .description('Cancel an outgoing thread request')
+    .argument('[approvalId]', 'Request id, or request:<id>')
+    .option('--agent <slug>', 'Owned agent slug to use as context')
+    .option('--request-id <id>', 'Contact request id')
+    .action(async function (this: Command, approvalIdArg: string | undefined) {
+      const options = this.optsWithGlobals() as ThreadOptions;
+      const approvalId = approvalIdArg ?? options.requestId;
+      if (!approvalId) {
+        throw userError('Approval id is required.', {
+          code: 'THREAD_APPROVAL_ID_REQUIRED',
+        });
+      }
+      const parsedApprovalId = parseThreadApprovalId(approvalId);
+      if (parsedApprovalId.kind === 'invite') {
+        throw userError('Only contact requests can be canceled.', {
+          code: 'THREAD_APPROVAL_KIND_INVALID',
+        });
+      }
+      await runCommandAction({
+        title: 'Masumi thread approval cancel',
+        options,
+        run: async ({ reporter }) => {
+          const actorSlug = options.agent
+            ? await resolvePreferredAgentSlug(options.profile, options.agent)
+            : undefined;
+          return cancelContactRequest({
+            profileName: options.profile,
+            reporter,
+            requestId: parsedApprovalId.id,
+            actorSlug,
+          });
+        },
+        toHuman: result => ({
+          summary: `Canceled request ${cyan(`request:${result.requestId}`)} for ${senderColor(result.slug)}.`,
+          details: [],
+        }),
       });
     });
 

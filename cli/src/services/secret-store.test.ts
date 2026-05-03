@@ -2,7 +2,8 @@ import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/p
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { KeychainBackend } from './secret-store';
+import type { AgentKeyPair } from '../../../shared/agent-crypto';
+import type { DeviceKeyMaterial, KeychainBackend, NamespaceKeyVault } from './secret-store';
 import {
   createFileBackend,
   createLinuxBackend,
@@ -34,6 +35,26 @@ function createMissingSecretToolError(): NodeJS.ErrnoException {
 
 function createLockedCollectionError(): Error {
   return new Error('secret-tool: Cannot create an item in a locked collection');
+}
+
+function createLegacyAgentKeyPair(params?: {
+  encryptionKeyVersion?: number;
+  signingKeyVersion?: number;
+}): AgentKeyPair {
+  return {
+    encryption: {
+      publicKey: 'enc-pub',
+      privateKey: 'enc-priv',
+      keyVersion: params?.encryptionKeyVersion ?? 0,
+      algorithm: 'ecdh-p256-v1',
+    },
+    signing: {
+      publicKey: 'sig-pub',
+      privateKey: 'sig-priv',
+      keyVersion: params?.signingKeyVersion ?? 0,
+      algorithm: 'ecdsa-p256-sha256-v1',
+    },
+  };
 }
 
 describe('secret-store', () => {
@@ -77,17 +98,123 @@ describe('secret-store', () => {
         encryption: {
           publicKey: 'pub',
           privateKey: 'priv',
-          keyVersion: 'enc-v1',
+          keyVersion: 1,
           algorithm: 'ecdh-p256-v1',
         },
         signing: {
           publicKey: 'pub',
           privateKey: 'priv',
-          keyVersion: 'sig-v1',
+          keyVersion: 1,
           algorithm: 'ecdsa-p256-sha256-v1',
         },
       })
     ).rejects.toThrow('boom');
+  });
+
+  it('normalizes legacy non-positive key versions from structured secrets', async () => {
+    const legacyAgentKeyPair = createLegacyAgentKeyPair();
+    const legacyStoredAgentKeyPair = {
+      encryption: {
+        ...legacyAgentKeyPair.encryption,
+        keyVersion: 'enc-v1',
+      },
+      signing: {
+        ...legacyAgentKeyPair.signing,
+        keyVersion: 'sig-v1',
+      },
+    };
+    const legacyDeviceMaterial: DeviceKeyMaterial = {
+      deviceId: 'device-1',
+      keyPair: {
+        publicKey: 'device-pub',
+        privateKey: 'device-priv',
+        keyVersion: 0,
+        algorithm: 'ecdh-p256-device-v1',
+      },
+    };
+    const legacyStoredDeviceMaterial = {
+      ...legacyDeviceMaterial,
+      keyPair: {
+        ...legacyDeviceMaterial.keyPair,
+        keyVersion: 'device-v1',
+      },
+    };
+    const legacyVault: NamespaceKeyVault = {
+      version: 1,
+      email: 'agent@example.com',
+      actors: [
+        {
+          identity: {
+            email: 'agent@example.com',
+            slug: 'agent',
+          },
+          current: createLegacyAgentKeyPair(),
+          archived: [createLegacyAgentKeyPair({ encryptionKeyVersion: 2 })],
+        },
+      ],
+    };
+    const legacyStoredVault = {
+      ...legacyVault,
+      actors: [
+        {
+          ...legacyVault.actors[0],
+          current: legacyStoredAgentKeyPair,
+          archived: [
+            {
+              ...legacyAgentKeyPair,
+              encryption: {
+                ...legacyAgentKeyPair.encryption,
+                keyVersion: 'enc-v2',
+              },
+              signing: {
+                ...legacyAgentKeyPair.signing,
+                keyVersion: 0,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const backend = createMemoryBackend({
+      'default:agent-keypair': JSON.stringify(legacyStoredAgentKeyPair),
+      'default:device-keypair': JSON.stringify(legacyStoredDeviceMaterial),
+      'default:namespace-key-vault': JSON.stringify(legacyStoredVault),
+    });
+    const store = createSecretStore(backend);
+
+    expect(await store.getAgentKeyPair('default')).toMatchObject({
+      encryption: { keyVersion: 1 },
+      signing: { keyVersion: 1 },
+    });
+    expect(await store.getDeviceKeyMaterial('default')).toMatchObject({
+      keyPair: { keyVersion: 1 },
+    });
+    expect(await store.getNamespaceKeyVault('default')).toMatchObject({
+      actors: [
+        {
+          current: {
+            encryption: { keyVersion: 1 },
+            signing: { keyVersion: 1 },
+          },
+          archived: [
+            {
+              encryption: { keyVersion: 2 },
+              signing: { keyVersion: 2 },
+            },
+          ],
+        },
+      ],
+    });
+
+    await store.setAgentKeyPair('saved', legacyAgentKeyPair);
+    const persisted = await backend.get('saved:agent-keypair');
+    if (persisted === null) {
+      throw new Error('Missing persisted key pair');
+    }
+    expect(JSON.parse(persisted) as AgentKeyPair).toMatchObject({
+      encryption: { keyVersion: 1 },
+      signing: { keyVersion: 1 },
+    });
   });
 
   it('stores fallback secrets in a restricted local file', async () => {

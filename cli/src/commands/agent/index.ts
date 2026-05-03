@@ -28,7 +28,7 @@ import {
 } from '../../services/peer-key-trust';
 import { resolvePublishedActorLookup } from '../../services/published-actor-lookup';
 import {
-  createInboxIdentity,
+  createAgent,
   deregisterInboxAgent,
   registerInboxAgent,
   rotateInboxKeys,
@@ -158,7 +158,12 @@ async function resolvePublishedPeer(params: {
     const lookup = await resolvePublishedActorLookup({
       identifier: params.target,
       lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-      lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+      lookupByEmail: input =>
+        conn.procedures.lookupPublishedAgentsByEmailPage({
+          ...input,
+          afterId: undefined,
+          limit: undefined,
+        }),
       invalidMessage: 'Peer slug or email is invalid.',
       invalidCode: 'INVALID_PEER_IDENTIFIER',
       notFoundCode: 'PEER_NOT_FOUND',
@@ -412,7 +417,7 @@ export function registerAgentCommands(program: Command): void {
         options,
         preferPlainReporter: true,
         run: async ({ reporter }) =>
-          createInboxIdentity({
+          createAgent({
             profileName: options.profile,
             slug: slugArg,
             displayName: options.displayName,
@@ -1157,8 +1162,7 @@ export function registerAgentCommands(program: Command): void {
             peers: peers.map(entry => ({
               publicIdentity: entry.publicIdentity,
               pinnedAt: entry.pinnedAt,
-              currentEncryptionKeyVersion: entry.current.encryptionKeyVersion,
-              currentSigningKeyVersion: entry.current.signingKeyVersion,
+              currentKeyBundleVersion: entry.current.encryptionKeyVersion,
               historicalVersions: entry.history.length,
             })),
           };
@@ -1178,15 +1182,13 @@ export function registerAgentCommands(program: Command): void {
             details: renderTable(
               result.peers.map(peer => ({
                 publicIdentity: peer.publicIdentity,
-                encryption: peer.currentEncryptionKeyVersion,
-                signing: peer.currentSigningKeyVersion,
+                keyBundle: peer.currentKeyBundleVersion.toString(),
                 historical: String(peer.historicalVersions),
                 pinned: peer.pinnedAt,
               })),
               [
                 { header: 'Peer', key: 'publicIdentity', color: cyan },
-                { header: 'Encryption key', key: 'encryption', color: senderColor },
-                { header: 'Signing key', key: 'signing', color: senderColor },
+                { header: 'Key bundle', key: 'keyBundle', color: senderColor },
                 { header: 'History', key: 'historical' },
                 { header: 'Pinned at', key: 'pinned' },
               ]
@@ -1279,19 +1281,20 @@ export function registerAgentCommands(program: Command): void {
   });
 
   key
-    .command('rotate')
-    .description('Rotate agent encryption and signing keys')
-    .argument('[slug]', 'Owned agent slug to rotate (required unless --agent is set)')
-    .option('--agent <slug>', 'Owned agent slug whose keys should rotate')
+    .command('reset')
+    .alias('rotate')
+    .description('Reset agent encryption and signing keys')
+    .argument('[slug]', 'Owned agent slug to reset (required unless --agent is set)')
+    .option('--agent <slug>', 'Owned agent slug whose keys should reset')
     .option(
       '--share-device <id>',
-      'Approved device id that should receive the rotated key snapshot',
+      'Approved device id that should receive the reset key snapshot',
       (value: string, existing: string[] = []) => [...existing, value],
       []
     )
     .option(
       '--revoke-device <id>',
-      'Device id that should be revoked during key rotation',
+      'Device id that should be revoked during key reset',
       (value: string, existing: string[] = []) => [...existing, value],
       []
     )
@@ -1300,14 +1303,14 @@ export function registerAgentCommands(program: Command): void {
       const actorSlug = (slugArg ?? options.agent)?.trim();
       if (!actorSlug) {
         throw userError(
-          'Agent slug is required for key rotation. Pass `masumi-agent-messenger agent key rotate <slug>` or `--agent <slug>`.',
+          'Agent slug is required for key reset. Pass `masumi-agent-messenger agent key reset <slug>` or `--agent <slug>`.',
           {
             code: 'AGENT_KEY_ROTATE_SLUG_REQUIRED',
           }
         );
       }
       await runCommandAction({
-        title: 'Masumi agent key rotate',
+        title: 'Masumi agent key reset',
         options,
         preferPlainReporter: true,
         run: async ({ reporter }) => {
@@ -1342,14 +1345,14 @@ export function registerAgentCommands(program: Command): void {
             await maybeOfferBackupAfterKeyCreation({
               profileName: options.profile,
               reporter,
-              promptLabel: `Agent keys for ${result.actor.slug} were rotated.`,
+              promptLabel: `Agent keys for ${result.actor.slug} were reset.`,
             });
           }
 
           return result;
         },
         toHuman: result => ({
-          summary: `Rotated keys for ${cyan(result.actor.slug)}.`,
+          summary: `Reset keys for ${cyan(result.actor.slug)}.`,
           details: renderKeyValue([
             ...(result.sharedDeviceIds.length > 0
               ? [{ key: 'Shared to', value: result.sharedDeviceIds.join(', ') }]
@@ -1364,6 +1367,15 @@ export function registerAgentCommands(program: Command): void {
                   {
                     key: 'Backup reminder',
                     value: 'Run `masumi-agent-messenger account backup export` before revoking more devices.',
+                    color: yellow,
+                  },
+                ]
+              : []),
+            ...(result.deviceSyncError
+              ? [
+                  {
+                    key: 'Device sync',
+                    value: `Incomplete: ${result.deviceSyncError}`,
                     color: yellow,
                   },
                 ]

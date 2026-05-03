@@ -16,7 +16,7 @@ const KEY_BACKUP_ALGORITHM = 'aes-gcm-pbkdf2-namespace-backup-v1';
 export type EncryptedNamespaceKeyBackupFile = {
   version: number;
   kind: string;
-  normalizedEmail: string;
+  email: string;
   createdAt: string;
   actorCount: string;
   keyVersionCount: string;
@@ -40,7 +40,7 @@ export async function createEncryptedNamespaceKeyBackup(
   const file: EncryptedNamespaceKeyBackupFile = {
     version: KEY_BACKUP_VERSION,
     kind: KEY_BACKUP_KIND,
-    normalizedEmail: normalizedSnapshot.normalizedEmail,
+    email: normalizedSnapshot.email,
     createdAt: new Date().toISOString(),
     actorCount: countSharedActors(normalizedSnapshot).toString(),
     keyVersionCount: countSharedKeyVersions(normalizedSnapshot).toString(),
@@ -64,7 +64,7 @@ function parseEncryptedNamespaceKeyBackupFile(
   if (
     file.version !== KEY_BACKUP_VERSION ||
     file.kind !== KEY_BACKUP_KIND ||
-    typeof file.normalizedEmail !== 'string' ||
+    typeof file.email !== 'string' ||
     typeof file.createdAt !== 'string' ||
     typeof file.actorCount !== 'string' ||
     typeof file.keyVersionCount !== 'string' ||
@@ -95,7 +95,7 @@ export async function decryptEncryptedNamespaceKeyBackup(
   );
 
   const normalizedSnapshot = parseDeviceKeyShareSnapshot(snapshot);
-  if (normalizedSnapshot.normalizedEmail !== parsed.normalizedEmail) {
+  if (normalizedSnapshot.email !== parsed.email) {
     throw new Error('Encrypted namespace key backup email does not match its manifest');
   }
 
@@ -103,10 +103,10 @@ export async function decryptEncryptedNamespaceKeyBackup(
 }
 
 export function buildNamespaceKeyBackupFileName(
-  normalizedEmail: string,
+  email: string,
   createdAt = new Date()
 ): string {
-  const safeEmail = normalizedEmail.replace(/[^a-z0-9.-]+/gi, '-');
+  const safeEmail = email.replace(/[^a-z0-9.-]+/gi, '-');
   const dateToken = createdAt.toISOString().slice(0, 10);
   return `masumi-keys-${safeEmail}-${dateToken}.json`;
 }

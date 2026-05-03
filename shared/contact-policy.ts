@@ -8,14 +8,14 @@ export type ContactAllowlistKind = (typeof CONTACT_ALLOWLIST_KINDS)[number];
 
 export type PublicContactPolicy = {
   mode: 'approval_required';
-  allowlistScope: 'inbox';
+  allowlistScope: 'agent';
   allowlistKinds: ContactAllowlistKind[];
   messagePreviewVisibleBeforeApproval: false;
 };
 
 export const DEFAULT_PUBLIC_CONTACT_POLICY: PublicContactPolicy = {
   mode: 'approval_required',
-  allowlistScope: 'inbox',
+  allowlistScope: 'agent',
   allowlistKinds: [...CONTACT_ALLOWLIST_KINDS],
   messagePreviewVisibleBeforeApproval: false,
 };

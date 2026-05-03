@@ -18,4 +18,4 @@ export const params = {
   agentDbId: __t.u64(),
   threadId: __t.u64(),
 };
-export const returnType = VisibleThreadPage
+export const returnType = __t.option(VisibleThreadPage)

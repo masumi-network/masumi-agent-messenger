@@ -9,12 +9,12 @@ import {
 import { DbConnection, tables } from '@/module_bindings';
 import { useSpacetimeDB } from 'spacetimedb/tanstack';
 import {
-  describeInboxAuthLeaseRefreshError,
-  ensureInboxAuthLease,
-} from './inbox-auth-lease';
+  describeAccountAuthLeaseRefreshError,
+  ensureAccountAuthLease,
+} from './account-auth-lease';
 import { deferEffectStateUpdate } from './effect-state';
 import {
-  limitSpacetimeSubscriptionQuery,
+  prepareSpacetimeSubscriptionQuery,
   type SpacetimeSubscriptionTableName,
 } from '../../../shared/spacetime-subscription-limits';
 
@@ -146,17 +146,17 @@ function startSharedSubscription<Row>(params: {
   connection: DbConnection;
   accessorName: LiveTableName;
   tableQuery: LiveTableQuery;
-  requiresInboxAuthLease: boolean;
+  requiresAccountAuthLease: boolean;
   shared: SharedSubscription<Row>;
 }): void {
-  const { connection, accessorName, tableQuery, requiresInboxAuthLease, shared } = params;
+  const { connection, accessorName, tableQuery, requiresAccountAuthLease, shared } = params;
   if (shared.started) {
     return;
   }
 
   shared.started = true;
 
-  const begin = requiresInboxAuthLease ? ensureInboxAuthLease(connection) : Promise.resolve();
+  const begin = requiresAccountAuthLease ? ensureAccountAuthLease(connection) : Promise.resolve();
   void begin
     .then(() => {
       if (shared.stopped) {
@@ -209,7 +209,7 @@ function startSharedSubscription<Row>(params: {
           notifySharedSubscription(shared);
         })
         .subscribe([
-          limitSpacetimeSubscriptionQuery(
+          prepareSpacetimeSubscriptionQuery(
             toSql(tableQuery),
             accessorName
           ),
@@ -223,8 +223,8 @@ function startSharedSubscription<Row>(params: {
       shared.snapshot = {
         ...shared.snapshot,
         ready: false,
-        error: requiresInboxAuthLease
-          ? describeInboxAuthLeaseRefreshError(error)
+        error: requiresAccountAuthLease
+          ? describeAccountAuthLeaseRefreshError(error)
           : readSubscriptionError(error),
       };
       notifySharedSubscription(shared);
@@ -235,13 +235,13 @@ function retainSharedSubscription<Row>(params: {
   connection: DbConnection;
   accessorName: LiveTableName;
   tableQuery: LiveTableQuery;
-  requiresInboxAuthLease: boolean;
+  requiresAccountAuthLease: boolean;
   kind: 'auth' | 'public';
 }): {
   key: string;
   shared: SharedSubscription<Row>;
 } {
-  const { connection, accessorName, tableQuery, requiresInboxAuthLease, kind } = params;
+  const { connection, accessorName, tableQuery, requiresAccountAuthLease, kind } = params;
   const key = buildSharedSubscriptionKey(kind, accessorName, tableQuery);
   const sharedSubscriptions = getSharedSubscriptions(connection);
   const existing = sharedSubscriptions.get(key) as SharedSubscription<Row> | undefined;
@@ -269,7 +269,7 @@ function retainSharedSubscription<Row>(params: {
     connection,
     accessorName,
     tableQuery,
-    requiresInboxAuthLease,
+    requiresAccountAuthLease,
     shared: created,
   });
   return { key, shared: created };
@@ -332,7 +332,7 @@ function useSharedLiveTable<Row>(
       connection,
       accessorName,
       tableQuery,
-      requiresInboxAuthLease: kind === 'auth',
+      requiresAccountAuthLease: kind === 'auth',
       kind,
     });
 

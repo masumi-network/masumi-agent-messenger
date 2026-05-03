@@ -5,20 +5,19 @@ import {
   joinPublicChannel,
   listChannelJoinRequests,
   listChannelMembers,
-  listPublicChannels,
+  listDiscoverableChannels,
   readAuthenticatedChannelMessages,
   readPublicChannelMessages,
   rejectChannelJoin,
   removeChannelMember,
   requestChannelJoin,
   sendChannelMessage,
-  setChannelMemberPermission,
+  updateChannelMemberPermission,
   showPublicChannel,
   updateChannelSettings,
 } from '../../services/channel';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
 import { userError } from '../../services/errors';
-import { promptChoice } from '../../services/prompts';
 import { renderEmpty, renderKeyValue, renderTable, type TableColumn } from '../../services/render';
 import { showCommandHelp } from '../menu';
 
@@ -30,10 +29,9 @@ type ChannelOptions = GlobalOptions & {
   public?: boolean;
   discoverable?: boolean;
   permission?: string;
-  publicJoinPermission?: string;
   contentType?: string;
   authenticated?: boolean;
-  beforeChannelSeq?: string;
+  beforeMessageId?: string;
   limit?: string;
   afterMemberId?: string;
   incoming?: boolean;
@@ -70,13 +68,6 @@ function resolveAccessModeOption(options: ChannelOptions): 'public' | 'approval_
   return undefined;
 }
 
-function resolvePublicJoinPermissionOption(
-  options: ChannelOptions,
-  fallback?: string
-): string | undefined {
-  return options.publicJoinPermission ?? fallback;
-}
-
 export function registerChannelCommands(program: Command): void {
   const channel = program
     .command('channel')
@@ -88,15 +79,15 @@ export function registerChannelCommands(program: Command): void {
 
   channel
     .command('list')
-    .description('List public channels without signing in')
-    .option('--limit <count>', 'Maximum public channels to return, capped by the server')
+    .description('List discoverable channels for the signed-in account')
+    .option('--limit <count>', 'Maximum channels to return, capped by the server')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as ChannelOptions;
       await runCommandAction({
         title: 'Masumi channel list',
         options,
         run: ({ reporter }) =>
-          listPublicChannels({
+          listDiscoverableChannels({
             profileName: options.profile,
             limit: options.limit,
             reporter,
@@ -105,14 +96,14 @@ export function registerChannelCommands(program: Command): void {
           summary:
             result.channels.length === 0
               ? renderEmpty('No public channels found.')
-              : `Found ${result.channels.length.toString()} public channel${result.channels.length === 1 ? '' : 's'}.`,
+              : `Found ${result.channels.length.toString()} discoverable channel${result.channels.length === 1 ? '' : 's'}.`,
           details: renderTable(
             result.channels.map(row => ({
               id: row.id,
               slug: row.slug,
               title: row.title ?? '',
-              join: formatChannelPermission(row.publicJoinPermission),
-              messages: row.lastMessageSeq,
+              join: row.accessMode === 'public' ? 'public' : 'approval',
+              messages: row.messageCount,
               discoverable: row.discoverable ? 'yes' : 'no',
             })),
             channelColumns()
@@ -146,11 +137,8 @@ export function registerChannelCommands(program: Command): void {
                   { key: 'Slug', value: selected.slug },
                   { key: 'Title', value: selected.title ?? 'not set' },
                   { key: 'Description', value: selected.description ?? 'not set' },
-                  {
-                    key: 'Public join permission',
-                    value: formatChannelPermission(selected.publicJoinPermission),
-                  },
-                  { key: 'Messages', value: selected.lastMessageSeq },
+                  { key: 'Access mode', value: selected.accessMode },
+                  { key: 'Messages', value: selected.messageCount },
                   { key: 'Discoverable', value: selected.discoverable ? 'yes' : 'no' },
                 ])
               : [],
@@ -165,14 +153,14 @@ export function registerChannelCommands(program: Command): void {
     .argument('<slug>', 'Channel slug')
     .option('--authenticated', 'Use authenticated channel history access')
     .option('--agent <slug>', 'Owned agent slug for authenticated history')
-    .option('--before-channel-seq <seq>', 'Read messages before this channel sequence')
+    .option('--before-message-id <id>', 'Read messages before this message id')
     .option('--limit <count>', 'Maximum messages to return, capped by the server')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
       const useAuthenticatedHistory = Boolean(
         options.authenticated ||
           options.agent ||
-          options.beforeChannelSeq ||
+          options.beforeMessageId ||
           options.limit
       );
       await runCommandAction({
@@ -184,7 +172,7 @@ export function registerChannelCommands(program: Command): void {
                 profileName: options.profile,
                 actorSlug: options.agent,
                 slug,
-                beforeChannelSeq: options.beforeChannelSeq,
+                beforeMessageId: options.beforeMessageId,
                 limit: options.limit,
                 reporter,
               })
@@ -204,7 +192,7 @@ export function registerChannelCommands(program: Command): void {
                 ? message.text ?? ''
                 : `[${message.error ?? 'Unable to verify message'}]`;
             const sentAt = message.createdAt ? ` · ${message.createdAt}` : '';
-            return `#${message.channelSeq} ${message.sender}${sentAt}\n  ${body}`;
+            return `#${message.messageId} ${message.sender}${sentAt}\n  ${body}`;
           }),
         }),
       });
@@ -264,11 +252,9 @@ export function registerChannelCommands(program: Command): void {
     .option('--title <title>', 'Channel title')
     .option('--description <text>', 'Channel description')
     .option('--approval-required', 'Require admin approval to join')
-    .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write')
     .option('--no-discoverable', 'Hide from discovery/search surfaces')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
-      const publicJoinPermission = resolvePublicJoinPermissionOption(options, 'read');
       await runCommandAction({
         title: 'Masumi channel create',
         options,
@@ -280,7 +266,6 @@ export function registerChannelCommands(program: Command): void {
             title: options.title,
             description: options.description,
             accessMode: options.approvalRequired ? 'approval_required' : 'public',
-            publicJoinPermission,
             discoverable: options.discoverable !== false,
             reporter,
           }),
@@ -324,16 +309,13 @@ export function registerChannelCommands(program: Command): void {
     .option('--agent <slug>', 'Admin agent slug')
     .option('--public', 'Allow direct public joins')
     .option('--approval-required', 'Require admin approval to join')
-    .option('--public-join-permission <permission>', 'Public auto-join permission: read or read_write')
     .option('--discoverable', 'Show in discovery/search surfaces')
     .option('--no-discoverable', 'Hide from discovery/search surfaces')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
       const accessMode = resolveAccessModeOption(options);
-      const publicJoinPermission = resolvePublicJoinPermissionOption(options);
       if (
         accessMode === undefined &&
-        publicJoinPermission === undefined &&
         options.discoverable === undefined
       ) {
         throw userError('Pass at least one channel setting to update.', {
@@ -349,7 +331,6 @@ export function registerChannelCommands(program: Command): void {
             actorSlug: options.agent,
             slug,
             accessMode,
-            publicJoinPermission,
             discoverable: options.discoverable,
             reporter,
           }),
@@ -357,9 +338,6 @@ export function registerChannelCommands(program: Command): void {
           summary: `Channel ${result.slug ?? slug} settings updated.`,
           details: renderKeyValue([
             ...(result.accessMode ? [{ key: 'Access mode', value: result.accessMode }] : []),
-            ...(result.publicJoinPermission
-              ? [{ key: 'Public join permission', value: result.publicJoinPermission }]
-              : []),
             ...(result.discoverable !== undefined
               ? [{ key: 'Discoverable', value: result.discoverable ? 'yes' : 'no' }]
               : []),
@@ -500,7 +478,6 @@ export function registerChannelCommands(program: Command): void {
     .description('Approve a channel join request')
     .argument('<requestId>', 'Visible request id')
     .option('--agent <slug>', 'Admin agent slug')
-    .option('--permission <permission>', 'Granted permission')
     .action(async function (this: Command, requestId: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
       await runCommandAction({
@@ -511,20 +488,6 @@ export function registerChannelCommands(program: Command): void {
             profileName: options.profile,
             actorSlug: options.agent,
             requestId,
-            permission: options.permission,
-            selectPermission: options.permission || options.json || !process.stdin.isTTY || !process.stdout.isTTY
-              ? undefined
-              : request =>
-                  promptChoice({
-                    question: `Approve ${request.requesterSlug} for #${request.channelSlug} as`,
-                    defaultValue:
-                      request.permission === 'read_write' ? 'read_write' : 'read',
-                    options: [
-                      { value: 'read', label: 'Read only' },
-                      { value: 'read_write', label: 'Read/write' },
-                      { value: 'admin', label: 'Admin' },
-                    ],
-                  }),
             reporter,
           }),
         toHuman: result => ({
@@ -579,7 +542,7 @@ export function registerChannelCommands(program: Command): void {
           title: 'Masumi channel permission',
           options,
           run: ({ reporter }) =>
-            setChannelMemberPermission({
+            updateChannelMemberPermission({
               profileName: options.profile,
               actorSlug: options.agent,
               slug,

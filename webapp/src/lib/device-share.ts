@@ -39,7 +39,7 @@ export type DeviceShareRequestLookupConnection = {
     resolveDeviceShareRequestByCode(params: {
       verificationCodeHash: string;
     }): Promise<
-      Array<{
+      ReadonlyArray<{
         requestId: bigint;
         deviceId: string;
         deviceEncryptionPublicKey: string;
@@ -77,9 +77,9 @@ function assertFreshClientCreatedAt(value: TimestampLike): Date {
 }
 
 export async function prepareLocalDeviceShareRequest(
-  normalizedEmail: string
+  email: string
 ): Promise<LocalDeviceShareRequest> {
-  const device = await createPendingDeviceShareKeyMaterial(normalizedEmail);
+  const device = await createPendingDeviceShareKeyMaterial(email);
   const clientCreatedAt = new Date();
   const verificationCode = await createDeviceVerificationCode({
     serializedPublicKey: device.keyPair.publicKey,
@@ -136,16 +136,15 @@ export async function resolveVerifiedDeviceShareRequest(params: {
 }
 
 export async function buildApprovedDeviceShare(params: {
-  normalizedEmail: string;
+  email: string;
   targetDeviceId: string;
   targetDeviceEncryptionPublicKey: string;
   sourceDevice: DeviceKeyMaterial;
   expiresInMinutes?: number;
-  expiryMode?: 'expires' | 'neverExpires';
   snapshot?: DeviceKeyShareSnapshot;
 }) {
   const snapshot =
-    params.snapshot ?? (await exportInboxKeyShareSnapshot(params.normalizedEmail));
+    params.snapshot ?? (await exportInboxKeyShareSnapshot(params.email));
   if (!hasSharedPrivateKeyMaterial(snapshot)) {
     throw new Error(
       'No local private keys are available on this device to share yet. Recover or import keys on the approving device first.'
@@ -154,7 +153,7 @@ export async function buildApprovedDeviceShare(params: {
   const bundle = await createDeviceShareBundle({
     sourceKeyPair: params.sourceDevice.keyPair,
     targetPublicKey: params.targetDeviceEncryptionPublicKey,
-    context: buildDeviceShareContext(params.normalizedEmail, params.targetDeviceId),
+    context: buildDeviceShareContext(params.email, params.targetDeviceId),
     snapshot,
   });
 
@@ -162,16 +161,14 @@ export async function buildApprovedDeviceShare(params: {
 
   return {
     ...bundle,
-    sourceDeviceId: params.sourceDevice.deviceId,
     sharedActorCount: countSharedActors(snapshot),
     sharedKeyVersionCount: countSharedKeyVersions(snapshot),
     expiresAt,
-    expiryMode: params.expiryMode === 'neverExpires' ? { tag: 'NeverExpires' as const } : { tag: 'Expires' as const },
   };
 }
 
 export async function decryptClaimedDeviceShare(params: {
-  normalizedEmail: string;
+  email: string;
   device: DeviceKeyMaterial;
   sourceEncryptionPublicKey: string;
   bundleCiphertext: string;
@@ -184,7 +181,7 @@ export async function decryptClaimedDeviceShare(params: {
     bundleCiphertext: params.bundleCiphertext,
     bundleIv: params.bundleIv,
     bundleAlgorithm: params.bundleAlgorithm,
-    context: buildDeviceShareContext(params.normalizedEmail, params.device.deviceId),
+    context: buildDeviceShareContext(params.email, params.device.deviceId),
   });
 }
 
@@ -193,7 +190,7 @@ export async function importDeviceShareSnapshot(snapshot: DeviceKeyShareSnapshot
 }
 
 export async function importClaimedDeviceShare(params: {
-  normalizedEmail: string;
+  email: string;
   device: DeviceKeyMaterial;
   sourceEncryptionPublicKey: string;
   bundleCiphertext: string;

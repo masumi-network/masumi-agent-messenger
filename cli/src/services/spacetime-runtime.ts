@@ -15,7 +15,7 @@ import type { SecretStore } from './secret-store';
 
 export type AuthenticatedSpacetimeRuntime = AuthSessionContext & {
   conn: DbConnection;
-  normalizedEmail: string;
+  email: string;
   reporter: TaskReporter;
 };
 
@@ -26,13 +26,13 @@ export type AuthenticatedSpacetimeCommandParams = {
 };
 
 function requireSessionEmail(auth: AuthSessionContext): string {
-  const normalizedEmail = normalizeEmail(auth.claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(auth.claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
   }
-  return normalizedEmail;
+  return email;
 }
 
 export function createAuthenticatedSpacetimeRuntime(params: {
@@ -43,7 +43,7 @@ export function createAuthenticatedSpacetimeRuntime(params: {
   return {
     ...params.auth,
     conn: params.conn,
-    normalizedEmail: requireSessionEmail(params.auth),
+    email: requireSessionEmail(params.auth),
     reporter: params.reporter,
   };
 }

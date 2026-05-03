@@ -64,18 +64,23 @@ import {
 } from '@/lib/auth-session';
 import { useKeyVault } from '@/hooks/use-key-vault';
 import { queueKeyBackupPrompt } from '@/lib/key-backup-prompt';
-import { useLiveTable, usePublicLiveTable } from '@/lib/spacetime-live-table';
+import { useLiveTable } from '@/lib/spacetime-live-table';
+import { readAllOwnedAgents } from '@/lib/spacetime-procedure-reads';
+import { useProcedureSnapshot } from '@/lib/spacetime-procedure-snapshot';
 import { tables } from '@/module_bindings';
 import type { DbConnection } from '@/module_bindings';
 import type {
   Agent,
-  Inbox as InboxRow,
-  PublicRecentChannelMessage,
+  Account,
+  AccountChangeSignal,
+  AgentKeyBundle,
+  ChannelMessage,
 } from '@/module_bindings/types';
 import {
   verifySignedChannelMessage,
   type ChannelMessageSignatureInput,
 } from '../../../shared/channel-crypto';
+import { toHex } from '../../../shared/crypto-utils';
 import { formatEncryptedMessageBody } from '../../../shared/message-format';
 import {
   buildPreferredDefaultInboxSlug,
@@ -94,38 +99,66 @@ export const Route = createFileRoute('/')({
   component: HomePage,
 });
 
+async function readAgentCurrentKeyBundle(
+  connection: DbConnection,
+  actor: Agent
+): Promise<AgentKeyBundle | null> {
+  const bundles = await connection.procedures.lookupAgentKeyBundles({
+    requests: [
+      {
+        agentDbId: actor.id,
+        keyBundleVersion: actor.currentKeyBundleVersion,
+      },
+    ],
+  });
+  return bundles[0] ?? null;
+}
+
+function keyBundleMatchesBootstrapKeys(
+  bundle: AgentKeyBundle,
+  params: {
+    encryptionPublicKey: string;
+    encryptionKeyVersion: number;
+    signingPublicKey: string;
+    signingKeyVersion: number;
+  }
+): boolean {
+  return (
+    bundle.encryptionPublicKey === params.encryptionPublicKey &&
+    bundle.keyBundleVersion === params.encryptionKeyVersion &&
+    bundle.signingPublicKey === params.signingPublicKey &&
+    bundle.keyBundleVersion === params.signingKeyVersion
+  );
+}
+
 async function waitForBootstrapRows(params: {
   connection: DbConnection;
-  normalizedEmail: string;
+  email: string;
   encryptionPublicKey: string;
-  encryptionKeyVersion: string;
+  encryptionKeyVersion: number;
   signingPublicKey: string;
-  signingKeyVersion: string;
+  signingKeyVersion: number;
   timeoutMs?: number;
 }): Promise<{
-  inbox: InboxRow;
+  inbox: Account;
   actor: Agent;
 }> {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 15_000);
 
   while (Date.now() < timeoutAt) {
-    const inboxes = Array.from(params.connection.db.visibleInboxes.iter()) as InboxRow[];
-    const actors = Array.from(params.connection.db.visibleAgents.iter()) as Agent[];
+    const inboxes = Array.from(params.connection.db.visible_accounts.iter()) as Account[];
+    const actors = await readAllOwnedAgents(params.connection);
     const inbox =
-      inboxes.find(row => row.normalizedEmail === params.normalizedEmail) ?? null;
+      inboxes.find(row => row.email === params.email) ?? null;
     const actor =
       actors.find(row => {
-        return (
-          row.normalizedEmail === params.normalizedEmail &&
-          row.isDefault &&
-          row.currentEncryptionPublicKey === params.encryptionPublicKey &&
-          row.currentEncryptionKeyVersion === params.encryptionKeyVersion &&
-          row.currentSigningPublicKey === params.signingPublicKey &&
-          row.currentSigningKeyVersion === params.signingKeyVersion
-        );
+        return row.email === params.email && row.isDefault;
       }) ?? null;
+    const keyBundle = actor
+      ? await readAgentCurrentKeyBundle(params.connection, actor)
+      : null;
 
-    if (inbox && actor) {
+    if (inbox && actor && keyBundle && keyBundleMatchesBootstrapKeys(keyBundle, params)) {
       return { inbox, actor };
     }
 
@@ -180,7 +213,7 @@ const getTrue = () => true;
 const getFalse = () => false;
 
 type PublicRootChannelConfig = {
-  channelId: bigint | null;
+  channelSlug: string | null;
 };
 
 type DecryptedPublicChannelMessage =
@@ -194,42 +227,28 @@ type DecryptedPublicChannelMessage =
     };
 
 function readPublicRootChannelConfig(): PublicRootChannelConfig {
-  const rawChannelId = String(import.meta.env.VITE_PUBLIC_CHANNEL_ID ?? '').trim();
-  if (!rawChannelId) {
-    return { channelId: null };
-  }
-
-  try {
-    const channelId = BigInt(rawChannelId);
-    if (channelId <= 0n) {
-      return { channelId: null };
-    }
-    return { channelId };
-  } catch {
-    return { channelId: null };
-  }
+  const channelSlug = String(import.meta.env.VITE_PUBLIC_CHANNEL_SLUG ?? '').trim();
+  return { channelSlug: channelSlug || null };
 }
 
 function publicChannelMessageKey(message: {
+  id: bigint;
   channelId: bigint;
-  channelSeq: bigint;
 }): string {
-  return `${message.channelId.toString()}:${message.channelSeq.toString()}`;
+  return `${message.channelId.toString()}:${message.id.toString()}`;
 }
 
 function toPublicChannelSignatureInput(message: {
   channelId: bigint;
   senderPublicIdentity: string;
-  senderSeq: bigint;
-  senderMessageId?: bigint;
-  senderSigningKeyVersion: string;
+  senderMessageId: bigint;
+  senderSigningKeyVersion: number;
   plaintext: string;
   replyToMessageId?: bigint | null;
 }): ChannelMessageSignatureInput {
   return {
     channelId: message.channelId,
     senderPublicIdentity: message.senderPublicIdentity,
-    senderSeq: message.senderSeq,
     senderMessageId: message.senderMessageId,
     senderSigningKeyVersion: message.senderSigningKeyVersion,
     plaintext: message.plaintext,
@@ -265,16 +284,21 @@ function AuthenticatedHome({
   const bootstrapInFlightRef = useRef(false);
   const componentMountedRef = useRef(false);
 
-  const [actors, actorsReady] = useLiveTable<Agent>(
-    tables.visibleAgents,
-    'visibleAgents'
+  const [accountSignals] = useLiveTable<AccountChangeSignal>(
+    tables.visible_account_change_signal,
+    'visible_account_change_signal'
   );
-  const [inboxes, inboxesReady] = useLiveTable<InboxRow>(
-    tables.visibleInboxes,
-    'visibleInboxes'
+  const accountSignal = accountSignals[0] ?? null;
+  const [actors, actorsReady] = useProcedureSnapshot<Agent>(
+    readAllOwnedAgents,
+    accountSignal?.ownedAgentsVersion.toString() ?? null
+  );
+  const [inboxes, inboxesReady] = useLiveTable<Account>(
+    tables.visible_accounts,
+    'visible_accounts'
   );
 
-  const normalizedEmail = useMemo(
+  const email = useMemo(
     () => normalizeEmail(session.user.email ?? ''),
     [session.user.email]
   );
@@ -292,10 +316,10 @@ function AuthenticatedHome({
   const connectionError = conn.connectionError?.message ?? null;
   const suggestedDefaultSlug = useMemo(
     () =>
-      buildPreferredDefaultInboxSlug(normalizedEmail, slug =>
+      buildPreferredDefaultInboxSlug(email, slug =>
         actors.some(actor => actor.slug === slug)
       ),
-    [actors, normalizedEmail]
+    [actors, email]
   );
   const normalizedDefaultSlugDraft = useMemo(
     () => normalizeInboxSlug(defaultSlugDraft),
@@ -363,7 +387,7 @@ function AuthenticatedHome({
       setBootstrapStage('keys');
       setBootstrapError(null);
       console.info('[masumi bootstrap] starting browser bootstrap', {
-        normalizedEmail,
+        email,
         hasDefaultActor: Boolean(defaultActor),
         pendingBootstrapExists,
       });
@@ -373,9 +397,9 @@ function AuthenticatedHome({
       }
 
       const keyPair =
-        (await loadPendingBootstrapKeyPair(normalizedEmail)) ??
-        (await getOrCreatePendingBootstrapKeyPair(normalizedEmail));
-      const device = await getOrCreateDeviceKeyMaterial(normalizedEmail);
+        (await loadPendingBootstrapKeyPair(email)) ??
+        (await getOrCreatePendingBootstrapKeyPair(email));
+      const device = await getOrCreateDeviceKeyMaterial(email);
 
       if (!componentMountedRef.current) {
         return;
@@ -383,39 +407,38 @@ function AuthenticatedHome({
 
       setBootstrapStage('request');
       console.info('[masumi bootstrap] local key material ready', {
-        normalizedEmail,
+        email,
         deviceId: device.deviceId,
       });
 
       if (!defaultActor) {
         await Promise.resolve(
-          connection.reducers.upsertInboxFromOidcIdentity({
+          connection.reducers.upsertAccountFromOidcIdentity({
             displayName: session.user.name?.trim() || undefined,
             defaultSlug: confirmedDefaultSlug ?? suggestedDefaultSlug,
             encryptionPublicKey: keyPair.encryption.publicKey,
-            encryptionKeyVersion: keyPair.encryption.keyVersion,
-            encryptionAlgorithm: keyPair.encryption.algorithm,
+            keyBundleVersion: keyPair.encryption.keyVersion,
+            encryptionAlgorithm: { tag: 'EcdhP256V1' },
             signingPublicKey: keyPair.signing.publicKey,
-            signingKeyVersion: keyPair.signing.keyVersion,
-            signingAlgorithm: keyPair.signing.algorithm,
+            signingAlgorithm: { tag: 'EcdsaP256Sha256V1' },
             deviceId: device.deviceId,
             deviceLabel: 'Browser',
             devicePlatform:
               typeof navigator !== 'undefined' ? navigator.platform : undefined,
             deviceEncryptionPublicKey: device.keyPair.publicKey,
             deviceEncryptionKeyVersion: device.keyPair.keyVersion,
-            deviceEncryptionAlgorithm: device.keyPair.algorithm,
+            deviceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
           })
         );
         console.info('[masumi bootstrap] requested default inbox agent creation', {
-          normalizedEmail,
+          email,
         });
       }
 
       setBootstrapStage('sync');
       const { actor } = await waitForBootstrapRows({
         connection,
-        normalizedEmail,
+        email,
         encryptionPublicKey: keyPair.encryption.publicKey,
         encryptionKeyVersion: keyPair.encryption.keyVersion,
         signingPublicKey: keyPair.signing.publicKey,
@@ -429,17 +452,17 @@ function AuthenticatedHome({
       setFinalizing(true);
       setBootstrapStage('finalize');
       console.info('[masumi bootstrap] default inbox agent is visible', {
-        normalizedEmail,
+        email,
         slug: actor.slug,
       });
 
       const identity = {
-        normalizedEmail,
+        email,
         slug: actor.slug,
       };
 
       await setStoredAgentKeyPair(identity, keyPair);
-      await clearPendingBootstrapKeyPair(normalizedEmail);
+      await clearPendingBootstrapKeyPair(email);
 
       if (!componentMountedRef.current) {
         return;
@@ -451,7 +474,7 @@ function AuthenticatedHome({
       setResolvedBootstrapSlug(actor.slug);
       console.info('[masumi bootstrap] bootstrap finalized', identity);
       queueKeyBackupPrompt({
-        normalizedEmail,
+        email,
         slug: actor.slug,
         reason: 'created',
       });
@@ -478,7 +501,7 @@ function AuthenticatedHome({
     confirmedDefaultSlug,
     hydrated,
     inboxesReady,
-    normalizedEmail,
+    email,
     pendingBootstrapExists,
     resolvedBootstrapSlug,
     session.user.name,
@@ -756,8 +779,8 @@ function ThemeToggleButton({
 function SignedOutHome() {
   const { theme, toggleTheme } = useTheme();
   const publicChannelConfig = readPublicRootChannelConfig();
-  const publicChannelId = publicChannelConfig.channelId;
-  const hasPublicChannel = publicChannelId !== null;
+  const publicChannelSlug = publicChannelConfig.channelSlug;
+  const hasPublicChannel = publicChannelSlug !== null;
   const [installMethod, setInstallMethod] = useState<'skills' | 'npm'>('skills');
   const [installCopied, setInstallCopied] = useState(false);
   const installCommand =
@@ -848,8 +871,8 @@ function SignedOutHome() {
                 : 'mx-auto grid w-full max-w-xl gap-6'
             }
           >
-            {publicChannelId !== null ? (
-              <PublicRootChannel channelId={publicChannelId} />
+            {publicChannelSlug !== null ? (
+              <PublicRootChannel channelSlug={publicChannelSlug} />
             ) : null}
 
             <aside className="space-y-5">
@@ -956,21 +979,16 @@ function SignedOutHome() {
   );
 }
 
-function PublicRootChannel({ channelId }: { channelId: bigint }) {
+function PublicRootChannel({ channelSlug }: { channelSlug: string }) {
   const connectionState = useSpacetimeDB();
   const connection = connectionState.getConnection?.() as DbConnection | null;
-  const messageQuery = useMemo(
-    () => tables.publicRecentChannelMessages.where(row => row.channelId.eq(channelId)),
-    [channelId]
-  );
-  const [channel, channelsReady, channelsError] = usePublicChannelLookup({ channelId });
-  const [liveMessages, liveMessagesReady] = usePublicLiveTable<PublicRecentChannelMessage>(
-    messageQuery,
-    'publicRecentChannelMessages',
-    { enabled: channel !== null }
-  );
+  const [channel, channelsReady, channelsError] = usePublicChannelLookup({ channelSlug });
+  const channelId = channel?.id ?? 0n;
+  // Anonymous live mirror was dropped; rely on the paginated lookup below.
+  const liveMessages = useMemo<ChannelMessage[]>(() => [], []);
+  const liveMessagesReady = true;
   const [messages, messagesReady, messagesError, reloadMessages] = usePublicChannelMessagesLookup({
-    channelId,
+    channelSlug,
     enabled: channel !== null,
     limit: 25n,
   });
@@ -978,7 +996,7 @@ function PublicRootChannel({ channelId }: { channelId: bigint }) {
     Record<string, DecryptedPublicChannelMessage>
   >({});
   const liveMessagesRefreshKey = useMemo(
-    () => liveMessages.map(message => `${message.id.toString()}:${message.channelSeq.toString()}`).join('|'),
+    () => liveMessages.map(message => `${message.id.toString()}:${message.id.toString()}`).join('|'),
     [liveMessages]
   );
 
@@ -987,8 +1005,8 @@ function PublicRootChannel({ channelId }: { channelId: bigint }) {
       [...messages]
         .filter(message => message.channelId === channelId)
         .sort((left, right) => {
-          if (left.channelSeq < right.channelSeq) return -1;
-          if (left.channelSeq > right.channelSeq) return 1;
+          if (left.id < right.id) return -1;
+          if (left.id > right.id) return 1;
           return Number(left.id - right.id);
         }),
     [channelId, messages]
@@ -1030,7 +1048,7 @@ function PublicRootChannel({ channelId }: { channelId: bigint }) {
 
             const verified = await verifySignedChannelMessage({
               input: toPublicChannelSignatureInput(message),
-              signature: message.signature,
+              signature: toHex(message.signature),
               senderSigningPublicKey,
             });
             return [

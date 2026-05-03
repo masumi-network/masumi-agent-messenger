@@ -6,11 +6,15 @@ import {
   type ActorPublicKeys,
   type AgentKeyPair,
 } from '../../../shared/agent-crypto';
+import { fromHex } from '../../../shared/crypto-utils';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import {
   buildOwnActorIds,
   buildParticipantsByThreadId,
+  findActorIdByPublicIdentity,
+  findDirectThreads as findDirectThreadsByIds,
   generateClientThreadId,
+  isDirectThreadBetween,
   summarizeThread,
 } from '../../../shared/inbox-state';
 import {
@@ -30,17 +34,17 @@ import type {
   ResolvedPublishedActor,
 } from '../../../shared/published-actors';
 import type {
-  VisibleAgentRow,
-  VisibleThreadParticipantRow,
-  VisibleThreadReadStateRow,
-  VisibleThreadRow,
-  VisibleContactRequestRow,
-  VisibleMessageRow,
-  VisibleThreadSecretEnvelopeRow,
-  VisibleThreadInviteRow,
+  Agent,
+  ThreadParticipant,
+  ThreadParticipantPreview,
+  Thread,
+  ContactRequest,
+  Message,
+  ThreadSecretEnvelope as VisibleThreadSecretEnvelopeRow,
+  ThreadInvite,
 } from '../../../webapp/src/module_bindings/types';
 import type { DbConnection } from '../../../webapp/src/module_bindings';
-import { ensureAuthenticatedSession } from './auth';
+import { ensureAuthenticatedSession, type AuthSessionContext } from './auth';
 import type { TaskReporter } from './command-runtime';
 import { connectivityError, userError } from './errors';
 import {
@@ -50,29 +54,38 @@ import {
   type PeerKeyTuple,
 } from './peer-key-trust';
 import { resolvePublishedActorLookup } from './published-actor-lookup';
-import { resolveStoredActorKeyPairForPublishedActor } from './actor-keys';
+import {
+  resolveStoredActorKeyPairForPublishedActor,
+  type PublishedActorKeyBundle,
+} from './actor-keys';
 import { requireImportedRotationKeyConfirmed } from './imported-rotation-key-confirmation';
 import { createSecretStore } from './secret-store';
 import {
   connectAuthenticated,
   disconnectConnection,
+  readAllOwnedAgents,
+  readAllThreadParticipants,
   readLatestMetadataRows,
   readOwnedAgentRow,
+  readStatesFromVisibleThreadPage,
+  withSpacetimeOperationTimeout,
+  type VisibleThreadReadStateRow,
 } from './spacetimedb';
 import { lookupMasumiInboxAgentBySlug } from './masumi-inbox-agent';
 import { mergeRowsById } from './row-utils';
 
 type MessageSnapshot = {
-  actors: VisibleAgentRow[];
-  participants: VisibleThreadParticipantRow[];
+  actors: Agent[];
+  participants: VisibleThreadParticipant[];
   readStates: VisibleThreadReadStateRow[];
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
-  threads: VisibleThreadRow[];
-  contactRequests: VisibleContactRequestRow[];
-  threadInvites: VisibleThreadInviteRow[];
-  messages: VisibleMessageRow[];
+  threads: Thread[];
+  contactRequests: ContactRequest[];
+  threadInvites: ThreadInvite[];
+  messages: Message[];
 };
 type AuthenticatedProfile = Awaited<ReturnType<typeof ensureAuthenticatedSession>>['profile'];
+type VisibleThreadParticipant = ThreadParticipantPreview & Partial<ThreadParticipant>;
 
 type SendTargetSummary = {
   slug: string;
@@ -87,6 +100,9 @@ type SendTargetLookupMetadata = {
   selected: ResolvedPublishedActor;
 };
 
+const SEND_SPACETIME_OPERATION_TIMEOUT_MS = 15000;
+const SEND_REDUCER_ACK_TIMEOUT_MS = 2500;
+
 export type SendMessageToThreadResult = {
   sent: true;
   profile: string;
@@ -95,12 +111,12 @@ export type SendMessageToThreadResult = {
   threadKind: string;
   label: string;
   messageId: string;
-  threadSeq: string;
+  senderMessageId: string;
 };
 
 type SendMessageToThreadCoreParams = {
   profile: AuthenticatedProfile;
-  normalizedEmail: string;
+  email: string;
   conn: DbConnection;
   snapshot: MessageSnapshot;
   requestedThreadId: bigint;
@@ -120,7 +136,7 @@ export type SendMessageResult =
       to: SendTargetSummary;
       threadId: string;
       messageId: string;
-      threadSeq: string;
+      senderMessageId: string;
       createdDirectThread: boolean;
       targetLookup: SendTargetLookupMetadata;
     }
@@ -137,20 +153,96 @@ export type SendMessageResult =
       targetLookup: SendTargetLookupMetadata;
     };
 
+function toCipherAlgorithm(_algorithm: string): { tag: 'AesGcm256V1' } {
+  return { tag: 'AesGcm256V1' };
+}
+
+function toReducerEnvelopes(
+  envelopes: ReadonlyArray<{
+    recipientPublicIdentity: string;
+    recipientEncryptionKeyVersion: number;
+    senderEncryptionKeyVersion: number;
+    signingKeyVersion: number;
+    wrappedSecretCiphertext: string;
+    wrappedSecretIv: string;
+    wrapAlgorithm: string;
+    signature: string;
+  }>
+): Array<{
+  recipientPublicIdentity: string;
+  recipientEncryptionKeyVersion: number;
+  senderEncryptionKeyVersion: number;
+  signingKeyVersion: number;
+  wrappedSecretCiphertext: Uint8Array;
+  wrappedSecretIv: Uint8Array;
+  wrapAlgorithm: { tag: 'EcdhP256AesGcm256V1' };
+  signature: Uint8Array;
+}> {
+  return envelopes.map(env => ({
+    ...env,
+    wrappedSecretCiphertext: fromHex(env.wrappedSecretCiphertext),
+    wrappedSecretIv: fromHex(env.wrappedSecretIv),
+    wrapAlgorithm: { tag: 'EcdhP256AesGcm256V1' },
+    signature: fromHex(env.signature),
+  }));
+}
+
 function compareBigIntDesc(left: bigint, right: bigint): number {
   if (left > right) return -1;
   if (left < right) return 1;
   return 0;
 }
 
-function buildDirectKey(left: { publicIdentity: string }, right: { publicIdentity: string }): string {
-  const values = [left.publicIdentity, right.publicIdentity].sort();
-  return `direct:${values[0]}:${values[1]}`;
+async function runSendSpacetimeOperation<Result>(
+  label: string,
+  run: () => PromiseLike<Result>
+): Promise<Result> {
+  return await withSpacetimeOperationTimeout(
+    {
+      label,
+      timeoutMs: SEND_SPACETIME_OPERATION_TIMEOUT_MS,
+      code: 'SPACETIMEDB_SEND_OPERATION_TIMEOUT',
+    },
+    run
+  );
+}
+
+async function submitSendEncryptedMessageReducer(params: {
+  label: string;
+  reporter: TaskReporter;
+  run: () => PromiseLike<void>;
+}): Promise<void> {
+  const timeoutSentinel = Symbol('send-reducer-ack-timeout');
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const reducerPromise = Promise.resolve().then(() => params.run());
+  const timeoutPromise = new Promise<typeof timeoutSentinel>(resolve => {
+    timeoutId = setTimeout(() => {
+      resolve(timeoutSentinel);
+    }, SEND_REDUCER_ACK_TIMEOUT_MS);
+  });
+
+  const result = await Promise.race([reducerPromise, timeoutPromise]).finally(() => {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
+  });
+  if (result === timeoutSentinel) {
+    reducerPromise.catch(() => {
+      // The reducer was submitted but the acknowledgement arrived after the
+      // optimistic UI path returned. The next live refresh or explicit retry
+      // will surface durable state; avoid an unhandled rejection here.
+    });
+    params.reporter.verbose?.(`${params.label} submitted; waiting for live sync`);
+  }
 }
 
 function isApprovalRequiredForFirstContactError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return message.includes('requires approval for first contact');
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('requires approval for first contact') ||
+    normalized.includes('direct contact requires approval')
+  );
 }
 
 function parseRequestedThreadId(value: string | undefined): bigint | null {
@@ -253,12 +345,12 @@ function buildEncryptedPayload(params: {
   }
 }
 
-function tupleFromVisibleActor(actor: VisibleAgentRow): PeerKeyTuple {
+function tupleFromActorPublicKeys(actor: ActorPublicKeys): PeerKeyTuple {
   return {
-    encryptionPublicKey: actor.currentEncryptionPublicKey,
-    encryptionKeyVersion: actor.currentEncryptionKeyVersion,
-    signingPublicKey: actor.currentSigningPublicKey,
-    signingKeyVersion: actor.currentSigningKeyVersion,
+    encryptionPublicKey: actor.encryptionPublicKey,
+    encryptionKeyVersion: actor.encryptionKeyVersion,
+    signingPublicKey: actor.signingPublicKey,
+    signingKeyVersion: actor.signingKeyVersion,
   };
 }
 
@@ -271,12 +363,14 @@ function tupleFromPublishedActor(actor: PublishedActorLookupLike): PeerKeyTuple 
   };
 }
 
-async function requirePeerKeyTrust(params: {
+export async function requirePeerKeyTrust(params: {
   publicIdentity: string;
   displayLabel: string;
   observed: PeerKeyTuple;
   allowFirstContactTrust: boolean;
 }): Promise<void> {
+  // Per CLAUDE.md "Peer Key Trust Rules": peer rotations are accepted client-side after the
+  // published tuple is observed, while sender-owned imported keys are gated separately.
   const comparison = params.allowFirstContactTrust
     ? await autoPinPeerIfUnknown(params.publicIdentity, params.observed)
     : await comparePinnedPeer(params.publicIdentity, params.observed);
@@ -297,25 +391,30 @@ async function requirePeerKeyTrust(params: {
   await confirmPeerKeyRotation(params.publicIdentity, params.observed);
 }
 
-function toActorPublicKeys(actor: VisibleAgentRow): ActorPublicKeys {
+function toActorPublicKeys(
+  actor: Agent,
+  keys: {
+    encryptionPublicKey: string;
+    signingPublicKey: string;
+  }
+): ActorPublicKeys {
   return {
     actorId: actor.id,
-    normalizedEmail: actor.normalizedEmail,
+    email: actor.email,
     slug: actor.slug,
-    inboxIdentifier: actor.inboxIdentifier ?? undefined,
     isDefault: actor.isDefault,
     publicIdentity: actor.publicIdentity,
     displayName: actor.displayName ?? null,
-    encryptionPublicKey: actor.currentEncryptionPublicKey,
-    encryptionKeyVersion: actor.currentEncryptionKeyVersion,
-    signingPublicKey: actor.currentSigningPublicKey,
-    signingKeyVersion: actor.currentSigningKeyVersion,
+    encryptionPublicKey: keys.encryptionPublicKey,
+    encryptionKeyVersion: actor.currentKeyBundleVersion,
+    signingPublicKey: keys.signingPublicKey,
+    signingKeyVersion: actor.currentKeyBundleVersion,
   };
 }
 
 function toPublishedActorPublicKeys(target: PublishedActorLookupLike): ActorPublicKeys {
   return {
-    normalizedEmail: '',
+    email: '',
     slug: target.slug,
     isDefault: target.isDefault,
     publicIdentity: target.publicIdentity,
@@ -329,28 +428,20 @@ function toPublishedActorPublicKeys(target: PublishedActorLookupLike): ActorPubl
 
 async function requireLocalActorKeyPairForSending(params: {
   profile: Awaited<ReturnType<typeof ensureAuthenticatedSession>>['profile'];
-  ownActor: VisibleAgentRow;
+  conn: DbConnection;
+  ownActor: Agent;
 }): Promise<AgentKeyPair> {
   const secretStore = createSecretStore();
   const identity = {
-    normalizedEmail: params.ownActor.normalizedEmail,
+    email: params.ownActor.email,
     slug: params.ownActor.slug,
-    inboxIdentifier: params.ownActor.inboxIdentifier ?? undefined,
   };
+  const published = await resolvePublishedKeyBundle(params.conn, params.ownActor);
   const keyResolution = await resolveStoredActorKeyPairForPublishedActor({
     profile: params.profile,
     secretStore,
     identity,
-    published: {
-      encryption: {
-        publicKey: params.ownActor.currentEncryptionPublicKey,
-        keyVersion: params.ownActor.currentEncryptionKeyVersion,
-      },
-      signing: {
-        publicKey: params.ownActor.currentSigningPublicKey,
-        keyVersion: params.ownActor.currentSigningKeyVersion,
-      },
-    },
+    published,
   });
 
   if (keyResolution.status === 'matched') {
@@ -363,7 +454,7 @@ async function requireLocalActorKeyPairForSending(params: {
 
   throw userError(
     keyResolution.status === 'mismatch'
-      ? `Local agent key bundle for \`${params.ownActor.slug}\` no longer matches the published actor keys. Run \`masumi-agent-messenger account recover\`, import an encrypted backup, or rotate keys before sending from this CLI profile.`
+      ? `Local agent key bundle for \`${params.ownActor.slug}\` no longer matches the published actor keys. Run \`masumi-agent-messenger account recover\`, import an encrypted backup, or reset keys before sending from this CLI profile.`
       : `No local agent key bundle found for \`${params.ownActor.slug}\`. Run \`masumi-agent-messenger account recover\` or import an encrypted backup before sending from this CLI profile.`,
     {
       code:
@@ -374,94 +465,171 @@ async function requireLocalActorKeyPairForSending(params: {
   );
 }
 
-function requireDefaultActor(actors: VisibleAgentRow[], normalizedEmail: string): VisibleAgentRow {
-  const actor = actors.find(row => row.isDefault && row.normalizedEmail === normalizedEmail);
-  if (!actor) {
-    throw userError('No default agent found. Run `masumi-agent-messenger account sync` first.', {
-      code: 'INBOX_BOOTSTRAP_REQUIRED',
+function findLookupKey(
+  rows: Awaited<ReturnType<DbConnection['procedures']['lookupAgentPublicKeys']>>,
+  kind: 'Encryption' | 'Signing',
+  version: number
+): string | null {
+  return rows.find(row => row.keyKind.tag === kind && row.keyVersion === version)?.publicKey ?? null;
+}
+
+async function resolvePublishedKeyBundle(
+  conn: DbConnection,
+  actor: Agent
+): Promise<PublishedActorKeyBundle> {
+  const rows = await runSendSpacetimeOperation('public key lookup', () =>
+    conn.procedures.lookupAgentPublicKeys({
+      requests: [
+        {
+          agentDbId: actor.id,
+          keyKind: { tag: 'Encryption' },
+          keyVersion: actor.currentKeyBundleVersion,
+        },
+        {
+          agentDbId: actor.id,
+          keyKind: { tag: 'Signing' },
+          keyVersion: actor.currentKeyBundleVersion,
+        },
+      ],
+    })
+  );
+  const encryptionPublicKey = findLookupKey(
+    rows,
+    'Encryption',
+    actor.currentKeyBundleVersion
+  );
+  const signingPublicKey = findLookupKey(rows, 'Signing', actor.currentKeyBundleVersion);
+  if (!encryptionPublicKey || !signingPublicKey) {
+    throw userError(`Published public keys for \`${actor.slug}\` are unavailable.`, {
+      code: 'AGENT_PUBLIC_KEYS_UNAVAILABLE',
     });
   }
-  return actor;
+
+  return {
+    encryption: {
+      publicKey: encryptionPublicKey,
+      keyVersion: actor.currentKeyBundleVersion,
+    },
+    signing: {
+      publicKey: signingPublicKey,
+      keyVersion: actor.currentKeyBundleVersion,
+    },
+  };
+}
+
+async function resolveActorPublicKeys(
+  conn: DbConnection,
+  actor: Agent
+): Promise<ActorPublicKeys> {
+  const published = await resolvePublishedKeyBundle(conn, actor);
+  return toActorPublicKeys(actor, {
+    encryptionPublicKey: published.encryption.publicKey,
+    signingPublicKey: published.signing.publicKey,
+  });
 }
 
 function requireOwnedActor(params: {
-  actors: VisibleAgentRow[];
-  normalizedEmail: string;
+  actors: Agent[];
+  participants?: VisibleThreadParticipant[];
+  email: string;
   actorSlug?: string;
-}): VisibleAgentRow {
-  const defaultActor = requireDefaultActor(params.actors, params.normalizedEmail);
-  if (!params.actorSlug) {
-    if (isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState)) {
+  threadId?: bigint;
+}): Agent {
+  const ownedActors = params.actors.filter(actor => actor.email === params.email);
+
+  if (params.actorSlug) {
+    const normalizedSlug = normalizeInboxSlug(params.actorSlug);
+    if (!normalizedSlug) {
+      throw userError('Inbox slug is invalid.', {
+        code: 'INVALID_SLUG',
+      });
+    }
+
+    const actor = ownedActors.find(row => row.slug === normalizedSlug);
+    if (!actor) {
+      throw userError(`No owned inbox actor found for slug \`${normalizedSlug}\`.`, {
+        code: 'OWNED_ACTOR_NOT_FOUND',
+      });
+    }
+
+    if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState?.tag)) {
       throw userError(
-        `Agent \`${defaultActor.slug}\` is deregistering or deregistered and cannot send chats.`,
+        `Agent \`${actor.slug}\` is deregistering or deregistered and cannot send chats.`,
         {
           code: 'AGENT_DEREGISTERED',
         }
       );
     }
-    return defaultActor;
+
+    return actor;
   }
 
-  const normalizedSlug = normalizeInboxSlug(params.actorSlug);
-  if (!normalizedSlug) {
-    throw userError('Inbox slug is invalid.', {
-      code: 'INVALID_SLUG',
-    });
-  }
-
-  const actor = params.actors.find(row => {
-    return row.inboxId === defaultActor.inboxId && row.slug === normalizedSlug;
-  });
-  if (!actor) {
-    throw userError(`No owned inbox actor found for slug \`${normalizedSlug}\`.`, {
-      code: 'OWNED_ACTOR_NOT_FOUND',
-    });
-  }
-
-  if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)) {
-    throw userError(
-      `Agent \`${actor.slug}\` is deregistering or deregistered and cannot send chats.`,
-      {
-        code: 'AGENT_DEREGISTERED',
-      }
+  if (params.threadId !== undefined && params.participants !== undefined) {
+    const activeParticipantAgentIds = new Set(
+      params.participants
+        .filter(participant => participant.threadId === params.threadId && participant.active)
+        .map(participant => participant.agentDbId)
     );
+    const candidates = ownedActors.filter(actor => activeParticipantAgentIds.has(actor.id));
+    if (candidates.length === 1) {
+      const actor = candidates[0]!;
+      if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState?.tag)) {
+        throw userError(
+          `Agent \`${actor.slug}\` is deregistering or deregistered and cannot send chats.`,
+          {
+            code: 'AGENT_DEREGISTERED',
+          }
+        );
+      }
+      return actor;
+    }
+    if (candidates.length > 1) {
+      throw userError('Multiple owned agents are participants in this thread. Pass --agent <slug>.', {
+        code: 'AGENT_SLUG_REQUIRED',
+      });
+    }
   }
 
-  return actor;
+  throw userError('Pass --agent <slug> when sending outside a selected thread.', {
+    code: 'AGENT_SLUG_REQUIRED',
+  });
 }
 
 function findDirectThread(
-  threads: VisibleThreadRow[],
-  ownActor: VisibleAgentRow,
+  threads: Thread[],
+  actors: Agent[],
+  ownActor: Agent,
   otherPublicIdentity: string
-): VisibleThreadRow | null {
-  const matches = findDirectThreads(threads, ownActor, otherPublicIdentity);
-  return matches[0] ?? null;
+): Thread | null {
+  return findDirectThreads(threads, actors, ownActor, otherPublicIdentity)[0] ?? null;
 }
 
 function findDirectThreads(
-  threads: VisibleThreadRow[],
-  ownActor: VisibleAgentRow,
+  threads: Thread[],
+  actors: Agent[],
+  ownActor: Agent,
   otherPublicIdentity: string
-): VisibleThreadRow[] {
-  const dedupeKey = buildDirectKey(ownActor, { publicIdentity: otherPublicIdentity });
-  return threads
-    .filter(thread => thread.kind === 'direct' && thread.dedupeKey === dedupeKey)
-    .sort((left, right) =>
-      compareBigIntDesc(
-        left.lastMessageAt.microsSinceUnixEpoch,
-        right.lastMessageAt.microsSinceUnixEpoch
-      )
-    );
+): Thread[] {
+  const otherActorId = findActorIdByPublicIdentity(actors, otherPublicIdentity);
+  if (otherActorId === null) {
+    return [];
+  }
+  return findDirectThreadsByIds(threads, ownActor.id, otherActorId).sort((left, right) =>
+    compareBigIntDesc(
+      left.lastMessageAt.microsSinceUnixEpoch,
+      right.lastMessageAt.microsSinceUnixEpoch
+    )
+  );
 }
 
 function requireDirectThreadById(params: {
-  threads: VisibleThreadRow[];
-  ownActor: VisibleAgentRow;
+  threads: Thread[];
+  actors: Agent[];
+  ownActor: Agent;
   otherPublicIdentity: string;
   threadId: bigint;
   targetSlug: string;
-}): VisibleThreadRow {
+}): Thread {
   const thread = params.threads.find(row => row.id === params.threadId);
   if (!thread) {
     throw userError(`Direct thread ${params.threadId.toString()} is not visible.`, {
@@ -469,16 +637,14 @@ function requireDirectThreadById(params: {
     });
   }
 
-  if (thread.kind !== 'direct') {
+  if (thread.kind.tag !== 'Direct') {
     throw userError(`Thread ${params.threadId.toString()} is not a direct thread.`, {
       code: 'DIRECT_THREAD_INVALID_KIND',
     });
   }
 
-  const expectedDirectKey = buildDirectKey(params.ownActor, {
-    publicIdentity: params.otherPublicIdentity,
-  });
-  if (thread.dedupeKey !== expectedDirectKey) {
+  const otherActorId = findActorIdByPublicIdentity(params.actors, params.otherPublicIdentity);
+  if (otherActorId === null || !isDirectThreadBetween(thread, params.ownActor.id, otherActorId)) {
     throw userError(
       `Thread ${params.threadId.toString()} does not match recipient slug \`${params.targetSlug}\`.`,
       {
@@ -491,10 +657,10 @@ function requireDirectThreadById(params: {
 }
 
 function findParticipant(
-  participants: VisibleThreadParticipantRow[],
+  participants: VisibleThreadParticipant[],
   threadId: bigint,
   actorId: bigint
-): VisibleThreadParticipantRow | null {
+): VisibleThreadParticipant | null {
   return (
     participants.find(participant => participant.threadId === threadId && participant.agentDbId === actorId) ??
     null
@@ -503,12 +669,18 @@ function findParticipant(
 
 type SenderSecretVersionState = {
   membershipVersion: bigint;
-  secretVersion: string;
+  secretVersion: number;
 };
 
+// Two callers (send-message.ts:837 / :1567) intentionally pass `undefined` for
+// `latestSenderMessage` because `participant.lastSentSecretVersion` is the post-rework
+// source of truth and we don't want to scan the full thread history just to recompute it.
+// Don't introduce a real `Message` here without re-validating the rotation invariant
+// (`senderSecretRotationRequired` consumes the result).
 function resolveSenderState(
-  latestSenderMessage: VisibleMessageRow | undefined,
-  senderParticipant: VisibleThreadParticipantRow | null
+  thread: Thread,
+  latestSenderMessage: Message | undefined,
+  senderParticipant: VisibleThreadParticipant | null
 ): SenderSecretVersionState | undefined {
   if (latestSenderMessage) {
     return {
@@ -516,12 +688,11 @@ function resolveSenderState(
       secretVersion: latestSenderMessage.secretVersion,
     };
   }
-  if (
-    senderParticipant?.lastSentMembershipVersion !== undefined &&
-    senderParticipant.lastSentSecretVersion !== undefined
-  ) {
+  if (senderParticipant?.lastSentSecretVersion !== undefined) {
     return {
-      membershipVersion: senderParticipant.lastSentMembershipVersion,
+      // The new schema dropped `lastSentMembershipVersion`; pair the cached
+      // last-sent secret with the thread's current membership version.
+      membershipVersion: thread.membershipVersion,
       secretVersion: senderParticipant.lastSentSecretVersion,
     };
   }
@@ -529,11 +700,11 @@ function resolveSenderState(
 }
 
 function senderSecretRotationRequired(params: {
-  senderActor: VisibleAgentRow;
-  thread: VisibleThreadRow;
+  senderActor: Agent;
+  thread: Thread;
   latestSenderState: SenderSecretVersionState | undefined;
-  participants: VisibleThreadParticipantRow[];
-  actors: VisibleAgentRow[];
+  participants: VisibleThreadParticipant[];
+  actors: Agent[];
   envelopes: VisibleThreadSecretEnvelopeRow[];
 }): boolean {
   const {
@@ -552,7 +723,7 @@ function senderSecretRotationRequired(params: {
   }
 
   const actorsById = new Map(actors.map(actor => [actor.id, actor] as const));
-  const expectedRecipients = new Map<bigint, VisibleAgentRow>();
+  const expectedRecipients = new Map<bigint, Agent>();
   for (const participant of participants) {
     if (participant.threadId !== thread.id || !participant.active) {
       continue;
@@ -584,13 +755,13 @@ function senderSecretRotationRequired(params: {
     }
     seenRecipients.add(envelope.recipientAgentDbId);
 
-    if (envelope.senderEncryptionKeyVersion !== senderActor.currentEncryptionKeyVersion) {
+    if (envelope.senderEncryptionKeyVersion !== senderActor.currentKeyBundleVersion) {
       return true;
     }
-    if (envelope.signingKeyVersion !== senderActor.currentSigningKeyVersion) {
+    if (envelope.signingKeyVersion !== senderActor.currentKeyBundleVersion) {
       return true;
     }
-    if (envelope.recipientEncryptionKeyVersion !== recipient.currentEncryptionKeyVersion) {
+    if (envelope.recipientEncryptionKeyVersion !== recipient.currentKeyBundleVersion) {
       return true;
     }
   }
@@ -598,7 +769,7 @@ function senderSecretRotationRequired(params: {
   return false;
 }
 
-function requireVisibleThread(threads: VisibleThreadRow[], threadId: bigint): VisibleThreadRow {
+function requireVisibleThread(threads: Thread[], threadId: bigint): Thread {
   const thread = threads.find(row => row.id === threadId) ?? null;
   if (!thread) {
     throw userError(`Thread ${threadId.toString()} is not visible.`, {
@@ -610,16 +781,21 @@ function requireVisibleThread(threads: VisibleThreadRow[], threadId: bigint): Vi
 
 async function waitForDirectThread(params: {
   read: () => Promise<MessageSnapshot>;
-  ownActor: VisibleAgentRow;
+  ownActor: Agent;
   otherPublicIdentity: string;
   existingThreadIds?: Set<string>;
   timeoutMs?: number;
-}): Promise<VisibleThreadRow> {
+}): Promise<Thread> {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   while (Date.now() < timeoutAt) {
     const snapshot = await params.read();
-    const matches = findDirectThreads(snapshot.threads, params.ownActor, params.otherPublicIdentity);
+    const matches = findDirectThreads(
+      snapshot.threads,
+      snapshot.actors,
+      params.ownActor,
+      params.otherPublicIdentity
+    );
     const existing = params.existingThreadIds
       ? matches.find(thread => !params.existingThreadIds?.has(thread.id.toString())) ?? null
       : (matches[0] ?? null);
@@ -642,7 +818,7 @@ async function sendMessageToThreadCore(
 ): Promise<SendMessageToThreadResult> {
   const {
     profile,
-    normalizedEmail,
+    email,
     conn,
     snapshot,
     requestedThreadId,
@@ -654,8 +830,10 @@ async function sendMessageToThreadCore(
   } = params;
   const ownActor = requireOwnedActor({
     actors: snapshot.actors,
-    normalizedEmail,
+    participants: snapshot.participants,
+    email,
     actorSlug,
+    threadId: requestedThreadId,
   });
   const thread = requireVisibleThread(snapshot.threads, requestedThreadId);
   const senderParticipant = findParticipant(snapshot.participants, requestedThreadId, ownActor.id);
@@ -667,6 +845,7 @@ async function sendMessageToThreadCore(
 
   const keyPair = await requireLocalActorKeyPairForSending({
     profile,
+    conn,
     ownActor,
   });
 
@@ -678,28 +857,42 @@ async function sendMessageToThreadCore(
   const recipientActors = snapshot.participants
     .filter(participant => participant.threadId === requestedThreadId && participant.active)
     .map(participant => snapshot.actors.find(actor => actor.id === participant.agentDbId))
-    .filter((actor): actor is VisibleAgentRow => Boolean(actor));
+    .filter((actor): actor is Agent => Boolean(actor));
   if (recipientActors.length === 0) {
     throw connectivityError('No active participants are visible for this thread.', {
       code: 'THREAD_PARTICIPANTS_NOT_VISIBLE',
     });
   }
-  const ownActorIdsForReply = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+  const recipients = await Promise.all(
+    recipientActors.map(actor => resolveActorPublicKeys(conn, actor))
+  );
+  const recipientKeysByActorId = new Map(
+    recipients
+      .filter((recipient): recipient is ActorPublicKeys & { actorId: bigint } =>
+        recipient.actorId !== undefined
+      )
+      .map(recipient => [recipient.actorId, recipient] as const)
+  );
+  const ownActorIdsForReply = buildOwnActorIds(snapshot.actors, ownActor.accountId);
   for (const recipient of recipientActors) {
     if (recipient.id === ownActor.id) continue;
+    const recipientKeys = recipientKeysByActorId.get(recipient.id);
+    if (!recipientKeys) {
+      throw connectivityError(`Public keys for ${recipient.slug} are unavailable.`, {
+        code: 'AGENT_PUBLIC_KEYS_UNAVAILABLE',
+      });
+    }
     await requirePeerKeyTrust({
       publicIdentity: recipient.publicIdentity,
       displayLabel: recipient.slug,
-      observed: tupleFromVisibleActor(recipient),
+      observed: tupleFromActorPublicKeys(recipientKeys),
       allowFirstContactTrust: ownActorIdsForReply.has(recipient.id),
     });
   }
-  const recipients = recipientActors.map(toActorPublicKeys);
 
-  // senderSeq is deprecated; resolveSenderState falls back to the participant's
-  // cached lastSentSecretVersion, so the per-thread message scan that used to
-  // sit here is no longer needed.
-  const latestSenderState = resolveSenderState(undefined, senderParticipant);
+  // resolveSenderState falls back to the participant's cached
+  // lastSentSecretVersion, so no per-thread message scan is needed here.
+  const latestSenderState = resolveSenderState(thread, undefined, senderParticipant);
 
   const existingSecret = latestSenderState
     ? getCachedSenderSecret(
@@ -712,13 +905,18 @@ async function sendMessageToThreadCore(
   // procedure rather than read from a global subscription. Empty when the
   // sender has not yet published a secret in this thread.
   const envelopesForRotation = latestSenderState
-    ? await conn.procedures.listThreadSecretEnvelopes({
-        agentDbId: ownActor.id,
-        threadId: requestedThreadId,
-        membershipVersion: latestSenderState.membershipVersion,
-        senderAgentDbId: ownActor.id,
-        secretVersion: latestSenderState.secretVersion,
-      })
+    ? await runSendSpacetimeOperation('thread secret envelope lookup', () =>
+        conn.procedures.listThreadSecretEnvelopes({
+          agentDbId: ownActor.id,
+          threadId: requestedThreadId,
+          membershipVersion: latestSenderState.membershipVersion,
+          senderAgentDbId: ownActor.id,
+          recipientAgentDbId: undefined,
+          secretVersion: latestSenderState.secretVersion,
+          afterId: undefined,
+          limit: undefined,
+        })
+      )
     : [];
   const requiresSecretRotation = senderSecretRotationRequired({
     senderActor: ownActor,
@@ -730,14 +928,11 @@ async function sendMessageToThreadCore(
   });
 
   const senderMessageId = randomSenderMessageId();
-  const expectedThreadSeq = thread.lastMessageSeq + 1n;
-
   reporter.verbose?.(`Encrypting message for thread ${requestedThreadId.toString()}`);
   const prepared = await prepareEncryptedMessage({
     threadId: requestedThreadId,
     senderActorId: ownActor.id,
     senderPublicIdentity: ownActor.publicIdentity,
-    senderSeq: 0n,
     senderMessageId,
     payload,
     keyPair,
@@ -748,19 +943,23 @@ async function sendMessageToThreadCore(
   });
 
   reporter.verbose?.(`Sending encrypted message to thread ${requestedThreadId.toString()}`);
-  await conn.reducers.sendEncryptedMessage({
-    agentDbId: ownActor.id,
-    threadId: requestedThreadId,
-    secretVersion: prepared.secretVersion,
-    signingKeyVersion: prepared.signingKeyVersion,
-    senderSeq: 0n,
-    senderMessageId,
-    ciphertext: prepared.ciphertext,
-    iv: prepared.iv,
-    cipherAlgorithm: prepared.cipherAlgorithm,
-    signature: prepared.signature,
-    replyToMessageId: undefined,
-    attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
+  await submitSendEncryptedMessageReducer({
+    label: 'send encrypted message reducer',
+    reporter,
+    run: () =>
+      conn.reducers.sendEncryptedMessage({
+        agentDbId: ownActor.id,
+        threadId: requestedThreadId,
+        secretVersion: prepared.secretVersion,
+        signingKeyVersion: prepared.signingKeyVersion,
+        senderMessageId,
+        ciphertext: fromHex(prepared.ciphertext),
+        iv: fromHex(prepared.iv),
+        cipherAlgorithm: toCipherAlgorithm(prepared.cipherAlgorithm),
+        signature: fromHex(prepared.signature),
+        replyToMessageId: undefined,
+        attachedSecretEnvelopes: toReducerEnvelopes(prepared.attachedSecretEnvelopes),
+      }),
   });
 
   cacheSenderSecret(
@@ -776,7 +975,7 @@ async function sendMessageToThreadCore(
     snapshot.participants.filter(participant => participant.active)
   );
   const actorsById = new Map(snapshot.actors.map(actor => [actor.id, actor] as const));
-  const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+  const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.accountId);
   const label = summarizeThread(
     thread,
     activeParticipantsByThreadId.get(thread.id) ?? [],
@@ -791,36 +990,76 @@ async function sendMessageToThreadCore(
     profile: profile.name,
     actorSlug: ownActor.slug,
     threadId: requestedThreadId.toString(),
-    threadKind: thread.kind,
+    threadKind: thread.kind.tag === 'Direct' ? 'direct' : 'group',
     label,
     messageId: `sent:${requestedThreadId.toString()}:${senderMessageId.toString()}`,
-    threadSeq: expectedThreadSeq.toString(),
+    senderMessageId: senderMessageId.toString(),
   };
 }
 
 async function readThreadSendSnapshot(params: {
   conn: DbConnection;
-  normalizedEmail: string;
+  email: string;
   actorSlug?: string;
   threadId: bigint;
 }): Promise<MessageSnapshot> {
-  const ownActor = await readOwnedAgentRow(params.conn, {
-    normalizedEmail: params.normalizedEmail,
-    actorSlug: params.actorSlug,
-  });
-  if (!ownActor) {
-    const normalizedSlug =
-      params.actorSlug === undefined ? undefined : normalizeInboxSlug(params.actorSlug);
-    throw userError(
-      normalizedSlug
-        ? `No owned inbox actor found for slug \`${normalizedSlug}\`.`
-        : 'No default agent found. Run `masumi-agent-messenger account sync` first.',
-      {
-        code: normalizedSlug ? 'OWNED_ACTOR_NOT_FOUND' : 'INBOX_BOOTSTRAP_REQUIRED',
-      }
+  const explicitActor = params.actorSlug
+    ? await runSendSpacetimeOperation('owned agent lookup', () =>
+        readOwnedAgentRow(params.conn, {
+          email: params.email,
+          actorSlug: params.actorSlug,
+        })
+      )
+    : null;
+  const ownedActors = explicitActor
+    ? [explicitActor]
+    : await runSendSpacetimeOperation('owned agents lookup', () =>
+        readAllOwnedAgents(params.conn)
+      );
+  const candidateActors = explicitActor
+    ? [explicitActor]
+    : ownedActors.filter(actor => actor.email === params.email);
+  let threadPage: Awaited<ReturnType<DbConnection['procedures']['readVisibleThread']>> | undefined;
+  let ownActor: Agent | null = null;
+  for (const candidate of candidateActors) {
+    const candidatePage = await runSendSpacetimeOperation('visible thread lookup', () =>
+      params.conn.procedures.readVisibleThread({
+        agentDbId: candidate.id,
+        threadId: params.threadId,
+      })
     );
+    if (candidatePage?.threads.some(row => row.id === params.threadId)) {
+      threadPage = candidatePage;
+      ownActor = candidate;
+      break;
+    }
   }
-  if (isDeregisteringOrDeregisteredInboxAgentState(ownActor.masumiRegistrationState)) {
+  if (!threadPage) {
+    if (params.actorSlug && !explicitActor) {
+      const normalizedSlug = normalizeInboxSlug(params.actorSlug);
+      throw userError(`No owned inbox actor found for slug \`${normalizedSlug ?? ''}\`.`, {
+        code: 'OWNED_ACTOR_NOT_FOUND',
+      });
+    }
+    return {
+      actors: explicitActor ? [explicitActor] : [],
+      participants: [],
+      readStates: [],
+      secretEnvelopes: [],
+      threads: [],
+      contactRequests: [],
+      threadInvites: [],
+      messages: [],
+    };
+  }
+  ownActor ??= requireOwnedActor({
+    actors: mergeRowsById(ownedActors, threadPage.actors),
+    participants: threadPage.participantPreviews,
+    email: params.email,
+    actorSlug: params.actorSlug,
+    threadId: params.threadId,
+  });
+  if (isDeregisteringOrDeregisteredInboxAgentState(ownActor.masumiRegistrationState?.tag)) {
     throw userError(
       `Agent \`${ownActor.slug}\` is deregistering or deregistered and cannot send chats.`,
       {
@@ -828,38 +1067,45 @@ async function readThreadSendSnapshot(params: {
       }
     );
   }
-
-  const threadPage = await params.conn.procedures.readVisibleThread({
-    agentDbId: ownActor.id,
-    threadId: params.threadId,
-  });
   const thread = threadPage.threads.find(row => row.id === params.threadId);
-  const senderParticipant = threadPage.participants.find(participant => {
+  const senderParticipant = readStatesFromVisibleThreadPage(threadPage).find(participant => {
     return participant.threadId === params.threadId && participant.agentDbId === ownActor.id;
   });
   const latestSenderState =
-    senderParticipant?.lastSentMembershipVersion !== undefined &&
-    senderParticipant.lastSentSecretVersion !== undefined
+    thread && senderParticipant?.lastSentSecretVersion !== undefined
       ? {
-          membershipVersion: senderParticipant.lastSentMembershipVersion,
+          // The new schema dropped `lastSentMembershipVersion`; pair the
+          // cached secret version with the thread's current membership.
+          membershipVersion: thread.membershipVersion,
           secretVersion: senderParticipant.lastSentSecretVersion,
         }
       : undefined;
   const currentSecretEnvelopes =
     thread && latestSenderState
-      ? await params.conn.procedures.listThreadSecretEnvelopes({
-          agentDbId: ownActor.id,
-          threadId: params.threadId,
-          membershipVersion: latestSenderState.membershipVersion,
-          senderAgentDbId: ownActor.id,
-          secretVersion: latestSenderState.secretVersion,
-        })
+      ? await runSendSpacetimeOperation('thread secret envelope lookup', () =>
+          params.conn.procedures.listThreadSecretEnvelopes({
+            agentDbId: ownActor.id,
+            threadId: params.threadId,
+            membershipVersion: latestSenderState.membershipVersion,
+            senderAgentDbId: ownActor.id,
+            recipientAgentDbId: undefined,
+            secretVersion: latestSenderState.secretVersion,
+            afterId: undefined,
+            limit: undefined,
+          })
+        )
       : [];
+  const fullParticipants = await runSendSpacetimeOperation('thread participants lookup', () =>
+    readAllThreadParticipants(params.conn, params.threadId)
+  );
 
   return {
-    actors: mergeRowsById([ownActor], threadPage.actors),
-    participants: threadPage.participants,
-    readStates: threadPage.readStates,
+    actors: mergeRowsById(mergeRowsById([ownActor], threadPage.actors), fullParticipants.actors),
+    participants: mergeRowsById<VisibleThreadParticipant>(
+      threadPage.participantPreviews,
+      fullParticipants.participants
+    ),
+    readStates: readStatesFromVisibleThreadPage(threadPage),
     secretEnvelopes: currentSecretEnvelopes,
     threads: threadPage.threads,
     contactRequests: [],
@@ -874,7 +1120,7 @@ async function waitForContactRequest(params: {
   targetPublicIdentity: string;
   existingRequestIds?: Set<string>;
   timeoutMs?: number;
-}): Promise<VisibleContactRequestRow> {
+}): Promise<ContactRequest> {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   while (Date.now() < timeoutAt) {
@@ -883,7 +1129,7 @@ async function waitForContactRequest(params: {
       return (
         row.requesterAgentDbId === params.requesterActorId &&
         row.targetPublicIdentity === params.targetPublicIdentity &&
-        row.status === 'pending' &&
+        row.status.tag === 'Pending' &&
         !params.existingRequestIds?.has(row.id.toString())
       );
     });
@@ -905,15 +1151,15 @@ async function waitForContactRequest(params: {
 async function waitForContactRequestStatus(params: {
   read: () => Promise<MessageSnapshot>;
   requestId: bigint;
-  status: VisibleContactRequestRow['status'];
+  status: ContactRequest['status'];
   timeoutMs?: number;
-}): Promise<VisibleContactRequestRow> {
+}): Promise<ContactRequest> {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
 
   while (Date.now() < timeoutAt) {
     const snapshot = await params.read();
     const request = snapshot.contactRequests.find(row => row.id === params.requestId);
-    if (request?.status === params.status) {
+    if (request?.status.tag === params.status.tag) {
       return request;
     }
 
@@ -948,8 +1194,8 @@ export async function sendMessageToSlug(params: {
   }
 
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -966,26 +1212,85 @@ export async function sendMessageToSlug(params: {
   try {
     params.reporter.verbose?.('Reading latest thread state');
     const read = () =>
-      readLatestMetadataRows(conn, {
-        normalizedEmail,
-        actorSlug: params.actorSlug,
-      });
+      runSendSpacetimeOperation('latest metadata read', () =>
+        readLatestMetadataRows(conn, {
+          email,
+          actorSlug: params.actorSlug,
+        })
+      );
     let snapshot = await read();
+    if (
+      requestedThreadId &&
+      !snapshot.threads.some(thread => thread.id === requestedThreadId)
+    ) {
+      const visibleActor =
+        (params.actorSlug
+          ? await runSendSpacetimeOperation('owned agent lookup', () =>
+              readOwnedAgentRow(conn, { email, actorSlug: params.actorSlug })
+            )
+          : null) ??
+        snapshot.actors.find(actor => actor.email === email && actor.isDefault) ??
+        snapshot.actors.find(actor => actor.email === email) ??
+        null;
+      const threadPage = visibleActor
+        ? await runSendSpacetimeOperation('visible thread lookup', () =>
+            conn.procedures.readVisibleThread({
+              agentDbId: visibleActor.id,
+              threadId: requestedThreadId,
+            })
+          )
+        : null;
+      if (threadPage) {
+        const fullParticipants = await runSendSpacetimeOperation(
+          'thread participants lookup',
+          () => readAllThreadParticipants(conn, requestedThreadId)
+        );
+        snapshot = {
+          ...snapshot,
+          actors: mergeRowsById(
+            mergeRowsById(snapshot.actors, threadPage.actors),
+            fullParticipants.actors
+          ),
+          participants: mergeRowsById(
+            snapshot.participants,
+            mergeRowsById<VisibleThreadParticipant>(
+              threadPage.participantPreviews,
+              fullParticipants.participants
+            )
+          ),
+          readStates: mergeRowsById(snapshot.readStates, readStatesFromVisibleThreadPage(threadPage)),
+          threads: mergeRowsById(snapshot.threads, threadPage.threads),
+        };
+      }
+    }
     const ownActor = requireOwnedActor({
       actors: snapshot.actors,
-      normalizedEmail,
+      participants: snapshot.participants,
+      email,
       actorSlug: params.actorSlug,
+      threadId: requestedThreadId ?? undefined,
     });
     const keyPair = await requireLocalActorKeyPairForSending({
       profile,
+      conn,
       ownActor,
     });
 
     params.reporter.verbose?.(`Resolving recipient slug or email ${params.to}`);
     const targetLookup = await resolvePublishedActorLookup({
       identifier: params.to,
-      lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-      lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+      lookupBySlug: input =>
+        runSendSpacetimeOperation('published agent slug lookup', () =>
+          conn.procedures.lookupPublishedAgentBySlug(input)
+        ),
+      lookupByEmail: input =>
+        runSendSpacetimeOperation('published agent email lookup', () =>
+          conn.procedures.lookupPublishedAgentsByEmailPage({
+            ...input,
+            afterId: undefined,
+            limit: undefined,
+          })
+        ),
       invalidMessage: 'Recipient slug or email is invalid.',
       invalidCode: 'INVALID_AGENT_IDENTIFIER',
       notFoundCode: 'ACTOR_NOT_FOUND',
@@ -1034,9 +1339,13 @@ export async function sendMessageToSlug(params: {
     }
 
     params.reporter.verbose?.(`Loading public route for ${target.slug}`);
-    const publishedRoute = (await conn.procedures.lookupPublishedPublicRouteBySlug({
-      slug: target.slug,
-    }))[0];
+    const publishedRoute = (
+      await runSendSpacetimeOperation('published public route lookup', () =>
+        conn.procedures.lookupPublishedPublicRouteBySlug({
+          slug: target.slug,
+        })
+      )
+    )[0];
     if (!publishedRoute) {
       throw connectivityError('Recipient public route is unavailable.', {
         code: 'PUBLIC_ROUTE_UNAVAILABLE',
@@ -1079,24 +1388,25 @@ export async function sendMessageToSlug(params: {
       : params.createNew
         ? 'new'
         : 'latest';
-    let pendingRequest: VisibleContactRequestRow | null =
+    let pendingRequest: ContactRequest | null =
       snapshot.contactRequests.find(request => {
         return (
-          request.direction === 'outgoing' &&
+          // direction is gone; "outgoing" means our agent is the requester.
           request.requesterAgentDbId === ownActor.id &&
           request.targetPublicIdentity === target.publicIdentity &&
-          request.status === 'pending'
+          request.status.tag === 'Pending'
         );
       }) ?? null;
     let thread = requestedThreadId
       ? requireDirectThreadById({
           threads: snapshot.threads,
+          actors: snapshot.actors,
           ownActor,
           otherPublicIdentity: target.publicIdentity,
           threadId: requestedThreadId,
           targetSlug: target.slug,
         })
-      : findDirectThread(snapshot.threads, ownActor, target.publicIdentity);
+      : findDirectThread(snapshot.threads, snapshot.actors, ownActor, target.publicIdentity);
     let createdDirectThread = false;
 
     if (pendingRequest && thread) {
@@ -1119,18 +1429,21 @@ export async function sendMessageToSlug(params: {
       });
 
       const existingThreadIds = new Set(
-        findDirectThreads(snapshot.threads, ownActor, target.publicIdentity).map(existingThread =>
-          existingThread.id.toString()
+        findDirectThreads(snapshot.threads, snapshot.actors, ownActor, target.publicIdentity).map(
+          existingThread => existingThread.id.toString()
         )
       );
       try {
         params.reporter.verbose?.(`Creating direct thread with ${target.slug}`);
-        await conn.reducers.createDirectThread({
-          agentDbId: ownActor.id,
-          otherAgentPublicIdentity: target.publicIdentity,
-          membershipLocked: undefined,
-          title: params.title?.trim() ? params.title.trim() : undefined,
-        });
+        await runSendSpacetimeOperation('create direct thread reducer', () =>
+          conn.reducers.createThread({
+            agentDbId: ownActor.id,
+            kind: { tag: 'Direct' },
+            otherAgentPublicIdentity: target.publicIdentity,
+            participantPublicIdentities: undefined,
+            title: params.title?.trim() ? params.title.trim() : undefined,
+          })
+        );
         try {
           createdDirectThread = true;
           thread = await waitForDirectThread({
@@ -1141,8 +1454,10 @@ export async function sendMessageToSlug(params: {
           });
           params.reporter.verbose?.(`Direct thread ready: ${thread.id.toString()}`);
         } catch (error) {
+          const fallbackSnapshot = await read();
           const fallbackThread = findDirectThread(
-            (await read()).threads,
+            fallbackSnapshot.threads,
+            fallbackSnapshot.actors,
             ownActor,
             target.publicIdentity
           );
@@ -1181,11 +1496,13 @@ export async function sendMessageToSlug(params: {
           threadId: pendingThreadId,
           senderActorId: ownActor.id,
           senderPublicIdentity: ownActor.publicIdentity,
-          senderSeq: 0n,
           senderMessageId,
           payload,
           keyPair,
-          recipients: [toActorPublicKeys(ownActor), toPublishedActorPublicKeys(target)],
+          recipients: [
+            await resolveActorPublicKeys(conn, ownActor),
+            toPublishedActorPublicKeys(target),
+          ],
           existingSecret: null,
           latestKnownSecretVersion: null,
           rotateSecret: false,
@@ -1193,29 +1510,29 @@ export async function sendMessageToSlug(params: {
         params.reporter.verbose?.(
           `Creating pending contact request with first message for ${target.slug}`
         );
-        await conn.reducers.requestDirectContactWithFirstMessage({
-          agentDbId: ownActor.id,
-          otherAgentPublicIdentity: target.publicIdentity,
-          threadId: pendingThreadId,
-          membershipLocked: undefined,
-          title: params.title?.trim() ? params.title.trim() : undefined,
-          secretVersion: prepared.secretVersion,
-          signingKeyVersion: prepared.signingKeyVersion,
-          senderSeq: 0n,
-          senderMessageId,
-          ciphertext: prepared.ciphertext,
-          iv: prepared.iv,
-          cipherAlgorithm: prepared.cipherAlgorithm,
-          signature: prepared.signature,
-          replyToMessageId: undefined,
-          attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
-        });
+        await runSendSpacetimeOperation('request direct contact reducer', () =>
+          conn.reducers.requestDirectContact({
+            agentDbId: ownActor.id,
+            otherAgentPublicIdentity: target.publicIdentity,
+            threadId: pendingThreadId,
+            title: params.title?.trim() ? params.title.trim() : undefined,
+            secretVersion: prepared.secretVersion,
+            signingKeyVersion: prepared.signingKeyVersion,
+            senderMessageId,
+            ciphertext: fromHex(prepared.ciphertext),
+            iv: fromHex(prepared.iv),
+            cipherAlgorithm: toCipherAlgorithm(prepared.cipherAlgorithm),
+            signature: fromHex(prepared.signature),
+            attachedSecretEnvelopes: toReducerEnvelopes(prepared.attachedSecretEnvelopes),
+          })
+        );
         pendingRequest = await waitForContactRequest({
           read,
           requesterActorId: ownActor.id,
           targetPublicIdentity: target.publicIdentity,
           existingRequestIds,
         });
+        const createdRequest = pendingRequest;
 
         cacheSenderSecret(
           pendingThreadId,
@@ -1225,21 +1542,23 @@ export async function sendMessageToSlug(params: {
         );
         params.reporter.success(`Contact request sent to ${target.slug}`);
 
-        const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+        const ownActorIds = buildOwnActorIds(snapshot.actors, ownActor.accountId);
         const targetOwnedActor = snapshot.actors.find(
           actor => actor.publicIdentity === target.publicIdentity && ownActorIds.has(actor.id)
         ) ?? null;
 
         if (targetOwnedActor) {
           params.reporter.verbose?.(`Auto-approving contact request from owned agent ${target.slug}`);
-          await conn.reducers.approveContactRequest({
-            agentDbId: targetOwnedActor.id,
-            requestId: pendingRequest.id,
-          });
+          await runSendSpacetimeOperation('approve contact request reducer', () =>
+            conn.reducers.approveContactRequest({
+              agentDbId: targetOwnedActor.id,
+              requestId: createdRequest.id,
+            })
+          );
           const approvedRequest = await waitForContactRequestStatus({
             read,
-            requestId: pendingRequest.id,
-            status: 'approved',
+            requestId: createdRequest.id,
+            status: { tag: 'Approved' },
           });
           return {
             sent: false,
@@ -1289,80 +1608,9 @@ export async function sendMessageToSlug(params: {
     }
 
     if (pendingRequest) {
-      if (pendingRequest.messageCount > 0n) {
-        throw userError('A pending contact request already exists for this actor pair.', {
-          code: 'CONTACT_REQUEST_PENDING',
-        });
-      }
-
-      await requirePeerKeyTrust({
-        publicIdentity: target.publicIdentity,
-        displayLabel: target.slug,
-        observed: tupleFromPublishedActor(target),
-        allowFirstContactTrust: true,
+      throw userError('A pending contact request already exists for this actor pair.', {
+        code: 'CONTACT_REQUEST_PENDING',
       });
-
-      params.reporter.verbose?.(`Encrypting first-contact request for ${target.slug}`);
-      const senderMessageId = randomSenderMessageId();
-      const prepared = await prepareEncryptedMessage({
-        threadId: pendingRequest.threadId,
-        senderActorId: ownActor.id,
-        senderPublicIdentity: ownActor.publicIdentity,
-        senderSeq: 0n,
-        senderMessageId,
-        payload,
-        keyPair,
-        recipients: [toActorPublicKeys(ownActor), toPublishedActorPublicKeys(target)],
-        existingSecret: null,
-        latestKnownSecretVersion: null,
-        rotateSecret: false,
-      });
-
-      params.reporter.verbose?.(`Sending hidden first-contact message to ${target.slug}`);
-      await conn.reducers.sendEncryptedMessage({
-        agentDbId: ownActor.id,
-        threadId: pendingRequest.threadId,
-        secretVersion: prepared.secretVersion,
-        signingKeyVersion: prepared.signingKeyVersion,
-        senderSeq: 0n,
-        senderMessageId,
-        ciphertext: prepared.ciphertext,
-        iv: prepared.iv,
-        cipherAlgorithm: prepared.cipherAlgorithm,
-        signature: prepared.signature,
-        replyToMessageId: undefined,
-        attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
-      });
-
-      cacheSenderSecret(
-        pendingRequest.threadId,
-        ownActor.publicIdentity,
-        prepared.senderSecret.secretVersion,
-        prepared.senderSecret.secretHex
-      );
-      params.reporter.success(`Contact request sent to ${target.slug}`);
-
-      return {
-        sent: false,
-        approvalRequired: true,
-        profile: profile.name,
-        selectionMode: 'new',
-        to: {
-          slug: target.slug,
-          publicIdentity: target.publicIdentity,
-          displayName: target.displayName ?? null,
-        },
-        threadId: pendingRequest.threadId.toString(),
-        requestId: pendingRequest.id.toString(),
-        requestStatus: 'pending',
-        createdDirectThread: false,
-        targetLookup: {
-          input: targetLookup.input,
-          inputKind: targetLookup.inputKind,
-          matchedActors: targetLookup.matchedActors,
-          selected: targetLookup.selectedActor,
-        },
-      };
     }
 
     if (!thread) {
@@ -1371,12 +1619,14 @@ export async function sendMessageToSlug(params: {
       });
     }
 
-    snapshot = await readThreadSendSnapshot({
-      conn,
-      normalizedEmail,
-      actorSlug: params.actorSlug,
-      threadId: thread.id,
-    });
+    snapshot = await runSendSpacetimeOperation('thread send snapshot read', () =>
+      readThreadSendSnapshot({
+        conn,
+        email,
+        actorSlug: params.actorSlug,
+        threadId: thread.id,
+      })
+    );
     const senderParticipant = findParticipant(snapshot.participants, thread.id, ownActor.id);
     if (!senderParticipant) {
       throw connectivityError('Current actor is not visible as a participant in the direct thread.', {
@@ -1387,35 +1637,54 @@ export async function sendMessageToSlug(params: {
     const recipientActors = snapshot.participants
       .filter(participant => participant.threadId === thread.id && participant.active)
       .map(participant => snapshot.actors.find(actor => actor.id === participant.agentDbId))
-      .filter((actor): actor is VisibleAgentRow => Boolean(actor));
-    const ownActorIdsForThread = buildOwnActorIds(snapshot.actors, ownActor.inboxId);
+      .filter((actor): actor is Agent => Boolean(actor));
+    const recipients = await Promise.all(
+      recipientActors.map(actor => resolveActorPublicKeys(conn, actor))
+    );
+    const recipientKeysByActorId = new Map(
+      recipients
+        .filter((recipient): recipient is ActorPublicKeys & { actorId: bigint } =>
+          recipient.actorId !== undefined
+        )
+        .map(recipient => [recipient.actorId, recipient] as const)
+    );
+    const ownActorIdsForThread = buildOwnActorIds(snapshot.actors, ownActor.accountId);
     for (const recipient of recipientActors) {
       if (recipient.id === ownActor.id) continue;
+      const recipientKeys = recipientKeysByActorId.get(recipient.id);
+      if (!recipientKeys) {
+        throw connectivityError(`Public keys for ${recipient.slug} are unavailable.`, {
+          code: 'AGENT_PUBLIC_KEYS_UNAVAILABLE',
+        });
+      }
       await requirePeerKeyTrust({
         publicIdentity: recipient.publicIdentity,
         displayLabel: recipient.slug,
-        observed: tupleFromVisibleActor(recipient),
+        observed: tupleFromActorPublicKeys(recipientKeys),
         allowFirstContactTrust: ownActorIdsForThread.has(recipient.id),
       });
     }
-    const recipients = recipientActors.map(toActorPublicKeys);
 
-    // senderSeq is deprecated; resolveSenderState falls back to the
-    // participant's cached lastSentSecretVersion, so the snapshot.messages scan
-    // that previously sat here is no longer needed.
-    const latestSenderState = resolveSenderState(undefined, senderParticipant);
+    // resolveSenderState falls back to the participant's cached
+    // lastSentSecretVersion, so no snapshot.messages scan is needed here.
+    const latestSenderState = resolveSenderState(thread, undefined, senderParticipant);
 
     const existingSecret = latestSenderState
       ? getCachedSenderSecret(thread.id, ownActor.publicIdentity, latestSenderState.secretVersion)
       : null;
     const envelopesForRotation = latestSenderState
-      ? await conn.procedures.listThreadSecretEnvelopes({
-          agentDbId: ownActor.id,
-          threadId: thread.id,
-          membershipVersion: latestSenderState.membershipVersion,
-          senderAgentDbId: ownActor.id,
-          secretVersion: latestSenderState.secretVersion,
-        })
+      ? await runSendSpacetimeOperation('thread secret envelope lookup', () =>
+          conn.procedures.listThreadSecretEnvelopes({
+            agentDbId: ownActor.id,
+            threadId: thread.id,
+            membershipVersion: latestSenderState.membershipVersion,
+            senderAgentDbId: ownActor.id,
+            recipientAgentDbId: undefined,
+            secretVersion: latestSenderState.secretVersion,
+            afterId: undefined,
+            limit: undefined,
+          })
+        )
       : [];
     const requiresSecretRotation = senderSecretRotationRequired({
       senderActor: ownActor,
@@ -1433,7 +1702,6 @@ export async function sendMessageToSlug(params: {
       threadId: thread.id,
       senderActorId: ownActor.id,
       senderPublicIdentity: ownActor.publicIdentity,
-      senderSeq: 0n,
       senderMessageId,
       payload,
       keyPair,
@@ -1444,19 +1712,23 @@ export async function sendMessageToSlug(params: {
     });
 
     params.reporter.verbose?.(`Sending encrypted message to ${target.slug}`);
-    await conn.reducers.sendEncryptedMessage({
-      agentDbId: ownActor.id,
-      threadId: thread.id,
-      secretVersion: prepared.secretVersion,
-      signingKeyVersion: prepared.signingKeyVersion,
-      senderSeq: 0n,
-      senderMessageId,
-      ciphertext: prepared.ciphertext,
-      iv: prepared.iv,
-      cipherAlgorithm: prepared.cipherAlgorithm,
-      signature: prepared.signature,
-      replyToMessageId: undefined,
-      attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
+    await submitSendEncryptedMessageReducer({
+      label: 'send encrypted message reducer',
+      reporter: params.reporter,
+      run: () =>
+        conn.reducers.sendEncryptedMessage({
+          agentDbId: ownActor.id,
+          threadId: thread.id,
+          secretVersion: prepared.secretVersion,
+          signingKeyVersion: prepared.signingKeyVersion,
+          senderMessageId,
+          ciphertext: fromHex(prepared.ciphertext),
+          iv: fromHex(prepared.iv),
+          cipherAlgorithm: toCipherAlgorithm(prepared.cipherAlgorithm),
+          signature: fromHex(prepared.signature),
+          replyToMessageId: undefined,
+          attachedSecretEnvelopes: toReducerEnvelopes(prepared.attachedSecretEnvelopes),
+        }),
     });
 
     cacheSenderSecret(
@@ -1467,7 +1739,6 @@ export async function sendMessageToSlug(params: {
     );
 
     // Reducer success is authoritative; no post-send poll needed.
-    const expectedThreadSeq = thread.lastMessageSeq + 1n;
     params.reporter.success(`Encrypted message sent to ${target.slug}`);
 
     return {
@@ -1482,7 +1753,7 @@ export async function sendMessageToSlug(params: {
       },
       threadId: thread.id.toString(),
       messageId: `sent:${thread.id.toString()}:${senderMessageId.toString()}`,
-      threadSeq: expectedThreadSeq.toString(),
+      senderMessageId: senderMessageId.toString(),
       createdDirectThread,
       targetLookup: {
         input: targetLookup.input,
@@ -1514,8 +1785,8 @@ export async function sendMessageToThread(params: {
   }
 
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1531,15 +1802,17 @@ export async function sendMessageToThread(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const snapshot = await readThreadSendSnapshot({
-      conn,
-      normalizedEmail,
-      actorSlug: params.actorSlug,
-      threadId: requestedThreadId,
-    });
+    const snapshot = await runSendSpacetimeOperation('thread send snapshot read', () =>
+      readThreadSendSnapshot({
+        conn,
+        email,
+        actorSlug: params.actorSlug,
+        threadId: requestedThreadId,
+      })
+    );
     return await sendMessageToThreadCore({
       profile,
-      normalizedEmail,
+      email,
       conn,
       snapshot,
       requestedThreadId,
@@ -1557,6 +1830,7 @@ export async function sendMessageToThread(params: {
 export async function sendMessageToThreadFromLiveSnapshot(params: {
   profileName: string;
   actorSlug?: string;
+  auth?: AuthSessionContext;
   conn: DbConnection;
   snapshot: MessageSnapshot;
   threadId: string;
@@ -1572,9 +1846,9 @@ export async function sendMessageToThreadFromLiveSnapshot(params: {
     });
   }
 
-  const { profile, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const { profile, claims } = params.auth ?? (await ensureAuthenticatedSession(params));
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1582,7 +1856,7 @@ export async function sendMessageToThreadFromLiveSnapshot(params: {
 
   return await sendMessageToThreadCore({
     profile,
-    normalizedEmail,
+    email,
     conn: params.conn,
     snapshot: params.snapshot,
     requestedThreadId,

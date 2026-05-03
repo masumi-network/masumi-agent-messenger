@@ -6,7 +6,7 @@ import type {
 import type {
   PublishedAgentLookupRow,
   PublishedPublicRouteRow,
-} from '../../../webapp/src/module_bindings/types';
+} from '../../../webapp/src/lib/procedures';
 import { ensureAuthenticatedSession } from './auth';
 import { resolvePreferredAgentSlug } from './agent-state';
 import type { TaskReporter } from './command-runtime';
@@ -52,15 +52,15 @@ export type DiscoverShowResult = {
   detailScope: 'saas_only' | 'slug_enriched';
   matchedActors: DiscoverSearchItem[];
   selected: DiscoverSearchItem & {
-    encryptionKeyVersion: string | null;
-    signingKeyVersion: string | null;
+    encryptionKeyVersion: number | null;
+    signingKeyVersion: number | null;
   };
   publicRoute: null | {
     agentIdentifier: string | null;
     linkedEmail: string | null;
     description: string | null;
-    encryptionKeyVersion: string;
-    signingKeyVersion: string;
+    encryptionKeyVersion: number;
+    signingKeyVersion: number;
     allowAllContentTypes: boolean;
     allowAllHeaders: boolean;
     supportedContentTypes: string[];
@@ -75,7 +75,7 @@ export type DiscoverShowResult = {
       mode: string;
       allowlistScope: string;
       allowlistKinds: string[];
-      messagePreviewVisibleBeforeApproval: boolean;
+      messagePreviewVisibleBeforeApproval: false;
     };
   };
 };
@@ -392,7 +392,7 @@ function toPublicRoute(route: PublishedPublicRouteRow | null): DiscoverShowResul
     allowAllContentTypes: route.allowAllContentTypes,
     allowAllHeaders: route.allowAllHeaders,
     supportedContentTypes: [...route.supportedContentTypes],
-    supportedHeaders: route.supportedHeaders.map(header => ({
+    supportedHeaders: route.supportedHeaders.map((header: { name: string; required?: boolean | null; allowMultiple?: boolean | null; sensitive?: boolean | null; allowedPrefixes?: string[] | null }) => ({
       name: header.name,
       required: Boolean(header.required),
       allowMultiple: Boolean(header.allowMultiple),
@@ -403,8 +403,7 @@ function toPublicRoute(route: PublishedPublicRouteRow | null): DiscoverShowResul
       mode: route.contactPolicy.mode,
       allowlistScope: route.contactPolicy.allowlistScope,
       allowlistKinds: [...route.contactPolicy.allowlistKinds],
-      messagePreviewVisibleBeforeApproval:
-        route.contactPolicy.messagePreviewVisibleBeforeApproval,
+      messagePreviewVisibleBeforeApproval: false,
     },
   };
 }

@@ -18,18 +18,18 @@ function privateKey(label: string): string {
   });
 }
 
-function keyPair(label: string) {
+function keyPair(label: string, version: number = 1) {
   return {
     encryption: {
       publicKey: publicKey(`${label}-enc`),
       privateKey: privateKey(`${label}-enc`),
-      keyVersion: `enc-${label}`,
+      keyVersion: version,
       algorithm: 'ecdh-p256-v1',
     },
     signing: {
       publicKey: publicKey(`${label}-sig`),
       privateKey: privateKey(`${label}-sig`),
-      keyVersion: `sig-${label}`,
+      keyVersion: version,
       algorithm: 'ecdsa-p256-sha256-v1',
     },
   };
@@ -38,17 +38,16 @@ function keyPair(label: string) {
 function snapshot(): DeviceKeyShareSnapshot {
   return {
     version: 1,
-    normalizedEmail: 'Agent@Example.com',
+    email: 'Agent@Example.com',
     createdAt: '2026-04-14T12:00:00.000Z',
     actors: [
       {
         identity: {
-          normalizedEmail: 'agent@example.com',
+          email: 'agent@example.com',
           slug: 'Agent Bot',
-          inboxIdentifier: 'agent-bot',
         },
-        current: keyPair('current'),
-        archived: [keyPair('archived')],
+        current: keyPair('current', 2),
+        archived: [keyPair('archived', 1)],
       },
     ],
   };
@@ -58,11 +57,10 @@ describe('device key share snapshot validation', () => {
   it('normalizes and returns deeply validated actor key material', () => {
     const parsed = parseDeviceKeyShareSnapshot(snapshot());
 
-    expect(parsed.normalizedEmail).toBe('agent@example.com');
+    expect(parsed.email).toBe('agent@example.com');
     expect(parsed.actors[0].identity).toEqual({
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       slug: 'agent-bot',
-      inboxIdentifier: 'agent-bot',
     });
     expect(parsed.actors[0].current?.encryption.algorithm).toBe('ecdh-p256-v1');
     expect(parsed.actors[0].archived).toHaveLength(1);
@@ -97,10 +95,10 @@ describe('device key share snapshot validation', () => {
 
   it('rejects actor identities outside the shared email namespace', () => {
     const invalid = snapshot();
-    invalid.actors[0].identity.normalizedEmail = 'other@example.com';
+    invalid.actors[0].identity.email = 'other@example.com';
 
     expect(() => parseDeviceKeyShareSnapshot(invalid)).toThrow(
-      'actors[0].identity.normalizedEmail must match snapshot.normalizedEmail'
+      'actors[0].identity.email must match snapshot.email'
     );
   });
 });

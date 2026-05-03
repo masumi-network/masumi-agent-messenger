@@ -27,7 +27,7 @@ The client owns:
 - Use generated bindings from `src/module_bindings/`; never edit them directly.
 - Keep provider and connection setup centralized in `src/router.tsx`.
 - Prefer subscription-driven UI over duplicated local state or ad hoc refetching.
-- Sort thread timelines by `threadSeq`, not timestamps.
+- Sort thread timelines by auto-increment `message.id`, not timestamps.
 - Show disconnected, loading, empty, decrypting, and verification-failed states explicitly.
 - Preserve type safety. Never introduce `any`.
 

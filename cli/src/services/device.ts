@@ -13,6 +13,7 @@ import {
   DEVICE_SHARE_REQUEST_MAX_AGE_MS,
   DEVICE_SHARE_REQUEST_MAX_FUTURE_SKEW_MS,
 } from '../../../shared/device-share-constants';
+import { fromHex, toHex } from '../../../shared/crypto-utils';
 import { timestampToDate, type TimestampLike } from '../../../shared/spacetime-time';
 import { ensureAuthenticatedSession } from './auth';
 import {
@@ -35,7 +36,7 @@ type ListedDevice = {
   deviceId: string;
   label: string | null;
   platform: string | null;
-  status: string;
+  status: { tag: string };
   approvedAt: string | null;
   revokedAt: string | null;
   pendingRequestCount: number;
@@ -131,8 +132,13 @@ function isFutureTimestamp(value: { microsSinceUnixEpoch: bigint }): boolean {
   );
 }
 
-function deviceKeyBundleNeverExpires(bundle: { expiryMode?: { tag: string } }): boolean {
-  return bundle.expiryMode?.tag === 'NeverExpires' || bundle.expiryMode?.tag === 'neverExpires';
+function deviceKeyBundleRequiresRotationConfirmation(bundle: unknown): boolean {
+  const purpose =
+    typeof bundle === 'object' && bundle !== null && 'purpose' in bundle
+      ? (bundle as { purpose?: string | { tag?: string } }).purpose
+      : null;
+  const tag = typeof purpose === 'string' ? purpose : purpose?.tag;
+  return tag === 'RotationShare';
 }
 
 function assertFreshClientCreatedAt(value: TimestampLike): Date {
@@ -199,7 +205,7 @@ export async function requestDeviceShare(params: {
         platform: process.platform,
         deviceEncryptionPublicKey: deviceMaterial.keyPair.publicKey,
         deviceEncryptionKeyVersion: deviceMaterial.keyPair.keyVersion,
-        deviceEncryptionAlgorithm: deviceMaterial.keyPair.algorithm,
+        deviceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
       });
       await conn.reducers.createDeviceShareRequest({
         deviceId: deviceMaterial.deviceId,
@@ -245,7 +251,7 @@ export async function claimDeviceShare(params: {
     reporter: params.reporter,
     secretStore,
   });
-  const normalizedEmail = requireNormalizedEmail(auth.claims.email);
+  const email = requireNormalizedEmail(auth.claims.email);
   const deviceMaterial = await getOrCreateCliDeviceKeyMaterial(auth.profile.name, secretStore);
   const trustPhrase = computeTrustPhrase(deviceMaterial.keyPair.publicKey);
   const sleep = params.sleep ?? (async (ms: number) => new Promise(resolve => setTimeout(resolve, ms)));
@@ -273,19 +279,23 @@ export async function claimDeviceShare(params: {
       });
       const bundle = claimed[0];
       if (bundle) {
-        const bundleNeverExpires = deviceKeyBundleNeverExpires(bundle);
+        const requiresRotationConfirmation =
+          deviceKeyBundleRequiresRotationConfirmation(bundle);
         const snapshot = await decryptDeviceShareBundle({
           recipientKeyPair: deviceMaterial.keyPair,
           sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
-          bundleCiphertext: bundle.bundleCiphertext,
-          bundleIv: bundle.bundleIv,
-          bundleAlgorithm: bundle.bundleAlgorithm,
-          context: buildDeviceShareContext(normalizedEmail, deviceMaterial.deviceId),
+          bundleCiphertext: toHex(bundle.bundleCiphertext),
+          bundleIv: toHex(bundle.bundleIv),
+          bundleAlgorithm:
+            bundle.bundleAlgorithm.tag === 'AesGcm256V1'
+              ? 'aes-gcm-256-device-share-v1'
+              : bundle.bundleAlgorithm.tag,
+          context: buildDeviceShareContext(email, deviceMaterial.deviceId),
         });
-        const previousVault = bundleNeverExpires
+        const previousVault = requiresRotationConfirmation
           ? await secretStore.getNamespaceKeyVault(auth.profile.name)
           : null;
-        const previousDefaultKeyPair = bundleNeverExpires
+        const previousDefaultKeyPair = requiresRotationConfirmation
           ? await secretStore.getAgentKeyPair(auth.profile.name)
           : null;
         await importNamespaceKeyShareSnapshot({
@@ -293,7 +303,7 @@ export async function claimDeviceShare(params: {
           secretStore,
           snapshot,
         });
-        const pendingImportedRotationKeyCount = bundleNeverExpires
+        const pendingImportedRotationKeyCount = requiresRotationConfirmation
           ? await markImportedRotationKeysPendingFromSnapshot({
               profile: auth.profile,
               secretStore,
@@ -304,7 +314,7 @@ export async function claimDeviceShare(params: {
           : 0;
         if (pendingImportedRotationKeyCount > 0) {
           params.reporter.info(
-            `Rotated private keys require local confirmation before sending. Run \`masumi-agent-messenger account keys confirm --slug ${snapshot.actors[0]?.identity.slug ?? '<slug>'}\`.`
+            `Reset private keys require local confirmation before sending. Run \`masumi-agent-messenger account keys confirm --slug ${snapshot.actors[0]?.identity.slug ?? '<slug>'}\`.`
           );
         }
         params.reporter.clearBanner?.();
@@ -365,7 +375,7 @@ export async function approveDeviceShare(params: {
     reporter: params.reporter,
     secretStore,
   });
-  const normalizedEmail = requireNormalizedEmail(auth.claims.email);
+  const email = requireNormalizedEmail(auth.claims.email);
 
   params.reporter.verbose?.('Preparing approving device');
   const sourceDevice = await getOrCreateCliDeviceKeyMaterial(auth.profile.name, secretStore);
@@ -389,10 +399,10 @@ export async function approveDeviceShare(params: {
         platform: process.platform,
         deviceEncryptionPublicKey: sourceDevice.keyPair.publicKey,
         deviceEncryptionKeyVersion: sourceDevice.keyPair.keyVersion,
-        deviceEncryptionAlgorithm: sourceDevice.keyPair.algorithm,
+        deviceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
       });
 
-      const rows = readDeviceRows(conn);
+      const rows = await readDeviceRows(conn);
       let targetRequest:
         | {
             requestId: bigint;
@@ -470,7 +480,7 @@ export async function approveDeviceShare(params: {
       const bundle = await createDeviceShareBundle({
         sourceKeyPair: sourceDevice.keyPair,
         targetPublicKey: targetRequest.deviceEncryptionPublicKey,
-        context: buildDeviceShareContext(normalizedEmail, targetRequest.deviceId),
+        context: buildDeviceShareContext(email, targetRequest.deviceId),
         snapshot,
       });
 
@@ -479,13 +489,18 @@ export async function approveDeviceShare(params: {
       }, 0);
       const expiresAt = new Date(Date.now() + 15 * 60_000);
 
-      await conn.reducers.approveDeviceShare({
+      // expiresAt is set server-side now; client just submits bundle.
+      void expiresAt;
+      await conn.reducers.approveDeviceShareRequest({
         requestId: targetRequest.requestId,
-        sourceDeviceId: sourceDevice.deviceId,
-        ...bundle,
+        sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
+        sourceEncryptionKeyVersion: bundle.sourceEncryptionKeyVersion,
+        sourceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
+        bundleCiphertext: fromHex(bundle.bundleCiphertext),
+        bundleIv: fromHex(bundle.bundleIv),
+        bundleAlgorithm: { tag: 'AesGcm256V1' },
         sharedAgentCount: BigInt(snapshot.actors.length),
         sharedKeyVersionCount: BigInt(sharedKeyVersionCount),
-        expiresAt: Timestamp.fromDate(expiresAt),
       });
 
       params.reporter.success(`Shared keys to device ${targetRequest.deviceId}`);
@@ -526,7 +541,7 @@ export async function listDevices(params: {
   try {
     const subscription = await subscribeDeviceTables(conn);
     try {
-      const rows = readDeviceRows(conn);
+      const rows = await readDeviceRows(conn);
       return {
         profile: auth.profile.name,
         devices: rows.devices.map(device => ({

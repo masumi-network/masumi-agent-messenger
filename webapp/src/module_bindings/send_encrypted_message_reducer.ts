@@ -11,20 +11,22 @@ import {
 } from "spacetimedb";
 
 import {
+  MessageCipherAlgorithm,
   SecretEnvelopeAttachment,
 } from "./types";
 
 export default {
   agentDbId: __t.u64(),
   threadId: __t.u64(),
-  secretVersion: __t.string(),
-  signingKeyVersion: __t.string(),
-  senderSeq: __t.u64(),
+  secretVersion: __t.u32(),
+  signingKeyVersion: __t.u32(),
   senderMessageId: __t.u64(),
-  ciphertext: __t.string(),
-  iv: __t.string(),
-  cipherAlgorithm: __t.string(),
-  signature: __t.string(),
+  ciphertext: __t.byteArray(),
+  iv: __t.byteArray(),
+  get cipherAlgorithm() {
+    return MessageCipherAlgorithm;
+  },
+  signature: __t.byteArray(),
   replyToMessageId: __t.option(__t.u64()),
   get attachedSecretEnvelopes() {
     return __t.array(SecretEnvelopeAttachment);

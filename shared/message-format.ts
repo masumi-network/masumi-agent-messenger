@@ -88,7 +88,6 @@ export const AUTHORIZATION_ALLOWED_PREFIXES = ['Bearer ', 'L402 '] as const;
 export const RESERVED_MESSAGE_HEADER_NAMES = [
   'content-type',
   'thread-id',
-  'sender-seq',
   'secret-version',
   'signing-key-version',
   'signature',

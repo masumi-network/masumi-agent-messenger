@@ -1,24 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSpacetimeDB } from 'spacetimedb/tanstack';
 import type { DbConnection } from '@/module_bindings';
-import type {
-  PublicChannelMirrorRow,
-  PublicRecentChannelMessageRow,
-} from '@/module_bindings/types';
+import type { Channel, ChannelMessage } from '@/module_bindings/types';
 import { deferEffectStateUpdate } from './effect-state';
 
+/**
+ * Anonymous public-channel viewing.
+ *
+ * The new schema dropped the public mirror tables (`publicChannel`,
+ * `publicRecentChannelMessage`). Channel metadata for an anonymous viewer
+ * is resolved by direct slug through a procedure that gates on
+ * `channel.accessMode === 'Public'`. There is still no anonymous browsing.
+ */
+
+export type PublicChannelRow = Channel;
+export type PublicChannelMessageRow = ChannelMessage;
+
 type PublicChannelLookup = {
-  channelId?: bigint;
-  channelSlug?: string;
+  channelSlug: string;
   enabled?: boolean;
 };
-
-function readPublicChannelError(error: unknown): string {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-  return 'Unable to load public channel';
-}
 
 function readPublicChannelMessagesError(error: unknown): string {
   if (error instanceof Error && error.message) {
@@ -29,17 +30,17 @@ function readPublicChannelMessagesError(error: unknown): string {
 
 export function usePublicChannelLookup(
   params: PublicChannelLookup
-): [PublicChannelMirrorRow | null, boolean, string | null] {
+): [PublicChannelRow | null, boolean, string | null] {
   const connectionState = useSpacetimeDB();
   const connection = connectionState.getConnection?.() as DbConnection | null;
   const isActive = connectionState.isActive && connection !== null;
   const enabled = params.enabled ?? true;
-  const [channel, setChannel] = useState<PublicChannelMirrorRow | null>(null);
+  const [channel, setChannel] = useState<PublicChannelRow | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!enabled || !isActive || !connection) {
+    if (!enabled || !isActive || !connection || !params.channelSlug) {
       return deferEffectStateUpdate(() => {
         setChannel(null);
         setReady(false);
@@ -56,15 +57,12 @@ export function usePublicChannelLookup(
       setError(null);
 
       void connection.procedures
-        .readPublicChannel({
-          channelId: params.channelId,
-          channelSlug: params.channelSlug,
-        })
-        .then(rows => {
+        .lookupPublicChannelBySlug({ slug: params.channelSlug })
+        .then(row => {
           if (cancelled) {
             return;
           }
-          setChannel(rows[0] ?? null);
+          setChannel(row ?? null);
           setReady(true);
         })
         .catch(lookupError => {
@@ -73,7 +71,7 @@ export function usePublicChannelLookup(
           }
           setChannel(null);
           setReady(false);
-          setError(readPublicChannelError(lookupError));
+          setError(readPublicChannelMessagesError(lookupError));
         });
     });
 
@@ -81,19 +79,19 @@ export function usePublicChannelLookup(
       cancelled = true;
       cancelStart();
     };
-  }, [connection, enabled, isActive, params.channelId, params.channelSlug]);
+  }, [connection, enabled, isActive, params.channelSlug]);
 
   return [channel, ready, error];
 }
 
 export function usePublicChannelMessagesLookup(
-  params: PublicChannelLookup & { beforeChannelSeq?: bigint; limit?: bigint }
-): [PublicRecentChannelMessageRow[], boolean, string | null, () => void] {
+  params: PublicChannelLookup & { beforeMessageId?: bigint; limit?: bigint }
+): [PublicChannelMessageRow[], boolean, string | null, () => void] {
   const connectionState = useSpacetimeDB();
   const connection = connectionState.getConnection?.() as DbConnection | null;
   const isActive = connectionState.isActive && connection !== null;
   const enabled = params.enabled ?? true;
-  const [messages, setMessages] = useState<PublicRecentChannelMessageRow[]>([]);
+  const [messages, setMessages] = useState<PublicChannelMessageRow[]>([]);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
@@ -102,7 +100,7 @@ export function usePublicChannelMessagesLookup(
   }, []);
 
   useEffect(() => {
-    if (!enabled || !isActive || !connection || (!params.channelId && !params.channelSlug)) {
+    if (!enabled || !isActive || !connection || !params.channelSlug) {
       return deferEffectStateUpdate(() => {
         setMessages([]);
         setReady(false);
@@ -120,10 +118,9 @@ export function usePublicChannelMessagesLookup(
 
       void connection.procedures
         .listPublicChannelMessages({
-          channelId: params.channelId,
           channelSlug: params.channelSlug,
-          beforeChannelSeq: params.beforeChannelSeq,
-          limit: params.limit ?? 25n,
+          beforeMessageId: params.beforeMessageId,
+          limit: params.limit !== undefined ? Number(params.limit) : 25,
         })
         .then(rows => {
           if (cancelled) {
@@ -150,8 +147,7 @@ export function usePublicChannelMessagesLookup(
     connection,
     enabled,
     isActive,
-    params.beforeChannelSeq,
-    params.channelId,
+    params.beforeMessageId,
     params.channelSlug,
     params.limit,
     reloadToken,

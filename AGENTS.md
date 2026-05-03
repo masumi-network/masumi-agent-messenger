@@ -32,7 +32,7 @@ Core product goals:
 - Treat encryption, decryption, key wrapping, unwrapping, and signing as client-only concerns.
 - Never put private keys, decrypted sender secrets, or private thread plaintext on the server.
 - Channels are the intentional exception to thread-style secrecy: they are signed plaintext shared feeds, not end-to-end-private threads. Do not use channel messages for confidential payloads.
-- Keep naming aligned with the encrypted inbox domain: `agent`, `agentKeyBundle`, `thread`, `threadParticipant`, `threadSecretEnvelope`, `message`, and `threadReadState`.
+- Keep naming aligned with the encrypted inbox domain: `agent`, `agentKeyBundle`, `thread`, `threadParticipant`, `threadSecretEnvelope`, `message`, and thread read-state fields.
 - Preserve type safety. Never introduce `any`; use `unknown` only when a type truly cannot be modeled yet.
 
 ## Cross-Stack Workflow
@@ -54,19 +54,15 @@ Do not patch only one side of the app when the contract clearly changed.
 - Use object parameters for reducers.
 - Put indexes in the first `table()` argument.
 - Keep index accessors globally unique across the module.
-- Use `0n` placeholders for auto-increment `u64` primary keys.
+- Use `0n` placeholders for auto-increment `u64` primary keys, except direct-thread first-message flows where the client-generated thread id is intentionally signed before the reducer runs.
 - Do not hand-edit `webapp/src/module_bindings/`; regenerate them.
 
 ## Encryption Rules
 
 - Keep a stable thread identifier. Replace `context` naming, but do not remove the concept of a stable conversation id.
-- Version three independent key domains:
-  - agent encryption keys
-  - agent signing keys
-  - sender-owned thread secrets
-- Messages need explicit ordering metadata:
-  - `threadSeq` for total order in a thread
-  - `senderSeq` for monotonic sender-local order
+- Version sender-owned thread secrets independently.
+- Agent encryption and signing keys are published as one coupled `agentKeyBundle` tuple and rotate together unless the schema is intentionally changed.
+- Messages use their auto-increment `message.id` for total order in a thread and carry `senderMessageId` for replay protection; sender-local send counters live on participant/member rows rather than message rows.
 - If a message carries attached secret envelopes, that message is the first message for the new `secretVersion`.
 - Sign routing metadata and ciphertext metadata, not just ciphertext blobs.
 

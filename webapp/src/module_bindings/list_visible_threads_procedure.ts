@@ -17,8 +17,6 @@ import {
 export const params = {
   agentDbId: __t.u64(),
   afterSortKey: __t.option(__t.string()),
-  filter: __t.option(__t.string()),
-  query: __t.option(__t.string()),
-  limit: __t.u64(),
+  limit: __t.option(__t.u32()),
 };
 export const returnType = VisibleThreadPage

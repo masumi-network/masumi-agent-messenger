@@ -13,8 +13,10 @@ import {
 export default {
   agentDbId: __t.u64(),
   displayName: __t.option(__t.string()),
-  clearDisplayName: __t.option(__t.bool()),
   publicDescription: __t.option(__t.string()),
-  clearPublicDescription: __t.option(__t.bool()),
   publicLinkedEmailEnabled: __t.option(__t.bool()),
+  allowAllMessageContentTypes: __t.option(__t.bool()),
+  allowAllMessageHeaders: __t.option(__t.bool()),
+  supportedMessageContentTypes: __t.option(__t.array(__t.string())),
+  supportedMessageHeaderNames: __t.option(__t.array(__t.string())),
 };

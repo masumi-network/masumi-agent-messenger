@@ -5,7 +5,7 @@ import {
   lookupMasumiInboxAgent,
 } from './inbox-agent-registration';
 import type { DbConnection } from '@/module_bindings';
-import type { PublishedPublicRouteRow } from '@/module_bindings/types';
+import type { PublishedPublicRouteRow } from './procedures';
 import { normalizeInboxSlug } from '../../../shared/inbox-slug';
 import {
   DeregisteredInboxAgentError,
@@ -25,6 +25,7 @@ function toResolvedActor(
   fallbackEmail?: string | null
 ): ResolvedPublishedActor {
   return {
+    agentDbId: actor.agentDbId,
     slug: actor.slug,
     publicIdentity: actor.publicIdentity,
     isDefault: actor.isDefault,
@@ -302,8 +303,10 @@ export async function resolvePublishedActorsForIdentifier(params: {
 
   if (looksLikeEmail) {
     const exactEmailMatches = (
-      await params.liveConnection.procedures.lookupPublishedAgentsByEmail({
+      await params.liveConnection.procedures.lookupPublishedAgentsByEmailPage({
         email: identifier,
+        afterId: undefined,
+        limit: undefined,
       })
     )
       .map((actor: PublishedActorLookupLike) => {

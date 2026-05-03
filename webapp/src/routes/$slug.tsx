@@ -109,8 +109,6 @@ import {
   autoPinPeerIfUnknown,
   comparePinnedPeer,
   confirmPeerKeyRotation,
-  isInboundSignatureTrusted,
-  tupleFromVisibleActor,
   type PeerKeyTuple,
 } from '@/lib/peer-key-trust';
 import {
@@ -125,37 +123,64 @@ import {
 } from '@/lib/published-actor-search';
 import { useLiveTable } from '@/lib/spacetime-live-table';
 import {
+  readAllContactAllowlistEntries,
+  readAllOwnedAgents,
+  readAllOwnedDevices,
+  readAllThreadParticipants,
+  readPendingChannelJoinRequests,
+  readPendingContactRequests,
+  readPendingThreadInvites,
+} from '@/lib/spacetime-procedure-reads';
+import { useProcedureSnapshot } from '@/lib/spacetime-procedure-snapshot';
+import {
   cacheSenderSecret,
   decryptMessage,
+  fromHex,
   getCachedSenderSecret,
+  normalizeEnvelopeWrapAlgorithm,
+  normalizeMessageCipherAlgorithm,
   prepareEncryptedMessage,
   randomSenderMessageId,
+  toHex,
   type ActorPublicKeys,
   type AgentKeyPair,
 } from '@/lib/crypto';
 import { DbConnection, reducers, tables } from '@/module_bindings';
 import type {
-  AgentPublicKeyLookupRequest,
-  AgentPublicKeyLookupRow,
   Agent,
   Thread,
   Device,
-  DeviceKeyBundleAttachment,
-  Inbox,
-  VisibleChannelJoinRequestRow,
-  VisibleChannelMembershipRow,
-  VisibleChannelRow,
-  VisibleContactRequestRow,
-  VisibleContactAllowlistEntryRow,
-  VisibleMessageRow,
-  VisibleThreadPage,
-  VisibleThreadInviteRow,
-  VisibleThreadParticipantRow,
-  VisibleThreadReadStateRow,
-  VisibleThreadSecretEnvelopeRow,
-  VisibleDeviceKeyBundleRow,
-  VisibleDeviceShareRequestRow,
+  Account,
+  ChannelJoinRequest,
+  ChannelMember,
+  Channel,
+  ContactRequest,
+  ContactAllowlistEntry,
+  Message as MessageRow,
+  ThreadInvite,
+  ThreadParticipantPreview as ThreadParticipantPreviewRow,
+  ThreadSecretEnvelope as VisibleThreadSecretEnvelopeRow,
+  DeviceKeyBundle,
+  DeviceShareRequest,
+  AccountChangeSignal,
 } from '@/module_bindings/types';
+import type {
+  AgentPublicKeyLookupRow,
+  ProcedureConnection,
+} from '@/lib/procedures';
+
+type AgentPublicKeyLookupRequest = {
+  agentDbId: bigint;
+  keyKind: 'encryption' | 'signing';
+  keyVersion: number;
+};
+import type { VisibleThreadPage } from '@/lib/procedures';
+
+type InboxRow = Account;
+void ({} as ProcedureConnection);
+void ({} as VisibleThreadPage);
+void ({} as AgentPublicKeyLookupRequest);
+void ({} as InboxRow);
 import { useReducer, useSpacetimeDB } from 'spacetimedb/tanstack';
 import { Timestamp } from 'spacetimedb';
 import {
@@ -194,10 +219,11 @@ const THREAD_LIST_PAGE_SIZE = 10;
 const THREAD_TIMELINE_PAGE_SIZE = 10;
 const THREAD_LIST_SCROLL_LOAD_THRESHOLD_PX = 64;
 
-type Message = VisibleMessageRow;
+type Message = MessageRow;
 type AgentPublicKey = AgentPublicKeyLookupRow;
-type ThreadParticipant = VisibleThreadParticipantRow;
-type ThreadReadState = VisibleThreadReadStateRow;
+type FullThreadParticipant = ThreadParticipantPreviewRow;
+type ThreadParticipant = ThreadParticipantPreviewRow;
+type ThreadReadState = ThreadParticipantPreviewRow & { updatedAt?: Timestamp };
 
 export const Route = createFileRoute('/$slug')({
   validateSearch: search => ({
@@ -247,42 +273,59 @@ function mergeRowsById<Row extends { id: bigint }>(
   return Array.from(byId.values());
 }
 
-async function loadVisibleThreadMessagesInSeqRange(params: {
+async function loadVisibleThreadMessagesAfterId(params: {
   conn: DbConnection;
   agentDbId: bigint;
   threadId: bigint;
-  fromThreadSeq: bigint;
-  toThreadSeq: bigint;
+  fromMessageId: bigint;
+  toMessageId: bigint;
   isCancelled?: () => boolean;
 }): Promise<{
   messages: Message[];
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
 }> {
+  let beforeMessageId: bigint | undefined;
   let messages: Message[] = [];
   let secretEnvelopes: VisibleThreadSecretEnvelopeRow[] = [];
 
-  for (
-    let threadSeq = params.fromThreadSeq;
-    threadSeq <= params.toThreadSeq;
-    threadSeq += 1n
-  ) {
-    if (params.isCancelled?.()) {
-      break;
-    }
+  while (!params.isCancelled?.()) {
     const page = await params.conn.procedures.listThreadMessages({
       agentDbId: params.agentDbId,
       threadId: params.threadId,
-      beforeThreadSeq: threadSeq + 1n,
-      limit: 1n,
+      beforeMessageId,
+      limit: THREAD_TIMELINE_PAGE_SIZE,
     });
-    const exactMessage = page.messages.find(message => {
-      return message.threadId === params.threadId && message.threadSeq === threadSeq;
-    });
-    if (!exactMessage) {
-      continue;
+
+    if (params.isCancelled?.()) {
+      return { messages: [], secretEnvelopes: [] };
     }
-    messages = mergeRowsById(messages, [exactMessage]);
+
+    const threadMessages = page.messages.filter(
+      message => message.threadId === params.threadId
+    );
+    messages = mergeRowsById(
+      messages,
+      threadMessages.filter(
+        message => message.id >= params.fromMessageId && message.id <= params.toMessageId
+      )
+    );
     secretEnvelopes = mergeRowsById(secretEnvelopes, page.secretEnvelopes);
+
+    const lowestFetchedMessageId = threadMessages.reduce<bigint | null>(
+      (lowest, message) =>
+        lowest === null || message.id < lowest ? message.id : lowest,
+      null
+    );
+    if (
+      page.messages.length === 0 ||
+      lowestFetchedMessageId === null ||
+      lowestFetchedMessageId <= params.fromMessageId ||
+      page.nextBeforeMessageId === undefined ||
+      page.nextBeforeMessageId === beforeMessageId
+    ) {
+      break;
+    }
+    beforeMessageId = page.nextBeforeMessageId;
   }
 
   return {
@@ -292,11 +335,11 @@ async function loadVisibleThreadMessagesInSeqRange(params: {
 }
 
 function patchOptimisticReadState(
-  current: VisibleThreadReadStateRow[],
+  current: ThreadReadState[],
   agentDbId: bigint,
   threadId: bigint,
-  patch: Partial<Pick<VisibleThreadReadStateRow, 'lastReadThreadSeq' | 'archived' | 'updatedAt'>>
-): VisibleThreadReadStateRow[] {
+  patch: Partial<Pick<ThreadReadState, 'lastReadMessageId' | 'archived' | 'updatedAt'>>
+): ThreadReadState[] {
   const index = current.findIndex(
     row => row.agentDbId === agentDbId && row.threadId === threadId
   );
@@ -304,16 +347,8 @@ function patchOptimisticReadState(
   return current.map((row, i) => (i === index ? { ...row, ...patch } : row));
 }
 
-type DisplayInbox = Pick<
-  Inbox,
-  | 'normalizedEmail'
-  | 'displayEmail'
-  | 'authVerified'
-  | 'emailAttested'
-  | 'authIssuer'
-  | 'authSubject'
-> & {
-  authVerifiedAt?: Inbox['authVerifiedAt'];
+type DisplayInbox = Pick<Account, 'email' | 'authIssuer' | 'authSubject'> & {
+  authVerifiedAt?: Account['authVerifiedAt'];
   authVerifiedAtLabel?: string;
 };
 type KeyRotationNotice = {
@@ -337,8 +372,51 @@ type PendingDeviceShareRequestState = {
   expiresAt: string;
 };
 
-function deviceKeyBundleNeverExpires(bundle: { expiryMode: { tag: string } }): boolean {
-  return bundle.expiryMode.tag === 'NeverExpires' || bundle.expiryMode.tag === 'neverExpires';
+function deviceKeyBundleRequiresRotationConfirmation(bundle: unknown): boolean {
+  const purpose =
+    typeof bundle === 'object' && bundle !== null && 'purpose' in bundle
+      ? (bundle as { purpose?: string | { tag?: string } }).purpose
+      : null;
+  const tag = typeof purpose === 'string' ? purpose : purpose?.tag;
+  return tag === 'RotationShare';
+}
+
+// The shared crypto module reports algorithms as plain strings; the new Rust
+// schema models them as native enums (tagged unions). Wrap at the boundary.
+function toCipherAlgorithm(_algorithm: string): { tag: 'AesGcm256V1' } {
+  return { tag: 'AesGcm256V1' };
+}
+function toWrapAlgorithm(_algorithm: string): { tag: 'EcdhP256AesGcm256V1' } {
+  return { tag: 'EcdhP256AesGcm256V1' };
+}
+function toReducerEnvelopes(
+  envelopes: ReadonlyArray<{
+    recipientPublicIdentity: string;
+    recipientEncryptionKeyVersion: number;
+    senderEncryptionKeyVersion: number;
+    signingKeyVersion: number;
+    wrappedSecretCiphertext: string;
+    wrappedSecretIv: string;
+    wrapAlgorithm: string;
+    signature: string;
+  }>
+): Array<{
+  recipientPublicIdentity: string;
+  recipientEncryptionKeyVersion: number;
+  senderEncryptionKeyVersion: number;
+  signingKeyVersion: number;
+  wrappedSecretCiphertext: Uint8Array;
+  wrappedSecretIv: Uint8Array;
+  wrapAlgorithm: { tag: 'EcdhP256AesGcm256V1' };
+  signature: Uint8Array;
+}> {
+  return envelopes.map(env => ({
+    ...env,
+    wrappedSecretCiphertext: fromHex(env.wrappedSecretCiphertext),
+    wrappedSecretIv: fromHex(env.wrappedSecretIv),
+    wrapAlgorithm: toWrapAlgorithm(env.wrapAlgorithm),
+    signature: fromHex(env.signature),
+  }));
 }
 
 async function loadKnownCurrentKeysForSnapshot(
@@ -388,8 +466,8 @@ function describeResolvedActor(actor: ResolvedPublishedActor): string {
 }
 
 function describeTargetSubtitle(actor: Agent | ResolvedPublishedActor): string | null {
-  if ('normalizedEmail' in actor) {
-    return actor.normalizedEmail ?? null;
+  if ('email' in actor) {
+    return actor.email ?? null;
   }
 
   const linkedEmail = actor.linkedEmail?.trim();
@@ -401,11 +479,15 @@ function normalizeNullableText(value: unknown): string | null {
 }
 
 function describeActorOption(actor: Agent | ResolvedPublishedActor): string {
-  return 'normalizedEmail' in actor ? describeActor(actor) : describeResolvedActor(actor);
+  return 'email' in actor ? describeActor(actor) : describeResolvedActor(actor);
 }
 
 function actorOptionId(actor: Agent | ResolvedPublishedActor): string {
   return actor.publicIdentity;
+}
+
+function actorOptionAgentDbId(actor: Agent | ResolvedPublishedActor): bigint {
+  return 'id' in actor ? actor.id : actor.agentDbId;
 }
 
 function mergeResolvedActors(
@@ -433,8 +515,6 @@ function InboxComposeDialog({
   onToggleComposeActor,
   composeThreadTitle,
   onComposeThreadTitleChange,
-  composeThreadLocked,
-  onComposeThreadLockedChange,
   composeFirstMessage,
   onComposeFirstMessageChange,
   onSubmitCompose,
@@ -452,8 +532,6 @@ function InboxComposeDialog({
   onToggleComposeActor: (actorId: string) => void;
   composeThreadTitle: string;
   onComposeThreadTitleChange: (value: string) => void;
-  composeThreadLocked: boolean;
-  onComposeThreadLockedChange: (checked: boolean) => void;
   composeFirstMessage: string;
   onComposeFirstMessageChange: (value: string) => void;
   onSubmitCompose: () => void | Promise<void>;
@@ -563,19 +641,6 @@ function InboxComposeDialog({
             disabled={!canWrite}
             className="h-9 text-sm"
           />
-
-          {!isDirectMode ? (
-            <label className="flex items-center gap-2 text-sm text-muted-foreground">
-              <input
-                type="checkbox"
-                className="accent-primary"
-                checked={composeThreadLocked}
-                onChange={event => onComposeThreadLockedChange(event.target.checked)}
-                disabled={!canWrite || selectedCount <= 1}
-              />
-              Lock membership
-            </label>
-          ) : null}
 
           {isDirectMode ? (
             <Textarea
@@ -851,7 +916,11 @@ function ParticipantsDialog({
 
 function isApprovalRequiredForFirstContactError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return message.includes('requires approval for first contact');
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('requires approval for first contact') ||
+    normalized.includes('direct contact requires approval')
+  );
 }
 
 async function ensurePeerTrust(params: {
@@ -860,44 +929,47 @@ async function ensurePeerTrust(params: {
   observed: PeerKeyTuple;
   allowFirstContactTrust: boolean;
 }): Promise<void> {
-  const comparison = params.allowFirstContactTrust
-    ? autoPinPeerIfUnknown(params.publicIdentity, params.observed)
-    : comparePinnedPeer(params.publicIdentity, params.observed);
-  if (
-    comparison.status === 'matches' ||
-    (comparison.status === 'unpinned' && params.allowFirstContactTrust)
-  ) {
+  // Sender-gated trust model (see CLAUDE.md "Peer Key Trust Rules"): we never refuse a send
+  // because the recipient is unpinned. A fresh device of the sender's account legitimately
+  // ships without the receiver's trust pin until an inbound message arrives, so blocking on
+  // `unpinned` for an existing thread used to break post-device-share sends. Auto-pin the
+  // first observation regardless of `allowFirstContactTrust`; rotations get auto-confirmed.
+  // The actual sender-side block is `requireImportedRotationKeyConfirmed`, applied separately
+  // at the local-key-import layer, not here.
+  void params.allowFirstContactTrust;
+  void params.slug;
+  const comparison = autoPinPeerIfUnknown(params.publicIdentity, params.observed);
+  if (comparison.status === 'matches' || comparison.status === 'unpinned') {
     return;
-  }
-
-  if (comparison.status === 'unpinned') {
-    throw new Error(
-      `Keys for "${params.slug}" are not trusted for this existing contact. Verify them out-of-band before sending.`
-    );
   }
 
   confirmPeerKeyRotation(params.publicIdentity, params.observed);
 }
 
-function toActorPublicKeys(actor: Agent): ActorPublicKeys {
+function toActorPublicKeys(
+  actor: Agent,
+  keys: {
+    encryptionPublicKey: string;
+    signingPublicKey: string;
+  }
+): ActorPublicKeys {
   return {
     actorId: actor.id,
-    normalizedEmail: actor.normalizedEmail,
+    email: actor.email,
     slug: actor.slug,
-    inboxIdentifier: actor.inboxIdentifier ?? undefined,
     isDefault: actor.isDefault,
     publicIdentity: actor.publicIdentity,
     displayName: actor.displayName ?? null,
-    encryptionPublicKey: actor.currentEncryptionPublicKey,
-    encryptionKeyVersion: actor.currentEncryptionKeyVersion,
-    signingPublicKey: actor.currentSigningPublicKey,
-    signingKeyVersion: actor.currentSigningKeyVersion,
+    encryptionPublicKey: keys.encryptionPublicKey,
+    encryptionKeyVersion: actor.currentKeyBundleVersion,
+    signingPublicKey: keys.signingPublicKey,
+    signingKeyVersion: actor.currentKeyBundleVersion,
   };
 }
 
 function toPublishedActorPublicKeys(actor: PublishedActorLookupLike): ActorPublicKeys {
   return {
-    normalizedEmail: '',
+    email: '',
     slug: actor.slug,
     isDefault: actor.isDefault,
     publicIdentity: actor.publicIdentity,
@@ -906,6 +978,60 @@ function toPublishedActorPublicKeys(actor: PublishedActorLookupLike): ActorPubli
     encryptionKeyVersion: actor.encryptionKeyVersion,
     signingPublicKey: actor.signingPublicKey,
     signingKeyVersion: actor.signingKeyVersion,
+  };
+}
+
+function tupleFromActorPublicKeys(actor: ActorPublicKeys): PeerKeyTuple {
+  return {
+    encryptionPublicKey: actor.encryptionPublicKey,
+    encryptionKeyVersion: actor.encryptionKeyVersion,
+    signingPublicKey: actor.signingPublicKey,
+    signingKeyVersion: actor.signingKeyVersion,
+  };
+}
+
+function assertActorKeyPairMatchesPublicKeys(
+  actor: ActorPublicKeys,
+  keyPair: AgentKeyPair
+): void {
+  if (
+    actor.encryptionPublicKey === keyPair.encryption.publicKey &&
+    actor.encryptionKeyVersion === keyPair.encryption.keyVersion &&
+    actor.signingPublicKey === keyPair.signing.publicKey &&
+    actor.signingKeyVersion === keyPair.signing.keyVersion
+  ) {
+    return;
+  }
+
+  throw new Error('Local keys do not match the currently published keys for this inbox.');
+}
+
+function tupleFromAgentPublicKeyRows(
+  actor: Agent,
+  publicKeys: AgentPublicKey[]
+): PeerKeyTuple | null {
+  const encryptionPublicKey = findVersionedKey(
+    actor,
+    publicKeys,
+    'encryption',
+    actor.currentKeyBundleVersion
+  );
+  const signingPublicKey = findVersionedKey(
+    actor,
+    publicKeys,
+    'signing',
+    actor.currentKeyBundleVersion
+  );
+
+  if (!encryptionPublicKey || !signingPublicKey) {
+    return null;
+  }
+
+  return {
+    encryptionPublicKey,
+    encryptionKeyVersion: actor.currentKeyBundleVersion,
+    signingPublicKey,
+    signingKeyVersion: actor.currentKeyBundleVersion,
   };
 }
 
@@ -927,7 +1053,8 @@ function publicKeyRequestKey(request: AgentPublicKeyLookupRequest): string {
 }
 
 function publicKeyRowKey(row: AgentPublicKey): string {
-  return `${row.agentDbId.toString()}:${row.keyKind}:${row.keyVersion}`;
+  const keyKind = row.keyKind.tag === 'Encryption' ? 'encryption' : 'signing';
+  return `${row.agentDbId.toString()}:${keyKind}:${row.keyVersion}`;
 }
 
 function addPublicKeyLookupRequest(params: {
@@ -935,27 +1062,13 @@ function addPublicKeyLookupRequest(params: {
   actorById: Map<bigint, Agent>;
   agentDbId: bigint;
   keyKind: AgentPublicKeyKind;
-  keyVersion: string;
+  keyVersion: number;
 }) {
-  const actor = params.actorById.get(params.agentDbId);
-  if (
-    params.keyKind === 'encryption' &&
-    actor?.currentEncryptionKeyVersion === params.keyVersion
-  ) {
-    return;
-  }
-  if (
-    params.keyKind === 'signing' &&
-    actor?.currentSigningKeyVersion === params.keyVersion
-  ) {
-    return;
-  }
-
-  const request = {
+  const request: AgentPublicKeyLookupRequest = {
     agentDbId: params.agentDbId,
     keyKind: params.keyKind,
     keyVersion: params.keyVersion,
-  } satisfies AgentPublicKeyLookupRequest;
+  };
   params.requestsByKey.set(publicKeyRequestKey(request), request);
 }
 
@@ -977,6 +1090,23 @@ function collectMessagePublicKeyLookupRequests(params: {
   );
 
   for (const message of params.messages) {
+    const senderActor = params.actorById.get(message.senderAgentDbId);
+    if (senderActor) {
+      addPublicKeyLookupRequest({
+        requestsByKey,
+        actorById: params.actorById,
+        agentDbId: senderActor.id,
+        keyKind: 'encryption',
+        keyVersion: senderActor.currentKeyBundleVersion,
+      });
+      addPublicKeyLookupRequest({
+        requestsByKey,
+        actorById: params.actorById,
+        agentDbId: senderActor.id,
+        keyKind: 'signing',
+        keyVersion: senderActor.currentKeyBundleVersion,
+      });
+    }
     addPublicKeyLookupRequest({
       requestsByKey,
       actorById: params.actorById,
@@ -1093,20 +1223,15 @@ function getActiveActorKeyError(issue: DefaultKeyIssue): string | null {
 }
 
 function findVersionedKey(
-  actor: Agent,
+  _actor: Agent,
   publicKeys: AgentPublicKey[],
   kind: AgentPublicKeyKind,
-  version: string
+  version: number
 ): string | null {
-  if (kind === 'encryption' && actor.currentEncryptionKeyVersion === version) {
-    return actor.currentEncryptionPublicKey;
-  }
-  if (kind === 'signing' && actor.currentSigningKeyVersion === version) {
-    return actor.currentSigningPublicKey;
-  }
+  const expectedTag = kind === 'encryption' ? 'Encryption' : 'Signing';
   return (
-    publicKeys.find(key => key.keyKind === kind && key.keyVersion === version)?.publicKey ??
-    null
+    publicKeys.find(key => key.keyKind.tag === expectedTag && key.keyVersion === version)
+      ?.publicKey ?? null
   );
 }
 
@@ -1115,7 +1240,7 @@ function threadSummary(thread: Thread, participants: ThreadParticipant[], actorB
     .map(participant => actorById.get(participant.agentDbId))
     .filter((actor): actor is Agent => Boolean(actor))
     .map(actor => actor.displayName?.trim() || actor.slug);
-  return thread.title?.trim() || names.join(', ') || thread.dedupeKey;
+  return thread.title?.trim() || names.join(', ') || `Thread ${thread.id.toString()}`;
 }
 
 function secretRotationRequired(params: {
@@ -1174,13 +1299,13 @@ function secretRotationRequired(params: {
     }
     seenRecipients.add(envelope.recipientAgentDbId);
 
-    if (envelope.senderEncryptionKeyVersion !== senderActor.currentEncryptionKeyVersion) {
+    if (envelope.senderEncryptionKeyVersion !== senderActor.currentKeyBundleVersion) {
       return true;
     }
-    if (envelope.signingKeyVersion !== senderActor.currentSigningKeyVersion) {
+    if (envelope.signingKeyVersion !== senderActor.currentKeyBundleVersion) {
       return true;
     }
-    if (envelope.recipientEncryptionKeyVersion !== recipient.currentEncryptionKeyVersion) {
+    if (envelope.recipientEncryptionKeyVersion !== recipient.currentKeyBundleVersion) {
       return true;
     }
   }
@@ -1299,7 +1424,12 @@ function AuthenticatedInboxPage() {
   const [pagedThreadActors, setPagedThreadActors] = useState<Agent[]>([]);
   const [agentPublicKeys, setAgentPublicKeys] = useState<AgentPublicKey[]>([]);
   const [publicKeyLookupPending, setPublicKeyLookupPending] = useState(false);
-  const [pagedThreadParticipants, setPagedThreadParticipants] = useState<ThreadParticipant[]>([]);
+  const [pagedThreadParticipantPreviews, setPagedThreadParticipantPreviews] = useState<
+    ThreadParticipant[]
+  >([]);
+  const [pagedThreadParticipants, setPagedThreadParticipants] = useState<
+    FullThreadParticipant[]
+  >([]);
   const [pagedThreadReadStates, setPagedThreadReadStates] = useState<ThreadReadState[]>([]);
   const [pagedThreads, setPagedThreads] = useState<Thread[]>([]);
   const [threadPageAfterSortKey, setThreadPageAfterSortKey] = useState<string | undefined>();
@@ -1311,7 +1441,6 @@ function AuthenticatedInboxPage() {
   const [composeLookupSlug, setComposeLookupSlug] = useState('');
   const [composeResolvedTargets, setComposeResolvedTargets] = useState<ResolvedPublishedActor[]>([]);
   const [composeThreadTitle, setComposeThreadTitle] = useState('');
-  const [composeThreadLocked, setComposeThreadLocked] = useState(false);
   const [composeFirstMessage, setComposeFirstMessage] = useState('');
   const [composeSelectedActorIds, setComposeSelectedActorIds] = useState<string[]>([]);
   const [pendingParticipantId, setPendingParticipantId] = useState<string>('');
@@ -1354,7 +1483,7 @@ function AuthenticatedInboxPage() {
   const shouldAutoScrollTimelineRef = useRef(true);
   const lastTimelineSignatureRef = useRef<string | null>(null);
   const [timelineUnseenCount, setTimelineUnseenCount] = useState(0);
-  const [unreadAnchorSeq, setUnreadAnchorSeq] = useState<bigint | null>(null);
+  const [unreadAnchorMessageId, setUnreadAnchorMessageId] = useState<bigint | null>(null);
   const anchoredThreadIdRef = useRef<bigint | null>(null);
   const mountedRef = useRef(true);
   const pendingDeviceShareRequestRef = useRef<PendingDeviceShareRequestState | null>(null);
@@ -1367,7 +1496,7 @@ function AuthenticatedInboxPage() {
       authenticatedSession
         ? {
             userId: `${authenticatedSession.user.issuer}:${authenticatedSession.user.subject}`,
-            normalizedEmail: normalizeEmail(authenticatedSession.user.email ?? ''),
+            email: normalizeEmail(authenticatedSession.user.email ?? ''),
           }
         : null,
     [authenticatedSession]
@@ -1435,103 +1564,157 @@ function AuthenticatedInboxPage() {
   const removeContactAllowlistEntryReducer = useReducer(reducers.removeContactAllowlistEntry);
   const approveContactRequestReducer = useReducer(reducers.approveContactRequest);
   const rejectContactRequestReducer = useReducer(reducers.rejectContactRequest);
+  const cancelContactRequestReducer = useReducer(reducers.cancelContactRequest);
   const acceptThreadInviteReducer = useReducer(reducers.acceptThreadInvite);
-  const rejectThreadInviteReducer = useReducer(reducers.rejectThreadInvite);
+  const declineThreadInviteReducer = useReducer(reducers.declineThreadInvite);
   const registerDeviceReducer = useReducer(reducers.registerDevice);
   const createDeviceShareRequestReducer = useReducer(reducers.createDeviceShareRequest);
-  const approveDeviceShareReducer = useReducer(reducers.approveDeviceShare);
+  const approveDeviceShareReducer = useReducer(reducers.approveDeviceShareRequest);
   const revokeDeviceReducer = useReducer(reducers.revokeDevice);
   const rotateAgentKeysReducer = useReducer(reducers.rotateAgentKeys);
-  const createDirectThreadReducer = useReducer(reducers.createDirectThread);
-  const requestDirectContactWithFirstMessageReducer = useReducer(
-    reducers.requestDirectContactWithFirstMessage
+  const shareDeviceKeyBundleReducer = useReducer(reducers.shareDeviceKeyBundle);
+  const createThreadReducer = useReducer(reducers.createThread);
+  const createDirectThread = (params: {
+    agentDbId: bigint;
+    otherAgentPublicIdentity: string;
+    title?: string;
+  }) =>
+    createThreadReducer({
+      agentDbId: params.agentDbId,
+      kind: { tag: 'Direct' },
+      otherAgentPublicIdentity: params.otherAgentPublicIdentity,
+      participantPublicIdentities: undefined,
+      title: params.title,
+    });
+  const requestDirectContactReducer = useReducer(
+    reducers.requestDirectContact
   );
-  const createGroupThreadReducer = useReducer(reducers.createGroupThread);
+  const createGroupThread = (params: {
+    agentDbId: bigint;
+    title?: string;
+    participantPublicIdentities: string[];
+  }) =>
+    createThreadReducer({
+      agentDbId: params.agentDbId,
+      kind: { tag: 'Group' },
+      otherAgentPublicIdentity: undefined,
+      participantPublicIdentities: params.participantPublicIdentities,
+      title: params.title,
+    });
   const addThreadParticipantReducer = useReducer(reducers.addThreadParticipant);
   const removeThreadParticipantReducer = useReducer(reducers.removeThreadParticipant);
   const setThreadParticipantAdminReducer = useReducer(reducers.setThreadParticipantAdmin);
   const sendEncryptedMessageReducer = useReducer(reducers.sendEncryptedMessage);
-  const markThreadReadReducer = useReducer(reducers.markThreadRead);
-  const repairOwnSenderReadStatesReducer = useReducer(reducers.repairOwnSenderReadStates);
-  const setThreadArchivedReducer = useReducer(reducers.setThreadArchived);
+  const updateThreadReadStateReducer = useReducer(reducers.updateThreadReadState);
+  const updateThreadReadPosition = (params: {
+    agentDbId: bigint;
+    threadId: bigint;
+    lastReadMessageId: bigint;
+  }) =>
+    updateThreadReadStateReducer({
+      agentDbId: params.agentDbId,
+      threadId: params.threadId,
+      lastReadMessageId: params.lastReadMessageId,
+      archived: undefined,
+    });
+  const updateThreadArchivedState = (params: {
+    agentDbId: bigint;
+    threadId: bigint;
+    archived: boolean;
+  }) =>
+    updateThreadReadStateReducer({
+      agentDbId: params.agentDbId,
+      threadId: params.threadId,
+      lastReadMessageId: undefined,
+      archived: params.archived,
+    });
   const deleteThreadReducer = useReducer(reducers.deleteThread);
 
-  const selectedThreadSecretEnvelopesQuery = useMemo(
-    () =>
-      tables.visibleThreadSecretEnvelopes.where(row =>
-        row.threadId.eq(selectedThreadId ?? 0n)
-      ),
-    [selectedThreadId]
+  // `visible_thread_secret_envelopes` view was dropped — clients fetch
+  // envelopes on demand via the `listThreadSecretEnvelopes` procedure when
+  // they detect a rotation marker on an incoming message.
+  const threadSecretEnvelopes = useMemo<VisibleThreadSecretEnvelopeRow[]>(
+    () => [],
+    []
   );
 
-  const [inboxes, inboxesReady, inboxesError] = useLiveTable<Inbox>(
-    tables.visibleInboxes,
-    'visibleInboxes'
+  const [inboxes, inboxesReady, inboxesError] = useLiveTable<Account>(
+    tables.visible_accounts,
+    'visible_accounts'
   );
-  const [liveActors, actorsReady, actorsError] = useLiveTable<Agent>(
-    tables.visibleAgents,
-    'visibleAgents'
+  const [accountSignals] = useLiveTable<AccountChangeSignal>(
+    tables.visible_account_change_signal,
+    'visible_account_change_signal'
   );
-  const [devices, devicesReady, devicesError] = useLiveTable<Device>(
-    tables.visibleDevices,
-    'visibleDevices'
+  const accountSignal = accountSignals[0] ?? null;
+  const [liveActors, actorsReady, actorsError] =
+    useProcedureSnapshot<Agent>(
+      readAllOwnedAgents,
+      accountSignal?.ownedAgentsVersion.toString() ?? null
+    );
+  const [devices, devicesReady, devicesError] =
+    useProcedureSnapshot<Device>(
+      readAllOwnedDevices,
+      accountSignal?.ownedDevicesVersion.toString() ?? null
+    );
+  const [, deviceShareRequestsReady, deviceShareRequestsError] = useLiveTable<DeviceShareRequest>(
+    tables.visible_device_share_requests,
+    'visible_device_share_requests'
   );
-  const [, deviceShareRequestsReady, deviceShareRequestsError] = useLiveTable<VisibleDeviceShareRequestRow>(
-    tables.visibleDeviceShareRequests,
-    'visibleDeviceShareRequests'
+  const [deviceShareBundles, deviceShareBundlesReady, deviceShareBundlesError] = useLiveTable<DeviceKeyBundle>(
+    tables.visible_device_key_bundles,
+    'visible_device_key_bundles'
   );
-  const [deviceShareBundles, deviceShareBundlesReady, deviceShareBundlesError] = useLiveTable<VisibleDeviceKeyBundleRow>(
-    tables.visibleDeviceKeyBundles,
-    'visibleDeviceKeyBundles'
+  const [contactRequests, contactRequestsReady, contactRequestsError] =
+    useProcedureSnapshot<ContactRequest>(
+      readPendingContactRequests,
+      accountSignal?.contactRequestsVersion.toString() ?? null
+    );
+  const [threadInvites, threadInvitesReady, threadInvitesError] =
+    useProcedureSnapshot<ThreadInvite>(
+      readPendingThreadInvites,
+      accountSignal?.threadInvitesVersion.toString() ?? null
+    );
+  const [visible_channels] = useLiveTable<Channel>(
+    tables.visible_channels,
+    'visible_channels'
   );
-  const [liveThreadSignals, threadSignalsReady, threadSignalsError] = useLiveTable<Thread>(
-    tables.visibleThreads,
-    'visibleThreads'
+  const [visible_channel_memberships] = useLiveTable<ChannelMember>(
+    tables.visible_channel_memberships,
+    'visible_channel_memberships'
   );
-  const [threadSecretEnvelopes, threadSecretEnvelopesReady, threadSecretEnvelopesError] = useLiveTable<VisibleThreadSecretEnvelopeRow>(
-    selectedThreadSecretEnvelopesQuery,
-    'visibleThreadSecretEnvelopes',
-    { enabled: selectedThreadId !== null }
-  );
-  const [contactRequests, contactRequestsReady, contactRequestsError] = useLiveTable<VisibleContactRequestRow>(
-    tables.visibleContactRequests,
-    'visibleContactRequests'
-  );
-  const [threadInvites, threadInvitesReady, threadInvitesError] = useLiveTable<VisibleThreadInviteRow>(
-    tables.visibleThreadInvites,
-    'visibleThreadInvites'
-  );
-  const [visibleChannels] = useLiveTable<VisibleChannelRow>(
-    tables.visibleChannels,
-    'visibleChannels'
-  );
-  const [visibleChannelMemberships] = useLiveTable<VisibleChannelMembershipRow>(
-    tables.visibleChannelMemberships,
-    'visibleChannelMemberships'
-  );
-  const [visibleChannelJoinRequests] = useLiveTable<VisibleChannelJoinRequestRow>(
-    tables.visibleChannelJoinRequests,
-    'visibleChannelJoinRequests'
-  );
-  const [allowlistEntries, allowlistEntriesReady, allowlistEntriesError] = useLiveTable<VisibleContactAllowlistEntryRow>(
-    tables.visibleContactAllowlistEntries,
-    'visibleContactAllowlistEntries'
-  );
+  const [pendingChannelJoinRequests] =
+    useProcedureSnapshot<ChannelJoinRequest>(
+      readPendingChannelJoinRequests,
+      accountSignal?.channelJoinRequestsVersion.toString() ?? null
+    );
+  const [allowlistEntries, allowlistEntriesReady, allowlistEntriesError] =
+    useProcedureSnapshot<ContactAllowlistEntry>(
+      readAllContactAllowlistEntries,
+      accountSignal?.contactAllowlistVersion.toString() ?? null
+    );
   const actors = useMemo(
     () => mergeRowsById(liveActors, pagedThreadActors),
     [liveActors, pagedThreadActors]
   );
   const threads = pagedThreads;
-  const threadParticipants = pagedThreadParticipants;
-  const threadReadStates = pagedThreadReadStates;
+  const threadParticipants = useMemo<ThreadParticipant[]>(
+    () => mergeRowsById<ThreadParticipant>(pagedThreadParticipantPreviews, pagedThreadParticipants),
+    [pagedThreadParticipantPreviews, pagedThreadParticipants]
+  );
+  const ownThreadParticipants = pagedThreadReadStates;
   const visibleStateRef = useRef<{
     actors: Agent[];
     threads: Thread[];
     participants: ThreadParticipant[];
+    contactRequests: ContactRequest[];
+    threadInvites: ThreadInvite[];
   }>({
     actors: [],
     threads: [],
     participants: [],
+    contactRequests: [],
+    threadInvites: [],
   });
 
   useEffect(() => {
@@ -1539,8 +1722,10 @@ function AuthenticatedInboxPage() {
       actors,
       threads,
       participants: threadParticipants,
+      contactRequests,
+      threadInvites,
     };
-  }, [actors, threads, threadParticipants]);
+  }, [actors, contactRequests, threads, threadInvites, threadParticipants]);
 
   const normalizedRouteSlug = useMemo(() => normalizeInboxSlug(params.slug), [params.slug]);
   const normalizedLookupSlug = useMemo(() => normalizeInboxSlug(search.lookup ?? ''), [search.lookup]);
@@ -1554,7 +1739,7 @@ function AuthenticatedInboxPage() {
   );
   const activeActorId = activeActor?.id;
   const activeActorDeregistered = isDeregisteringOrDeregisteredInboxAgentState(
-    activeActor?.masumiRegistrationState
+    activeActor?.masumiRegistrationState?.tag
   );
   const activeActorContactRequests = useMemo(() => {
     if (!activeActor) {
@@ -1572,12 +1757,22 @@ function AuthenticatedInboxPage() {
       );
   }, [activeActor, contactRequests]);
   const incomingContactRequests = useMemo(
-    () => activeActorContactRequests.filter(request => request.direction === 'incoming'),
-    [activeActorContactRequests]
+    () =>
+      activeActor
+        ? activeActorContactRequests.filter(
+            request => request.targetAgentDbId === activeActor.id
+          )
+        : [],
+    [activeActor, activeActorContactRequests]
   );
   const outgoingContactRequests = useMemo(
-    () => activeActorContactRequests.filter(request => request.direction === 'outgoing'),
-    [activeActorContactRequests]
+    () =>
+      activeActor
+        ? activeActorContactRequests.filter(
+            request => request.requesterAgentDbId === activeActor.id
+          )
+        : [],
+    [activeActor, activeActorContactRequests]
   );
   const activeActorThreadInvites = useMemo(() => {
     if (!activeActor) {
@@ -1605,7 +1800,7 @@ function AuthenticatedInboxPage() {
   const inboxAllowlistEntries = useMemo(
     () =>
       allowlistEntries
-        .filter(entry => (activeActor ? entry.inboxId === activeActor.inboxId : false))
+        .filter(entry => (activeActor ? entry.accountId === activeActor.accountId : false))
         .sort(
           (left, right) =>
             Number(right.createdAt.microsSinceUnixEpoch - left.createdAt.microsSinceUnixEpoch) ||
@@ -1616,10 +1811,10 @@ function AuthenticatedInboxPage() {
 
   const threadsReady = !threadPageLoading;
   const threadsError = threadPageError;
-  const selectedThreadRealtimeReady =
-    selectedThreadId === null ? threadsReady : threadSecretEnvelopesReady && threadSignalsReady;
-  const selectedThreadRealtimeError =
-    selectedThreadId === null ? null : threadSecretEnvelopesError || threadSignalsError;
+  // Per-message envelopes load on-demand via `listThreadSecretEnvelopes`; once `threadsReady`
+  // resolves, no additional realtime gate is needed for the selected thread surface.
+  const selectedThreadRealtimeReady = selectedThreadId === null ? threadsReady : true;
+  const selectedThreadRealtimeError: string | null = null;
   const coreLoading = !actorsReady || (!activeActor && slugPresence === 'checking');
   const secondaryLoading =
     !inboxesReady ||
@@ -1627,7 +1822,6 @@ function AuthenticatedInboxPage() {
     !deviceShareRequestsReady ||
     !deviceShareBundlesReady ||
     !threadsReady ||
-    !threadSignalsReady ||
     !contactRequestsReady ||
     !threadInvitesReady ||
     !allowlistEntriesReady ||
@@ -1645,8 +1839,8 @@ function AuthenticatedInboxPage() {
     selectedThreadRealtimeError;
 
   const inbox = useMemo(
-    () => inboxes.find(row => row.id === activeActor?.inboxId),
-    [activeActor?.inboxId, inboxes]
+    () => inboxes.find(row => row.id === activeActor?.accountId),
+    [activeActor?.accountId, inboxes]
   );
   const normalizedSessionEmail = useMemo(
     () =>
@@ -1662,10 +1856,7 @@ function AuthenticatedInboxPage() {
   const displayInbox = useMemo<DisplayInbox | null>(() => {
     if (inbox) {
       return {
-        normalizedEmail: inbox.normalizedEmail,
-        displayEmail: inbox.displayEmail,
-        authVerified: inbox.authVerified,
-        emailAttested: inbox.emailAttested,
+        email: inbox.email,
         authIssuer: inbox.authIssuer,
         authSubject: inbox.authSubject,
         authVerifiedAt: inbox.authVerifiedAt,
@@ -1677,19 +1868,16 @@ function AuthenticatedInboxPage() {
     }
 
     const normalizedSessionEmail = normalizeEmail(authenticatedSession.user.email);
-    if (normalizedSessionEmail !== activeActor.normalizedEmail) {
+    if (normalizedSessionEmail !== activeActor.email) {
       return null;
     }
 
-    if (!ownedInbox || ownedInbox.id !== activeActor.inboxId) {
+    if (!ownedInbox || ownedInbox.id !== activeActor.accountId) {
       return null;
     }
 
     return {
-      normalizedEmail: ownedInbox.normalizedEmail,
-      displayEmail: authenticatedSession.user.email,
-      authVerified: authenticatedSession.user.emailVerified,
-      emailAttested: authenticatedSession.user.emailVerified,
+      email: ownedInbox.email,
       authIssuer: authenticatedSession.user.issuer,
       authSubject: authenticatedSession.user.subject,
       authVerifiedAtLabel: 'Current authenticated session',
@@ -1700,16 +1888,16 @@ function AuthenticatedInboxPage() {
       buildOwnedInboxAgentEntries({
         actors,
         ownInboxId: ownedInbox?.id ?? null,
-        normalizedEmail: ownedInbox?.normalizedEmail ?? normalizedSessionEmail ?? '',
+        email: ownedInbox?.email ?? normalizedSessionEmail ?? '',
       }),
     [actors, normalizedSessionEmail, ownedInbox]
   );
   const channelNavEntries = useMemo(
     () =>
       buildChannelNavEntries({
-        channels: visibleChannels,
-        memberships: visibleChannelMemberships,
-        joinRequests: visibleChannelJoinRequests,
+        channels: visible_channels,
+        memberships: visible_channel_memberships,
+        joinRequests: pendingChannelJoinRequests,
         ownedActorIds: new Set(
           shellOwnedInboxes
             .filter(entry => !entry.deregistered)
@@ -1718,9 +1906,9 @@ function AuthenticatedInboxPage() {
       }),
     [
       shellOwnedInboxes,
-      visibleChannelJoinRequests,
-      visibleChannelMemberships,
-      visibleChannels,
+      pendingChannelJoinRequests,
+      visible_channel_memberships,
+      visible_channels,
     ]
   );
   useEffect(() => {
@@ -1749,7 +1937,7 @@ function AuthenticatedInboxPage() {
     authenticatedSession &&
       inbox &&
       normalizedSessionEmail &&
-      normalizedSessionEmail === inbox.normalizedEmail &&
+      normalizedSessionEmail === inbox.email &&
       authenticatedSession.user.issuer === inbox.authIssuer &&
       authenticatedSession.user.subject === inbox.authSubject
   );
@@ -1774,38 +1962,12 @@ function AuthenticatedInboxPage() {
   });
   const canWriteToActiveInbox = writeAccess.canWrite && !activeActorDeregistered;
   useEffect(() => {
-    if (!activeActorId || !canWriteToActiveInbox) {
-      return;
-    }
-
-    const repairKey = `masumi.threadReadStateRepair.v1:${activeActorId.toString()}`;
-    try {
-      if (window.localStorage.getItem(repairKey) === 'done') {
-        return;
-      }
-    } catch {
-      // Private browsing can deny localStorage; the reducer itself remains idempotent.
-    }
-
-    void Promise.resolve(repairOwnSenderReadStatesReducer({ agentDbId: activeActorId }))
-      .then(() => {
-        try {
-          window.localStorage.setItem(repairKey, 'done');
-        } catch {
-          // Best effort marker only; a later retry is harmless.
-        }
-      })
-      .catch(() => {
-        // Retry on the next page load instead of surfacing a migration-only error.
-      });
-  }, [activeActorId, canWriteToActiveInbox, repairOwnSenderReadStatesReducer]);
-  useEffect(() => {
     if (!displayInbox || !activeActor) {
       return;
     }
 
     const pendingPrompt = consumeKeyBackupPrompt({
-      normalizedEmail: displayInbox.normalizedEmail,
+      email: displayInbox.email,
       slug: activeActor.slug,
     });
     if (!pendingPrompt) {
@@ -1829,12 +1991,12 @@ function AuthenticatedInboxPage() {
     }
 
     return devices
-      .filter(device => device.inboxId === inbox?.id)
+      .filter(device => device.accountId === inbox?.id)
       .sort((left, right) => left.deviceId.localeCompare(right.deviceId));
   }, [devices, displayInbox, inbox?.id]);
   const approvedDevices = useMemo(
     () =>
-      ownedDevices.filter(device => device.status === 'approved' && !device.revokedAt),
+      ownedDevices.filter(device => device.status.tag === 'Approved' && !device.revokedAt),
     [ownedDevices]
   );
   const actorKeysMatchPublished = useMemo(
@@ -1894,19 +2056,7 @@ function AuthenticatedInboxPage() {
     }
     const current = visibleStateRef.current;
 
-    return {
-      actors: mergeRowsById(
-        current.actors,
-        Array.from(liveConnection.db.visibleAgents.iter()) as Agent[]
-      ),
-      threads: current.threads,
-      participants: mergeRowsById(
-        current.participants,
-        Array.from(liveConnection.db.visibleThreadParticipants.iter()) as ThreadParticipant[]
-      ),
-      contactRequests: Array.from(liveConnection.db.visibleContactRequests.iter()) as VisibleContactRequestRow[],
-      threadInvites: Array.from(liveConnection.db.visibleThreadInvites.iter()) as VisibleThreadInviteRow[],
-    };
+    return current;
   }
 
   const mergeVisibleThreadPage = useCallback((
@@ -1922,14 +2072,37 @@ function AuthenticatedInboxPage() {
     };
 
     mergePageRows(setPagedThreadActors, page.actors);
-    mergePageRows(setPagedThreadParticipants, page.participants);
-    mergePageRows(setPagedThreadReadStates, page.readStates);
+    mergePageRows(setPagedThreadParticipantPreviews, page.participantPreviews);
+    if (reset) {
+      setPagedThreadParticipants([]);
+    }
+    mergePageRows(
+      setPagedThreadReadStates,
+      page.participantPreviews.filter(participant => participant.lastReadMessageId !== undefined)
+    );
     mergePageRows(setPagedThreads, page.threads);
     if (updateCursor) {
-      setThreadPageAfterSortKey(page.nextAfterSortKey);
-      setThreadPagesExhausted(page.nextAfterSortKey === undefined);
+      setThreadPageAfterSortKey(page.nextAfterSortKey ?? undefined);
+      setThreadPagesExhausted(page.nextAfterSortKey === null || page.nextAfterSortKey === undefined);
     }
   }, []);
+
+  const mergeThreadParticipantPage = useCallback((page: {
+    actors: Agent[];
+    participants: FullThreadParticipant[];
+  }) => {
+    setPagedThreadActors(current => mergeRowsById(current, page.actors));
+    setPagedThreadParticipants(current => mergeRowsById(current, page.participants));
+  }, []);
+
+  const loadFullThreadParticipants = useCallback(async (threadId: bigint) => {
+    if (!liveConnection) {
+      throw new Error('Live SpacetimeDB connection is unavailable.');
+    }
+    const page = await readAllThreadParticipants(liveConnection, threadId);
+    mergeThreadParticipantPage(page);
+    return page;
+  }, [liveConnection, mergeThreadParticipantPage]);
 
   async function readCurrentVisibleStateWithFreshThreadPage(
     agentDbId: bigint
@@ -1943,16 +2116,14 @@ function AuthenticatedInboxPage() {
       const page = await liveConnection.procedures.listVisibleThreads({
         agentDbId,
         afterSortKey: undefined,
-        filter: 'all',
-        query: undefined,
-        limit: BigInt(THREAD_LIST_PAGE_SIZE),
+        limit: THREAD_LIST_PAGE_SIZE,
       });
-      mergeVisibleThreadPage(page, false, false);
+      mergeVisibleThreadPage(page, true);
       return {
         ...current,
-        actors: mergeRowsById(current.actors, page.actors),
-        threads: mergeRowsById(current.threads, page.threads),
-        participants: mergeRowsById(current.participants, page.participants),
+        actors: page.actors,
+        threads: page.threads,
+        participants: page.participantPreviews,
       };
     } catch {
       return current;
@@ -1965,12 +2136,10 @@ function AuthenticatedInboxPage() {
       .listVisibleThreads({
         agentDbId: activeActorId,
         afterSortKey: undefined,
-        filter: threadRailFilter,
-        query: threadSearchQuery,
-        limit: BigInt(THREAD_LIST_PAGE_SIZE),
+        limit: THREAD_LIST_PAGE_SIZE,
       })
       .then(page => {
-        mergeVisibleThreadPage(page, false, false);
+        mergeVisibleThreadPage(page, true);
         setThreadPageError(null);
       })
       .catch(() => {
@@ -1980,8 +2149,6 @@ function AuthenticatedInboxPage() {
     activeActorId,
     liveConnection,
     mergeVisibleThreadPage,
-    threadRailFilter,
-    threadSearchQuery,
   ]);
 
   const loadOlderThreadPage = useCallback(async () => {
@@ -2002,9 +2169,7 @@ function AuthenticatedInboxPage() {
       const page = await liveConnection.procedures.listVisibleThreads({
         agentDbId: activeActor.id,
         afterSortKey: threadPageAfterSortKey,
-        filter: threadRailFilter,
-        query: threadSearchQuery,
-        limit: BigInt(THREAD_LIST_PAGE_SIZE),
+        limit: THREAD_LIST_PAGE_SIZE,
       });
       mergeVisibleThreadPage(page);
     } catch (error) {
@@ -2021,8 +2186,6 @@ function AuthenticatedInboxPage() {
     threadPageAfterSortKey,
     threadPageLoading,
     threadPagesExhausted,
-    threadRailFilter,
-    threadSearchQuery,
   ]);
 
   useEffect(() => {
@@ -2031,6 +2194,7 @@ function AuthenticatedInboxPage() {
         setPagedThreadActors([]);
         setAgentPublicKeys([]);
         setPublicKeyLookupPending(false);
+        setPagedThreadParticipantPreviews([]);
         setPagedThreadParticipants([]);
         setPagedThreadReadStates([]);
         setPagedThreads([]);
@@ -2052,9 +2216,7 @@ function AuthenticatedInboxPage() {
       .listVisibleThreads({
         agentDbId: activeActorId,
         afterSortKey: undefined,
-        filter: threadRailFilter,
-        query: threadSearchQuery,
-        limit: BigInt(THREAD_LIST_PAGE_SIZE),
+        limit: THREAD_LIST_PAGE_SIZE,
       })
       .then(page => {
         if (cancelled) return;
@@ -2086,22 +2248,15 @@ function AuthenticatedInboxPage() {
   ]);
 
   const threadSignalSignature = useMemo(
-    () =>
-      liveThreadSignals
-        .map(
-          thread =>
-            `${thread.id}:${thread.updatedAt.microsSinceUnixEpoch}:${thread.lastMessageSeq}:${thread.membershipVersion}`
-        )
-        .sort()
-        .join('|'),
-    [liveThreadSignals]
+    () => accountSignal?.threadListVersion.toString() ?? '',
+    [accountSignal?.threadListVersion]
   );
   const liveActorSignature = useMemo(
     () =>
       liveActors
         .map(
           actor =>
-            `${actor.id}:${actor.currentEncryptionKeyVersion}:${actor.currentSigningKeyVersion}`
+            `${actor.id}:${actor.currentKeyBundleVersion}:${actor.currentKeyBundleVersion}`
         )
         .sort()
         .join('|'),
@@ -2118,13 +2273,11 @@ function AuthenticatedInboxPage() {
         .listVisibleThreads({
           agentDbId: activeActorId,
           afterSortKey: undefined,
-          filter: threadRailFilter,
-          query: threadSearchQuery,
-          limit: BigInt(THREAD_LIST_PAGE_SIZE),
+          limit: THREAD_LIST_PAGE_SIZE,
         })
         .then(page => {
           if (cancelled) return;
-          mergeVisibleThreadPage(page, false, false);
+          mergeVisibleThreadPage(page, true);
         })
         .catch(() => {
           // Signature-driven refresh is best-effort; do not clobber actor errors.
@@ -2146,7 +2299,7 @@ function AuthenticatedInboxPage() {
 
   async function waitForNewDirectThread(params: {
     ownActor: Agent;
-    otherPublicIdentity: string;
+    otherActorId: bigint;
     existingThreadIds: Set<string>;
     timeoutMs?: number;
   }): Promise<Thread> {
@@ -2155,7 +2308,7 @@ function AuthenticatedInboxPage() {
     while (Date.now() < timeoutAt) {
       const snapshot = await readCurrentVisibleStateWithFreshThreadPage(params.ownActor.id);
       const nextThread =
-        findDirectThreads(snapshot.threads, params.ownActor, params.otherPublicIdentity).find(thread => {
+        findDirectThreads(snapshot.threads, params.ownActor.id, params.otherActorId).find(thread => {
           return !params.existingThreadIds.has(thread.id.toString());
         }) ?? null;
       if (nextThread) {
@@ -2195,7 +2348,7 @@ function AuthenticatedInboxPage() {
 
   async function waitForParticipantAddResult(params: {
     threadId: bigint;
-    participantPublicIdentity: string;
+    inviteePublicIdentity: string;
     timeoutMs?: number;
   }): Promise<'added' | 'invited'> {
     const timeoutAt = Date.now() + (params.timeoutMs ?? 10000);
@@ -2207,18 +2360,23 @@ function AuthenticatedInboxPage() {
         return (
           participant.threadId === params.threadId &&
           participant.active &&
-          actor?.publicIdentity === params.participantPublicIdentity
+          actor?.publicIdentity === params.inviteePublicIdentity
         );
       });
       if (active) {
         return 'added';
       }
 
+      const inviteeActorIds = new Set(
+        snapshot.actors
+          .filter(actor => actor.publicIdentity === params.inviteePublicIdentity)
+          .map(actor => actor.id)
+      );
       const pendingInvite = snapshot.threadInvites.some(invite => {
         return (
           invite.threadId === params.threadId &&
-          invite.inviteePublicIdentity === params.participantPublicIdentity &&
-          invite.status === 'pending'
+          inviteeActorIds.has(invite.inviteeAgentDbId) &&
+          invite.status.tag === 'Pending'
         );
       });
       if (pendingInvite) {
@@ -2293,6 +2451,36 @@ function AuthenticatedInboxPage() {
     }
   }
 
+  async function handleCancelContactRequest(requestId: bigint) {
+    if (!activeActor) {
+      return;
+    }
+
+    setApprovalActionRequestId(requestId.toString());
+    setActorActionError(null);
+    setActorFeedback(null);
+
+    try {
+      if (!ensureAuthorizedWriteAccess()) {
+        return;
+      }
+
+      await Promise.resolve(
+        cancelContactRequestReducer({
+          agentDbId: activeActor.id,
+          requestId,
+        })
+      );
+      setActorFeedback(`Canceled contact request #${requestId.toString()}.`);
+    } catch (error) {
+      setActorActionError(
+        error instanceof Error ? error.message : 'Unable to cancel the contact request'
+      );
+    } finally {
+      setApprovalActionRequestId(null);
+    }
+  }
+
   async function handleAcceptThreadInvite(inviteId: bigint) {
     if (!activeActor) {
       return;
@@ -2338,7 +2526,7 @@ function AuthenticatedInboxPage() {
       }
 
       await Promise.resolve(
-        rejectThreadInviteReducer({
+        declineThreadInviteReducer({
           agentDbId: activeActor.id,
           inviteId,
         })
@@ -2386,6 +2574,7 @@ function AuthenticatedInboxPage() {
       await Promise.resolve(
         addContactAllowlistEntryReducer({
           agentDbId: activeActor.id,
+          kind: { tag: 'Agent' },
           agentPublicIdentity: resolved.selected.publicIdentity,
           email: undefined,
         })
@@ -2418,6 +2607,7 @@ function AuthenticatedInboxPage() {
       await Promise.resolve(
         addContactAllowlistEntryReducer({
           agentDbId: activeActor.id,
+          kind: { tag: 'Email' },
           agentPublicIdentity: undefined,
           email: allowlistEmailInput.trim(),
         })
@@ -2449,7 +2639,6 @@ function AuthenticatedInboxPage() {
 
       await Promise.resolve(
         removeContactAllowlistEntryReducer({
-          agentDbId: activeActor.id,
           entryId,
         })
       );
@@ -2670,13 +2859,13 @@ function AuthenticatedInboxPage() {
     const map = new Map<bigint, ThreadReadState>();
     if (!activeActor) return map;
 
-    for (const readState of threadReadStates) {
+    for (const readState of ownThreadParticipants) {
       if (readState.agentDbId === activeActor.id) {
         map.set(readState.threadId, readState);
       }
     }
     return map;
-  }, [activeActor, threadReadStates]);
+  }, [activeActor, ownThreadParticipants]);
 
   useEffect(() => {
     if (!activeActor || activeActorDeregistered) return;
@@ -2705,7 +2894,6 @@ function AuthenticatedInboxPage() {
       setComposeResolvedTargets([]);
       setComposeFirstMessage('');
       setComposeThreadTitle('');
-      setComposeThreadLocked(false);
       setComposeSelectedActorIds([]);
       setPendingParticipantLookupSlug('');
       setResolvedAddTargets([]);
@@ -2722,7 +2910,7 @@ function AuthenticatedInboxPage() {
     }
 
     let cancelled = false;
-    void loadStoredDeviceKeyMaterial(displayInbox.normalizedEmail)
+    void loadStoredDeviceKeyMaterial(displayInbox.email)
       .then(device => {
         if (cancelled) return;
         setCurrentDeviceId(device?.deviceId ?? null);
@@ -2812,7 +3000,7 @@ function AuthenticatedInboxPage() {
       return (
         bundle.targetDeviceId === targetDeviceId &&
         !bundle.consumedAt &&
-        (deviceKeyBundleNeverExpires(bundle) || isTimestampInFuture(bundle.expiresAt))
+        isTimestampInFuture(bundle.expiresAt)
       );
     });
     if (!matchingBundle) {
@@ -2841,14 +3029,17 @@ function AuthenticatedInboxPage() {
         }
 
         await importClaimedDeviceShare({
-          normalizedEmail: displayInbox.normalizedEmail,
+          email: displayInbox.email,
           device: pendingDeviceShareRequest.device,
           sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
-          bundleCiphertext: bundle.bundleCiphertext,
-          bundleIv: bundle.bundleIv,
-          bundleAlgorithm: bundle.bundleAlgorithm,
+          bundleCiphertext: toHex(bundle.bundleCiphertext),
+          bundleIv: toHex(bundle.bundleIv),
+          bundleAlgorithm:
+            bundle.bundleAlgorithm.tag === 'AesGcm256V1'
+              ? 'aes-gcm-256-device-share-v1'
+              : bundle.bundleAlgorithm.tag,
         });
-        await clearPendingDeviceShareKeyMaterial(displayInbox.normalizedEmail);
+        await clearPendingDeviceShareKeyMaterial(displayInbox.email);
         if (!claimIsCurrent() || !pendingRequestStillMatches()) return;
 
         setPendingDeviceShareRequest(null);
@@ -2923,7 +3114,7 @@ function AuthenticatedInboxPage() {
       return (
         bundle.targetDeviceId === currentDeviceId &&
         !bundle.consumedAt &&
-        (deviceKeyBundleNeverExpires(bundle) || isTimestampInFuture(bundle.expiresAt))
+        isTimestampInFuture(bundle.expiresAt)
       );
     });
     if (!matchingBundle) {
@@ -2940,7 +3131,7 @@ function AuthenticatedInboxPage() {
       }
     });
     void (async () => {
-      const device = await loadStoredDeviceKeyMaterial(displayInbox.normalizedEmail);
+      const device = await loadStoredDeviceKeyMaterial(displayInbox.email);
       if (!device || device.deviceId !== currentDeviceId) {
         return;
       }
@@ -2954,14 +3145,17 @@ function AuthenticatedInboxPage() {
       }
 
       const snapshot = await decryptClaimedDeviceShare({
-        normalizedEmail: displayInbox.normalizedEmail,
+        email: displayInbox.email,
         device,
         sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
-        bundleCiphertext: bundle.bundleCiphertext,
-        bundleIv: bundle.bundleIv,
-        bundleAlgorithm: bundle.bundleAlgorithm,
+        bundleCiphertext: toHex(bundle.bundleCiphertext),
+        bundleIv: toHex(bundle.bundleIv),
+        bundleAlgorithm:
+            bundle.bundleAlgorithm.tag === 'AesGcm256V1'
+              ? 'aes-gcm-256-device-share-v1'
+              : bundle.bundleAlgorithm.tag,
       });
-      const knownCurrentKeys = deviceKeyBundleNeverExpires(matchingBundle)
+      const knownCurrentKeys = deviceKeyBundleRequiresRotationConfirmation(matchingBundle)
         ? await loadKnownCurrentKeysForSnapshot(snapshot)
         : null;
       await importDeviceShareSnapshot(snapshot);
@@ -2974,7 +3168,7 @@ function AuthenticatedInboxPage() {
       if (!claimIsCurrent()) return;
 
       if (!activeActorIdentity) {
-        setActorFeedback('Rotated private keys imported on this device.');
+        setActorFeedback('Reset private keys imported on this device.');
         return;
       }
 
@@ -2985,8 +3179,8 @@ function AuthenticatedInboxPage() {
         if (claimIsCurrent()) {
           setActorActionError(
             keyRefreshError instanceof Error
-              ? `Rotated private keys were imported, but the local key status could not be refreshed. ${keyRefreshError.message}`
-              : 'Rotated private keys were imported, but the local key status could not be refreshed.'
+              ? `Reset private keys were imported, but the local key status could not be refreshed. ${keyRefreshError.message}`
+              : 'Reset private keys were imported, but the local key status could not be refreshed.'
           );
         }
         return;
@@ -3000,7 +3194,7 @@ function AuthenticatedInboxPage() {
       setSessionError(nextError);
       setShowKeysRecoveryDialog(Boolean(nextIssue));
       setActorFeedback(
-        nextError ? null : 'Rotated private keys imported on this device.'
+        nextError ? null : 'Reset private keys imported on this device.'
       );
     })()
       .catch(claimError => {
@@ -3030,7 +3224,7 @@ function AuthenticatedInboxPage() {
     vaultUnlocked,
   ]);
 
-  const visibleThreads = useMemo(() => {
+  const visible_threads = useMemo(() => {
     if (!activeActor) return [];
     return threads
       .filter(thread =>
@@ -3068,7 +3262,7 @@ function AuthenticatedInboxPage() {
       const involvesLookup =
         request.requesterPublicIdentity === lookupTargetActor.publicIdentity ||
         request.targetPublicIdentity === lookupTargetActor.publicIdentity;
-      const isPending = request.status === 'pending';
+      const isPending = request.status.tag === 'Pending';
 
       return involvesActive && involvesLookup && isPending;
     }).length;
@@ -3080,7 +3274,7 @@ function AuthenticatedInboxPage() {
       let totalActiveThreads = 0;
       const dedicatedMembers = new Set<bigint>();
 
-      for (const thread of visibleThreads) {
+      for (const thread of visible_threads) {
         const participants = participantsByThreadId.get(thread.id) ?? [];
         const hasTarget = participants.some(participant => participant.agentDbId === lookupTargetActorRow.id);
 
@@ -3124,27 +3318,28 @@ function AuthenticatedInboxPage() {
     participantsByThreadId,
     readStateByThreadId,
     shouldShowLookupPanel,
-    visibleThreads,
+    visible_threads,
   ]);
   const unreadCountByThreadId = useMemo(() => {
     const map = new Map<bigint, number>();
 
-    for (const thread of visibleThreads) {
+    for (const thread of visible_threads) {
       const readState = readStateByThreadId.get(thread.id);
+      const lastAssigned = thread.lastMessageId;
       const unreadCount =
-        readState?.lastReadThreadSeq === undefined
-          ? Number(thread.lastMessageSeq)
-          : Number(thread.lastMessageSeq - readState.lastReadThreadSeq);
+        readState?.lastReadMessageId === undefined
+          ? Number(lastAssigned)
+          : Number(lastAssigned - readState.lastReadMessageId);
 
       map.set(thread.id, Math.max(0, unreadCount));
     }
 
     return map;
-  }, [readStateByThreadId, visibleThreads]);
+  }, [readStateByThreadId, visible_threads]);
   const filteredThreads = useMemo(() => {
     const normalizedQuery = threadSearchQuery.trim().toLowerCase();
 
-    return visibleThreads.filter(thread => {
+    return visible_threads.filter(thread => {
       const readState = readStateByThreadId.get(thread.id);
       const archived = readState?.archived ?? false;
       const unreadCount = unreadCountByThreadId.get(thread.id) ?? 0;
@@ -3182,7 +3377,7 @@ function AuthenticatedInboxPage() {
     participantsByThreadId,
     readStateByThreadId,
     unreadCountByThreadId,
-    visibleThreads,
+    visible_threads,
   ]);
   const threadRailPageCount = useMemo(
     () => Math.max(1, Math.ceil(filteredThreads.length / THREAD_LIST_PAGE_SIZE)),
@@ -3286,7 +3481,6 @@ function AuthenticatedInboxPage() {
     setComposeResolvedTargets([]);
     setComposeSelectedActorIds([]);
     setComposeThreadTitle('');
-    setComposeThreadLocked(false);
     setComposeFirstMessage('');
     setActorActionError(null);
     setActorFeedback(null);
@@ -3321,7 +3515,7 @@ function AuthenticatedInboxPage() {
       if (requestedThreadId === selectedThreadId) {
         return;
       }
-      if (visibleThreads.some(thread => thread.id === requestedThreadId)) {
+      if (visible_threads.some(thread => thread.id === requestedThreadId)) {
         return deferEffectStateUpdate(() => {
           setSelectedThreadId(requestedThreadId);
         });
@@ -3334,7 +3528,7 @@ function AuthenticatedInboxPage() {
             threadId: requestedThreadId,
           })
           .then(page => {
-            if (cancelled || page.threads.length === 0) return;
+            if (cancelled || !page || page.threads.length === 0) return;
             mergeVisibleThreadPage(page, false, false);
             setSelectedThreadId(requestedThreadId);
           })
@@ -3354,7 +3548,7 @@ function AuthenticatedInboxPage() {
     mergeVisibleThreadPage,
     search.thread,
     selectedThreadId,
-    visibleThreads,
+    visible_threads,
   ]);
 
   useEffect(() => {
@@ -3366,11 +3560,11 @@ function AuthenticatedInboxPage() {
         // Malformed thread ids fall back to default selection.
       }
     }
-    if (selectedThreadId !== null && visibleThreads.some(thread => thread.id === selectedThreadId)) return;
+    if (selectedThreadId !== null && visible_threads.some(thread => thread.id === selectedThreadId)) return;
     return deferEffectStateUpdate(() => {
-      setSelectedThreadId(visibleThreads[0]?.id ?? null);
+      setSelectedThreadId(visible_threads[0]?.id ?? null);
     });
-  }, [search.thread, selectedThreadId, visibleThreads]);
+  }, [search.thread, selectedThreadId, visible_threads]);
 
   useEffect(() => {
     const requestedLookup = search.lookup?.trim() ?? '';
@@ -3422,12 +3616,12 @@ function AuthenticatedInboxPage() {
   }, [activeActor, navigate, resolveVisiblePublishedActors, search.thread, search.compose, search.lookup, search.tab]);
 
   const selectedThread = useMemo(
-    () => visibleThreads.find(thread => thread.id === selectedThreadId),
-    [selectedThreadId, visibleThreads]
+    () => visible_threads.find(thread => thread.id === selectedThreadId),
+    [selectedThreadId, visible_threads]
   );
   const selectedThreadSignal = useMemo(
-    () => liveThreadSignals.find(thread => thread.id === selectedThreadId),
-    [selectedThreadId, liveThreadSignals]
+    () => threads.find(thread => thread.id === selectedThreadId) ?? null,
+    [selectedThreadId, threads]
   );
   useEffect(() => {
     shouldAutoScrollTimelineRef.current = true;
@@ -3455,14 +3649,15 @@ function AuthenticatedInboxPage() {
     });
     const loadedThreadMessages = pagedThreadMessagesRef.current
       .filter(message => message.threadId === selectedThread.id)
-      .sort((left, right) => Number(left.threadSeq - right.threadSeq));
-    const latestLoadedThreadSeq =
-      loadedThreadMessages[loadedThreadMessages.length - 1]?.threadSeq ?? 0n;
-    const latestVisibleThreadSeq =
-      selectedThreadSignal?.lastMessageSeq ?? selectedThread.lastMessageSeq;
+      .sort((left, right) => Number(left.id - right.id));
+    const latestLoadedMessageId =
+      loadedThreadMessages[loadedThreadMessages.length - 1]?.id ?? 0n;
+    const visibleLastMessageId =
+      selectedThreadSignal?.lastMessageId ?? selectedThread.lastMessageId;
+    const latestVisibleMessageId = visibleLastMessageId;
     if (
       loadedThreadMessages.length > 0 &&
-      latestVisibleThreadSeq <= latestLoadedThreadSeq
+      latestVisibleMessageId <= latestLoadedMessageId
     ) {
       cancelLoadingStart();
       setThreadHistoryLoading(false);
@@ -3471,25 +3666,25 @@ function AuthenticatedInboxPage() {
       };
     }
     const shouldLoadMissingTail =
-      loadedThreadMessages.length > 0 && latestVisibleThreadSeq > latestLoadedThreadSeq;
+      loadedThreadMessages.length > 0 && latestVisibleMessageId > latestLoadedMessageId;
     const pagePromise = shouldLoadMissingTail
-      ? loadVisibleThreadMessagesInSeqRange({
+      ? loadVisibleThreadMessagesAfterId({
           conn: liveConnection,
           agentDbId: activeActor.id,
           threadId: selectedThread.id,
-          fromThreadSeq: latestLoadedThreadSeq + 1n,
-          toThreadSeq: latestVisibleThreadSeq,
+          fromMessageId: latestLoadedMessageId + 1n,
+          toMessageId: latestVisibleMessageId,
           isCancelled: () => cancelled,
         }).then(page => ({
           messages: page.messages,
           secretEnvelopes: page.secretEnvelopes,
-          nextBeforeThreadSeq: undefined,
+          nextBeforeMessageId: undefined,
         }))
       : liveConnection.procedures.listThreadMessages({
           agentDbId: activeActor.id,
           threadId: selectedThread.id,
-          beforeThreadSeq: undefined,
-          limit: BigInt(THREAD_TIMELINE_PAGE_SIZE),
+          beforeMessageId: undefined,
+          limit: THREAD_TIMELINE_PAGE_SIZE,
         });
 
     void pagePromise
@@ -3501,7 +3696,7 @@ function AuthenticatedInboxPage() {
         );
         if (!shouldLoadMissingTail) {
           setThreadHistoryExhausted(
-            page.nextBeforeThreadSeq === undefined || page.messages.length === 0
+            page.nextBeforeMessageId === undefined || page.messages.length === 0
           );
         }
       })
@@ -3525,7 +3720,7 @@ function AuthenticatedInboxPage() {
     activeActor,
     liveConnection,
     selectedThread,
-    selectedThreadSignal?.lastMessageSeq,
+    selectedThreadSignal?.lastMessageId,
   ]);
   useEffect(() => {
     if (!selectedThread) {
@@ -3539,11 +3734,45 @@ function AuthenticatedInboxPage() {
     () => (selectedThread ? participantsByThreadId.get(selectedThread.id) ?? [] : []),
     [participantsByThreadId, selectedThread]
   );
+  const selectedFullThreadParticipants = useMemo(
+    () =>
+      selectedThread
+        ? pagedThreadParticipants.filter(
+            participant => participant.threadId === selectedThread.id && participant.active
+          )
+        : [],
+    [pagedThreadParticipants, selectedThread]
+  );
+  const selectedThreadIdForFullMembership = selectedThread?.id ?? null;
+  useEffect(() => {
+    if (!selectedThreadIdForFullMembership || !liveConnection) {
+      return;
+    }
+
+    let cancelled = false;
+    void readAllThreadParticipants(liveConnection, selectedThreadIdForFullMembership)
+      .then(page => {
+        if (cancelled) return;
+        mergeThreadParticipantPage(page);
+      })
+      .catch(() => {
+        // Best-effort UI hydration. Send/admin actions fetch this membership again
+        // and surface actionable errors before mutating.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    liveConnection,
+    mergeThreadParticipantPage,
+    selectedThreadIdForFullMembership,
+  ]);
   const selectedThreadPendingInvites = useMemo(
     () =>
       selectedThread
         ? threadInvites.filter(invite => {
-            return invite.threadId === selectedThread.id && invite.status === 'pending';
+            return invite.threadId === selectedThread.id && invite.status.tag === 'Pending';
           })
         : [],
     [selectedThread, threadInvites]
@@ -3566,7 +3795,7 @@ function AuthenticatedInboxPage() {
       }
       return pagedThreadMessages
         .filter(message => message.threadId === selectedThread.id)
-        .sort((left, right) => Number(left.threadSeq - right.threadSeq));
+        .sort((left, right) => Number(left.id - right.id));
     },
     [pagedThreadMessages, selectedThread]
   );
@@ -3599,11 +3828,18 @@ function AuthenticatedInboxPage() {
     const lookupPublicKeys = async () => {
       const rows: AgentPublicKey[] = [];
       for (let index = 0; index < requests.length; index += AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE) {
+        const batch = requests
+          .slice(index, index + AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE)
+          .map(request => ({
+            agentDbId: request.agentDbId,
+            keyKind:
+              request.keyKind === 'encryption'
+                ? ({ tag: 'Encryption' } as const)
+                : ({ tag: 'Signing' } as const),
+            keyVersion: request.keyVersion,
+          }));
         rows.push(
-          ...(await liveConnection.procedures.lookupAgentPublicKeys({
-            agentDbId: activeActor.id,
-            requests: requests.slice(index, index + AGENT_PUBLIC_KEY_LOOKUP_BATCH_SIZE),
-          }))
+          ...(await liveConnection.procedures.lookupAgentPublicKeys({ requests: batch }))
         );
       }
       return rows;
@@ -3641,19 +3877,16 @@ function AuthenticatedInboxPage() {
     if (!selectedThread) return [];
 
     const seenRotationKeys = new Set<string>();
-    return selectedThreadParticipants
+    return selectedFullThreadParticipants
       .flatMap(participant => {
         const actor = actorById.get(participant.agentDbId);
         if (!actor) return [];
 
         return (publicKeysByActorId.get(participant.agentDbId) ?? []).flatMap(publicKey => {
-          if (compareTimestamp(publicKey.createdAt, participant.joinedAt) <= 0) {
+          if (compareTimestamp(publicKey.createdAt, participant.createdAt) <= 0) {
             return [];
           }
-          const rotationKey =
-            publicKey.keyBundleId !== undefined
-              ? `${publicKey.agentDbId.toString()}:${publicKey.keyBundleId.toString()}`
-              : publicKeyRowKey(publicKey);
+          const rotationKey = publicKeyRowKey(publicKey);
           if (seenRotationKeys.has(rotationKey)) {
             return [];
           }
@@ -3671,7 +3904,7 @@ function AuthenticatedInboxPage() {
         if (timeOrder !== 0) return timeOrder;
         return publicKeyRowKey(left.publicKey).localeCompare(publicKeyRowKey(right.publicKey));
       });
-  }, [actorById, publicKeysByActorId, selectedThread, selectedThreadParticipants]);
+  }, [actorById, publicKeysByActorId, selectedFullThreadParticipants, selectedThread]);
 
   const selectedThreadTimeline = useMemo(
     () => mergeThreadTimeline(selectedThreadMessages, selectedThreadKeyRotations),
@@ -3710,14 +3943,14 @@ function AuthenticatedInboxPage() {
       ),
     [selectedThreadTimeline, selectedThreadTimelineWindowEnd, selectedThreadTimelineWindowStart]
   );
-  const earliestSelectedThreadMessageSeq = selectedThreadMessages[0]?.threadSeq;
+  const earliestSelectedThreadMessageId = selectedThreadMessages[0]?.id;
   const canPageOlderTimeline = threadTimelinePage < threadTimelinePageCount;
   const canRequestOlderThreadMessages = Boolean(
     liveConnection &&
       activeActor &&
       selectedThread &&
-      earliestSelectedThreadMessageSeq &&
-      earliestSelectedThreadMessageSeq > 1n &&
+      earliestSelectedThreadMessageId &&
+      earliestSelectedThreadMessageId > 0n &&
       !threadHistoryExhausted
   );
   const canLoadNewerTimeline = threadTimelinePage > 1;
@@ -3726,8 +3959,8 @@ function AuthenticatedInboxPage() {
       !liveConnection ||
       !activeActor ||
       !selectedThread ||
-      !earliestSelectedThreadMessageSeq ||
-      earliestSelectedThreadMessageSeq <= 1n ||
+      !earliestSelectedThreadMessageId ||
+      earliestSelectedThreadMessageId <= 0n ||
       threadHistoryLoading ||
       threadHistoryExhausted
     ) {
@@ -3740,14 +3973,14 @@ function AuthenticatedInboxPage() {
       const page = await liveConnection.procedures.listThreadMessages({
         agentDbId: activeActor.id,
         threadId: selectedThread.id,
-        beforeThreadSeq: earliestSelectedThreadMessageSeq,
-        limit: BigInt(THREAD_TIMELINE_PAGE_SIZE),
+        beforeMessageId: earliestSelectedThreadMessageId,
+        limit: THREAD_TIMELINE_PAGE_SIZE,
       });
       setPagedThreadMessages(current => mergeRowsById(current, page.messages));
       setPagedThreadSecretEnvelopes(current =>
         mergeRowsById(current, page.secretEnvelopes)
       );
-      if (page.nextBeforeThreadSeq === undefined || page.messages.length === 0) {
+      if (page.nextBeforeMessageId === undefined || page.messages.length === 0) {
         setThreadHistoryExhausted(true);
       }
       if (page.messages.length > 0) {
@@ -3762,7 +3995,7 @@ function AuthenticatedInboxPage() {
     }
   }, [
     activeActor,
-    earliestSelectedThreadMessageSeq,
+    earliestSelectedThreadMessageId,
     liveConnection,
     selectedThread,
     threadHistoryExhausted,
@@ -3850,43 +4083,52 @@ function AuthenticatedInboxPage() {
       return;
     }
     anchoredThreadIdRef.current = currentId;
-    const nextUnreadAnchorSeq =
+    const nextUnreadAnchorMessageId =
       currentId === null
         ? null
-        : readStateByThreadId.get(currentId)?.lastReadThreadSeq ?? null;
+        : readStateByThreadId.get(currentId)?.lastReadMessageId ?? null;
     return deferEffectStateUpdate(() => {
-      setUnreadAnchorSeq(nextUnreadAnchorSeq);
+      setUnreadAnchorMessageId(nextUnreadAnchorMessageId);
     });
   }, [selectedThread?.id, readStateByThreadId]);
 
-  const activeParticipant = useMemo(
+  const activeParticipant = useMemo<FullThreadParticipant | ThreadReadState | undefined>(
     () =>
       activeActor && selectedThread
-        ? selectedThreadParticipants.find(participant => participant.agentDbId === activeActor.id)
+        ? pagedThreadParticipants.find(
+            participant =>
+              participant.threadId === selectedThread.id &&
+              participant.agentDbId === activeActor.id &&
+              participant.active
+          ) ??
+          ownThreadParticipants.find(
+            participant =>
+              participant.threadId === selectedThread.id &&
+              participant.agentDbId === activeActor.id &&
+              participant.active
+          )
         : undefined,
-    [activeActor, selectedThread, selectedThreadParticipants]
+    [activeActor, ownThreadParticipants, pagedThreadParticipants, selectedThread]
   );
 
-  // senderSeq is deprecated; the participant's cached lastSent* fields are the
-  // source of truth for the sender's most recent secretVersion / membership.
+  // The new schema dropped `lastSentMembershipVersion` from the participant
+  // row. Derive the sender state from the thread's current membership version
+  // — the participant only retains `lastSentSecretVersion` (0 = never sent).
   const latestSelectedThreadSenderState = useMemo<SenderSecretVersionState | undefined>(() => {
+    const lastSentSecretVersion = activeParticipant?.lastSentSecretVersion ?? 0;
     if (
       !selectedThread ||
-      activeParticipant?.lastSentMembershipVersion === undefined ||
-      activeParticipant.lastSentSecretVersion === undefined
+      !activeParticipant ||
+      lastSentSecretVersion === 0
     ) {
       return undefined;
     }
     return {
       threadId: selectedThread.id,
-      membershipVersion: activeParticipant.lastSentMembershipVersion,
-      secretVersion: activeParticipant.lastSentSecretVersion,
+      membershipVersion: selectedThread.membershipVersion,
+      secretVersion: lastSentSecretVersion,
     };
-  }, [
-    activeParticipant?.lastSentMembershipVersion,
-    activeParticipant?.lastSentSecretVersion,
-    selectedThread,
-  ]);
+  }, [activeParticipant, selectedThread]);
 
   const requiresSecretRotation = useMemo(
     () =>
@@ -3913,7 +4155,7 @@ function AuthenticatedInboxPage() {
       .filter(
         actor =>
           (!activeActor || actor.id !== activeActor.id) &&
-          !isUnavailableForChatInboxAgentState(actor.masumiRegistrationState)
+          !isUnavailableForChatInboxAgentState(actor.masumiRegistrationState?.tag)
       )
       .sort((left, right) => describeActor(left).localeCompare(describeActor(right)));
     for (const actor of composeResolvedTargets) {
@@ -3932,26 +4174,29 @@ function AuthenticatedInboxPage() {
     const activeIds = new Set(
       selectedThreadParticipants.map(participant => participant.agentDbId.toString())
     );
-    const pendingInviteIdentities = new Set(
-      selectedThreadPendingInvites.map(invite => invite.inviteePublicIdentity)
+    const pendingInviteAgentIds = new Set(
+      selectedThreadPendingInvites.map(invite => invite.inviteeAgentDbId.toString())
     );
     return actors
       .filter(actor => {
         return (
           !activeIds.has(actor.id.toString()) &&
-          !pendingInviteIdentities.has(actor.publicIdentity) &&
-          !isUnavailableForChatInboxAgentState(actor.masumiRegistrationState)
+          !pendingInviteAgentIds.has(actor.id.toString()) &&
+          !isUnavailableForChatInboxAgentState(actor.masumiRegistrationState?.tag)
         );
       })
       .sort((left, right) => describeActor(left).localeCompare(describeActor(right)));
   }, [actors, selectedThread, selectedThreadParticipants, selectedThreadPendingInvites]);
   const addParticipantOptions = useMemo(() => {
     const options: Array<Agent | ResolvedPublishedActor> = [...availableAddTargets];
+    const inviteeIdentities = selectedThreadPendingInvites
+      .map(invite => actorById.get(invite.inviteeAgentDbId)?.publicIdentity)
+      .filter((value): value is string => Boolean(value));
     const participantPublicIdentities = new Set([
       ...selectedThreadParticipants
         .map(participant => actorById.get(participant.agentDbId)?.publicIdentity)
         .filter((value): value is string => Boolean(value)),
-      ...selectedThreadPendingInvites.map(invite => invite.inviteePublicIdentity),
+      ...inviteeIdentities,
     ]);
     for (const actor of resolvedAddTargets) {
       if (
@@ -4016,37 +4261,39 @@ function AuthenticatedInboxPage() {
 
         let messageTrustStatus: DecryptedMessageState['trustStatus'] = 'trusted';
         let messageTrustWarning: string | null = null;
-        if (senderActor.inboxId === activeActor.inboxId) {
+        let rotationToConfirm: PeerKeyTuple | null = null;
+        if (senderActor.accountId === activeActor.accountId) {
           messageTrustStatus = 'self';
         } else {
-          const observedTuple = tupleFromVisibleActor(senderActor);
-          // First-contact trust auto-pin only applies to the very first
-          // message in a thread. senderSeq is deprecated (always 0n on new
-          // messages) so the gating now relies on threadSeq alone.
-          const allowFirstContactTrust = message.threadSeq === 1n;
-          const comparison = allowFirstContactTrust
-            ? autoPinPeerIfUnknown(senderActor.publicIdentity, observedTuple)
-            : comparePinnedPeer(senderActor.publicIdentity, observedTuple);
-          if (comparison.status === 'unpinned') {
-            messageTrustStatus = 'unpinned-first-seen';
-            if (!allowFirstContactTrust) {
-              messageTrustWarning = `${senderActor.slug} keys are not trusted for this existing contact. Verify out-of-band before trusting.`;
-            }
-          } else if (comparison.status === 'rotated') {
-            const messageSigningKey = findVersionedKey(
-              senderActor,
-              publicKeysByActorId.get(senderActor.id) ?? [],
-              'signing',
-              message.signingKeyVersion
-            );
-            const messageTrusted = Boolean(messageSigningKey) && isInboundSignatureTrusted(
-              senderActor.publicIdentity,
-              message.signingKeyVersion,
-              messageSigningKey ?? ''
-            );
-            if (!messageTrusted) {
-              messageTrustStatus = 'untrusted-rotation';
-              messageTrustWarning = `${senderActor.slug} has rotated keys. Message signature is not trusted.`;
+          const senderPublicKeys = publicKeysByActorId.get(senderActor.id) ?? [];
+          const observedTuple = tupleFromAgentPublicKeyRows(senderActor, senderPublicKeys);
+          if (!observedTuple) {
+            messageTrustStatus = 'untrusted-rotation';
+            messageTrustWarning = `${senderActor.slug} keys could not be resolved for trust verification.`;
+          } else {
+            const allowFirstContactTrust =
+              selectedThread?.messageCount === 1n && selectedThread.lastMessageId === message.id;
+            const comparison = allowFirstContactTrust
+              ? autoPinPeerIfUnknown(senderActor.publicIdentity, observedTuple)
+              : comparePinnedPeer(senderActor.publicIdentity, observedTuple);
+            if (comparison.status === 'unpinned') {
+              messageTrustStatus = 'unpinned-first-seen';
+              if (!allowFirstContactTrust) {
+                messageTrustWarning = `${senderActor.slug} keys are not trusted for this existing contact. Verify out-of-band before trusting.`;
+              }
+            } else if (comparison.status === 'rotated') {
+              const messageSigningKey = findVersionedKey(
+                senderActor,
+                senderPublicKeys,
+                'signing',
+                message.signingKeyVersion
+              );
+              if (!messageSigningKey) {
+                messageTrustStatus = 'untrusted-rotation';
+                messageTrustWarning = `${senderActor.slug} has rotated keys, but the signing key for version ${message.signingKeyVersion} could not be found.`;
+              } else {
+                rotationToConfirm = observedTuple;
+              }
             }
           }
         }
@@ -4145,14 +4392,13 @@ function AuthenticatedInboxPage() {
               threadId: message.threadId,
               senderActorId: senderActor.id,
               senderPublicIdentity: senderActor.publicIdentity,
-              senderSeq: message.senderSeq,
               senderMessageId: message.senderMessageId,
               secretVersion: message.secretVersion,
               signingKeyVersion: message.signingKeyVersion,
-              ciphertext: message.ciphertext,
-              iv: message.iv,
-              cipherAlgorithm: message.cipherAlgorithm,
-              signature: message.signature,
+              ciphertext: toHex(message.ciphertext),
+              iv: toHex(message.iv),
+              cipherAlgorithm: normalizeMessageCipherAlgorithm(message.cipherAlgorithm),
+              signature: toHex(message.signature),
               replyToMessageId: message.replyToMessageId ?? undefined,
             },
             envelope: {
@@ -4166,15 +4412,24 @@ function AuthenticatedInboxPage() {
               recipientEncryptionKeyVersion: envelope.recipientEncryptionKeyVersion,
               senderEncryptionKeyVersion: envelope.senderEncryptionKeyVersion,
               signingKeyVersion: envelope.signingKeyVersion,
-              wrappedSecretCiphertext: envelope.wrappedSecretCiphertext,
-              wrappedSecretIv: envelope.wrappedSecretIv,
-              wrapAlgorithm: envelope.wrapAlgorithm,
-              signature: envelope.signature,
+              wrappedSecretCiphertext: toHex(envelope.wrappedSecretCiphertext),
+              wrappedSecretIv: toHex(envelope.wrappedSecretIv),
+              wrapAlgorithm: normalizeEnvelopeWrapAlgorithm(envelope.wrapAlgorithm),
+              signature: toHex(envelope.signature),
             },
             senderEncryptionPublicKey,
             messageSigningPublicKey,
             envelopeSigningPublicKey,
           });
+          if (rotationToConfirm) {
+            try {
+              confirmPeerKeyRotation(senderActor.publicIdentity, rotationToConfirm);
+            } catch {
+              messageTrustWarning =
+                messageTrustWarning ??
+                `${senderActor.slug} rotated keys, but the local trust store could not be updated.`;
+            }
+          }
           const parsed = parseDecryptedMessagePlaintext(plaintext);
           const unsupportedReasons = [
             ...(parsed.invalidStructuredEnvelopeReason
@@ -4313,8 +4568,8 @@ function AuthenticatedInboxPage() {
     }
   }
 
-  async function ensureCurrentDeviceRegistration(normalizedEmail: string): Promise<DeviceKeyMaterial> {
-    const device = await getOrCreateDeviceKeyMaterial(normalizedEmail);
+  async function ensureCurrentDeviceRegistration(email: string): Promise<DeviceKeyMaterial> {
+    const device = await getOrCreateDeviceKeyMaterial(email);
     await Promise.resolve(
       registerDeviceReducer({
         deviceId: device.deviceId,
@@ -4322,7 +4577,7 @@ function AuthenticatedInboxPage() {
         platform: typeof navigator !== 'undefined' ? navigator.platform : undefined,
         deviceEncryptionPublicKey: device.keyPair.publicKey,
         deviceEncryptionKeyVersion: device.keyPair.keyVersion,
-        deviceEncryptionAlgorithm: device.keyPair.algorithm,
+        deviceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
       })
     );
     return device;
@@ -4341,17 +4596,21 @@ function AuthenticatedInboxPage() {
     setDeviceActionBusy(true);
 
     let publishedRotation = false;
+    let localRotationCommitted = false;
     try {
+      const publishedCurrent = await resolveActorPublicKeys(activeActor);
       const rotationPlan = await previewStoredAgentKeyRotation(toActorIdentity(activeActor), {
-        encryptionPublicKey: activeActor.currentEncryptionPublicKey,
-        encryptionKeyVersion: activeActor.currentEncryptionKeyVersion,
-        signingPublicKey: activeActor.currentSigningPublicKey,
-        signingKeyVersion: activeActor.currentSigningKeyVersion,
+        encryptionPublicKey: publishedCurrent.encryptionPublicKey,
+        encryptionKeyVersion: publishedCurrent.encryptionKeyVersion,
+        signingPublicKey: publishedCurrent.signingPublicKey,
+        signingKeyVersion: publishedCurrent.signingKeyVersion,
       });
-      const sourceDevice = await ensureCurrentDeviceRegistration(displayInbox.normalizedEmail);
+      const sourceDevice = await ensureCurrentDeviceRegistration(displayInbox.email);
       const normalizedRevokeDeviceIds = Array.from(new Set(revokeDeviceIds));
-      const rotationBundles: DeviceKeyBundleAttachment[] = [];
-      const rotationSnapshot = await exportInboxKeyShareSnapshot(displayInbox.normalizedEmail, {
+      const rotationBundles: Array<
+        Awaited<ReturnType<typeof buildApprovedDeviceShare>> & { targetDeviceId: string }
+      > = [];
+      const rotationSnapshot = await exportInboxKeyShareSnapshot(displayInbox.email, {
         overrides: [rotationPlan.nextSharedMaterial],
       });
 
@@ -4366,27 +4625,15 @@ function AuthenticatedInboxPage() {
         }
 
         const approvedShare = await buildApprovedDeviceShare({
-          normalizedEmail: displayInbox.normalizedEmail,
+          email: displayInbox.email,
           targetDeviceId: targetDevice.deviceId,
           targetDeviceEncryptionPublicKey: targetDevice.deviceEncryptionPublicKey,
           sourceDevice,
           snapshot: rotationSnapshot,
-          expiryMode: 'neverExpires',
         });
-
         rotationBundles.push({
-          deviceId: targetDevice.deviceId,
-          sourceDeviceId: approvedShare.sourceDeviceId,
-          sourceEncryptionPublicKey: approvedShare.sourceEncryptionPublicKey,
-          sourceEncryptionKeyVersion: approvedShare.sourceEncryptionKeyVersion,
-          sourceEncryptionAlgorithm: approvedShare.sourceEncryptionAlgorithm,
-          bundleCiphertext: approvedShare.bundleCiphertext,
-          bundleIv: approvedShare.bundleIv,
-          bundleAlgorithm: approvedShare.bundleAlgorithm,
-          sharedAgentCount: BigInt(approvedShare.sharedActorCount),
-          sharedKeyVersionCount: BigInt(approvedShare.sharedKeyVersionCount),
-          expiresAt: Timestamp.fromDate(approvedShare.expiresAt),
-          expiryMode: approvedShare.expiryMode,
+          ...approvedShare,
+          targetDeviceId: targetDevice.deviceId,
         });
       }
 
@@ -4394,30 +4641,68 @@ function AuthenticatedInboxPage() {
         rotateAgentKeysReducer({
           agentDbId: activeActor.id,
           encryptionPublicKey: rotationPlan.rotated.encryption.publicKey,
-          encryptionKeyVersion: rotationPlan.rotated.encryption.keyVersion,
-          encryptionAlgorithm: rotationPlan.rotated.encryption.algorithm,
+          keyBundleVersion: rotationPlan.rotated.encryption.keyVersion,
+          encryptionAlgorithm: { tag: 'EcdhP256V1' },
           signingPublicKey: rotationPlan.rotated.signing.publicKey,
-          signingKeyVersion: rotationPlan.rotated.signing.keyVersion,
-          signingAlgorithm: rotationPlan.rotated.signing.algorithm,
-          deviceKeyBundles: rotationBundles,
-          revokeDeviceIds: normalizedRevokeDeviceIds,
+          signingAlgorithm: { tag: 'EcdsaP256Sha256V1' },
         })
       );
       publishedRotation = true;
       await commitStoredAgentKeyRotation(rotationPlan);
+      localRotationCommitted = true;
       setActorKeyPair(rotationPlan.rotated);
       setLocalKeyIssue(null);
       setSessionError(null);
+
+      const sharedRotationDeviceIds: string[] = [];
+      const revokedRotationDeviceIds: string[] = [];
+      let deviceSyncError: unknown = null;
+
+      try {
+        for (const bundle of rotationBundles) {
+          await Promise.resolve(
+            shareDeviceKeyBundleReducer({
+              targetDeviceId: bundle.targetDeviceId,
+              sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
+              sourceEncryptionKeyVersion: bundle.sourceEncryptionKeyVersion,
+              sourceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
+              bundleCiphertext: fromHex(bundle.bundleCiphertext),
+              bundleIv: fromHex(bundle.bundleIv),
+              bundleAlgorithm: { tag: 'AesGcm256V1' },
+              sharedAgentCount: BigInt(bundle.sharedActorCount),
+              sharedKeyVersionCount: BigInt(bundle.sharedKeyVersionCount),
+            })
+          );
+          sharedRotationDeviceIds.push(bundle.targetDeviceId);
+        }
+
+        for (const deviceId of normalizedRevokeDeviceIds) {
+          await Promise.resolve(revokeDeviceReducer({ deviceId }));
+          revokedRotationDeviceIds.push(deviceId);
+        }
+      } catch (error) {
+        deviceSyncError = error;
+      }
+
       setShowKeysRecoveryDialog(false);
       setRotateSecret(true);
       setShowRotationSharePrompt(false);
       setActorFeedback(
-        rotationBundles.length > 0 || normalizedRevokeDeviceIds.length > 0
-          ? `Keys rotated. Shared to ${rotationBundles.length.toString()} device(s) and revoked ${normalizedRevokeDeviceIds.length.toString()} device(s).`
-          : 'Keys rotated. The next message will rotate the sender secret.'
+        sharedRotationDeviceIds.length > 0 || revokedRotationDeviceIds.length > 0
+          ? `Keys reset. Shared to ${sharedRotationDeviceIds.length.toString()} device(s) and revoked ${revokedRotationDeviceIds.length.toString()} device(s).`
+          : 'Keys reset. The next message will rotate the sender secret.'
       );
+      if (deviceSyncError) {
+        const message =
+          deviceSyncError instanceof Error
+            ? deviceSyncError.message
+            : 'Unable to finish device sharing or revocation.';
+        setActorActionError(
+          `Keys reset, but device sharing/revocation did not finish. Retry sharing from this device or revoke stale devices manually. ${message}`
+        );
+      }
     } catch (error) {
-      if (publishedRotation) {
+      if (publishedRotation && !localRotationCommitted) {
         setLocalKeyIssue('missing');
         setSessionError(
           'New keys were published, but this browser could not save the matching private keys locally. Recover them from another device or a backup before continuing.'
@@ -4454,7 +4739,7 @@ function AuthenticatedInboxPage() {
     setDeviceActionBusy(true);
 
     try {
-      const prepared = await prepareLocalDeviceShareRequest(displayInbox.normalizedEmail);
+      const prepared = await prepareLocalDeviceShareRequest(displayInbox.email);
       await Promise.resolve(
         registerDeviceReducer({
           deviceId: prepared.device.deviceId,
@@ -4462,7 +4747,7 @@ function AuthenticatedInboxPage() {
           platform: typeof navigator !== 'undefined' ? navigator.platform : undefined,
           deviceEncryptionPublicKey: prepared.device.keyPair.publicKey,
           deviceEncryptionKeyVersion: prepared.device.keyPair.keyVersion,
-          deviceEncryptionAlgorithm: prepared.device.keyPair.algorithm,
+          deviceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
         })
       );
       await Promise.resolve(
@@ -4513,7 +4798,7 @@ function AuthenticatedInboxPage() {
     setDeviceActionBusy(true);
 
     try {
-      const sourceDevice = await ensureCurrentDeviceRegistration(displayInbox.normalizedEmail);
+      const sourceDevice = await ensureCurrentDeviceRegistration(displayInbox.email);
       setVerifyingDeviceRequest(true);
       const request = await resolveVerifiedDeviceShareRequest({
         liveConnection,
@@ -4522,7 +4807,7 @@ function AuthenticatedInboxPage() {
       setVerifyingDeviceRequest(false);
 
       const approvedShare = await buildApprovedDeviceShare({
-        normalizedEmail: displayInbox.normalizedEmail,
+        email: displayInbox.email,
         targetDeviceId: request.deviceId,
         targetDeviceEncryptionPublicKey: request.deviceEncryptionPublicKey,
         sourceDevice,
@@ -4532,16 +4817,14 @@ function AuthenticatedInboxPage() {
       await Promise.resolve(
         approveDeviceShareReducer({
           requestId: request.requestId,
-          sourceDeviceId: approvedShare.sourceDeviceId,
           sourceEncryptionPublicKey: approvedShare.sourceEncryptionPublicKey,
           sourceEncryptionKeyVersion: approvedShare.sourceEncryptionKeyVersion,
-          sourceEncryptionAlgorithm: approvedShare.sourceEncryptionAlgorithm,
-          bundleCiphertext: approvedShare.bundleCiphertext,
-          bundleIv: approvedShare.bundleIv,
-          bundleAlgorithm: approvedShare.bundleAlgorithm,
+          sourceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
+          bundleCiphertext: fromHex(approvedShare.bundleCiphertext),
+          bundleIv: fromHex(approvedShare.bundleIv),
+          bundleAlgorithm: { tag: 'AesGcm256V1' },
           sharedAgentCount: BigInt(approvedShare.sharedActorCount),
           sharedKeyVersionCount: BigInt(approvedShare.sharedKeyVersionCount),
-          expiresAt: Timestamp.fromDate(approvedShare.expiresAt),
         })
       );
 
@@ -4599,11 +4882,11 @@ function AuthenticatedInboxPage() {
   }
 
   function assertLocalRecipientCanReceiveChats(target: Agent): void {
-    if (!isUnavailableForChatInboxAgentState(target.masumiRegistrationState)) {
+    if (!isUnavailableForChatInboxAgentState(target.masumiRegistrationState?.tag)) {
       return;
     }
 
-    const reason = isFailedRegistrationInboxAgentState(target.masumiRegistrationState)
+    const reason = isFailedRegistrationInboxAgentState(target.masumiRegistrationState?.tag)
       ? 'has an invalid Masumi registration'
       : 'is deregistered';
     throw new Error(
@@ -4614,7 +4897,7 @@ function AuthenticatedInboxPage() {
   async function assertRecipientCanReceiveChats(
     target: Agent | ResolvedPublishedActor
   ): Promise<void> {
-    if ('normalizedEmail' in target) {
+    if ('email' in target) {
       assertLocalRecipientCanReceiveChats(target);
       return;
     }
@@ -4638,9 +4921,9 @@ function AuthenticatedInboxPage() {
   async function resolveRecipientPublicKeys(
     target: Agent | ResolvedPublishedActor
   ): Promise<ActorPublicKeys> {
-    if ('normalizedEmail' in target) {
+    if ('email' in target) {
       assertLocalRecipientCanReceiveChats(target);
-      return toActorPublicKeys(target);
+      return resolveActorPublicKeys(target);
     }
     if (!liveConnection) {
       throw new Error('Sign in and connect to SpacetimeDB before sending messages.');
@@ -4656,6 +4939,49 @@ function AuthenticatedInboxPage() {
     }
 
     return toPublishedActorPublicKeys(publishedActor);
+  }
+
+  async function resolveActorPublicKeys(actor: Agent): Promise<ActorPublicKeys> {
+    if (!liveConnection) {
+      throw new Error('Sign in and connect to SpacetimeDB before sending messages.');
+    }
+
+    const rows = await liveConnection.procedures.lookupAgentPublicKeys({
+      requests: [
+        {
+          agentDbId: actor.id,
+          keyKind: { tag: 'Encryption' },
+          keyVersion: actor.currentKeyBundleVersion,
+        },
+        {
+          agentDbId: actor.id,
+          keyKind: { tag: 'Signing' },
+          keyVersion: actor.currentKeyBundleVersion,
+        },
+      ],
+    });
+    setAgentPublicKeys(current => mergePublicKeyRows(current, rows));
+
+    const encryptionPublicKey = findVersionedKey(
+      actor,
+      rows,
+      'encryption',
+      actor.currentKeyBundleVersion
+    );
+    const signingPublicKey = findVersionedKey(
+      actor,
+      rows,
+      'signing',
+      actor.currentKeyBundleVersion
+    );
+    if (!encryptionPublicKey || !signingPublicKey) {
+      throw new Error(`Public keys for ${actor.slug} are unavailable.`);
+    }
+
+    return toActorPublicKeys(actor, {
+      encryptionPublicKey,
+      signingPublicKey,
+    });
   }
 
   async function handleResolveAddParticipant() {
@@ -4730,7 +5056,7 @@ function AuthenticatedInboxPage() {
     }
     setImportedRotationKeyConfirmation(importedRotationStatus);
     setActorActionError(
-      'Rotated private keys were imported automatically on this browser. Confirm them locally before sending.'
+      'Reset private keys were imported automatically on this browser. Confirm them locally before sending.'
     );
     return false;
   }
@@ -4840,19 +5166,20 @@ function AuthenticatedInboxPage() {
 
         const recipientKeys = await resolveRecipientPublicKeys(recipient);
         const targetPublicIdentity = actorOptionId(recipient);
+        const targetAgentDbId = actorOptionAgentDbId(recipient);
         const visibleState = readCurrentVisibleState();
         let pendingRequest =
           visibleState.contactRequests.find(request => {
             return (
               request.requesterAgentDbId === activeActor.id &&
               request.targetPublicIdentity === targetPublicIdentity &&
-              request.status === 'pending'
+              request.status.tag === 'Pending'
             );
           }) ?? null;
         const visibleDirectThreads = findDirectThreads(
           visibleState.threads,
-          activeActor,
-          targetPublicIdentity
+          activeActor.id,
+          targetAgentDbId
         );
         const pendingThreadId = pendingRequest?.threadId ?? null;
         let thread: Thread | null =
@@ -4864,7 +5191,7 @@ function AuthenticatedInboxPage() {
           pendingRequest = null;
         }
 
-        if (pendingRequest?.messageCount && pendingRequest.messageCount > 0n) {
+        if (pendingRequest) {
           throw new Error('A pending contact request already exists for this actor pair.');
         }
 
@@ -4879,6 +5206,8 @@ function AuthenticatedInboxPage() {
           },
           allowFirstContactTrust: !thread,
         });
+        const activeActorKeys = await resolveActorPublicKeys(activeActor);
+        assertActorKeyPairMatchesPublicKeys(activeActorKeys, actorKeyPair);
 
         if (!thread && !pendingRequest) {
           const existingThreadIds = new Set(
@@ -4887,16 +5216,15 @@ function AuthenticatedInboxPage() {
 
           try {
             await Promise.resolve(
-              createDirectThreadReducer({
+              createDirectThread({
                 agentDbId: activeActor.id,
                 otherAgentPublicIdentity: targetPublicIdentity,
-                membershipLocked: undefined,
                 title: composeThreadTitle.trim() || undefined,
               })
             );
             thread = await waitForNewDirectThread({
               ownActor: activeActor,
-              otherPublicIdentity: targetPublicIdentity,
+              otherActorId: targetAgentDbId,
               existingThreadIds,
             });
           } catch (error) {
@@ -4910,33 +5238,29 @@ function AuthenticatedInboxPage() {
               threadId: pendingThreadId,
               senderActorId: activeActor.id,
               senderPublicIdentity: activeActor.publicIdentity,
-              senderSeq: 0n,
               senderMessageId,
               payload: outgoingPayload,
               keyPair: actorKeyPair,
-              recipients: [toActorPublicKeys(activeActor), recipientKeys],
+              recipients: [activeActorKeys, recipientKeys],
               existingSecret: null,
               latestKnownSecretVersion: null,
               rotateSecret: false,
             });
 
             await Promise.resolve(
-              requestDirectContactWithFirstMessageReducer({
+              requestDirectContactReducer({
                 agentDbId: activeActor.id,
                 otherAgentPublicIdentity: targetPublicIdentity,
                 threadId: pendingThreadId,
-                membershipLocked: undefined,
                 title: composeThreadTitle.trim() || undefined,
                 secretVersion: prepared.secretVersion,
                 signingKeyVersion: prepared.signingKeyVersion,
-                senderSeq: 0n,
                 senderMessageId,
-                ciphertext: prepared.ciphertext,
-                iv: prepared.iv,
-                cipherAlgorithm: prepared.cipherAlgorithm,
-                signature: prepared.signature,
-                replyToMessageId: undefined,
-                attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
+                ciphertext: fromHex(prepared.ciphertext),
+                iv: fromHex(prepared.iv),
+                cipherAlgorithm: toCipherAlgorithm(prepared.cipherAlgorithm),
+                signature: fromHex(prepared.signature),
+                attachedSecretEnvelopes: toReducerEnvelopes(prepared.attachedSecretEnvelopes),
               })
             );
 
@@ -4956,60 +5280,14 @@ function AuthenticatedInboxPage() {
           }
         }
 
-        if (pendingRequest) {
-          const senderMessageId = randomSenderMessageId();
-          const prepared = await prepareEncryptedMessage({
-            threadId: pendingRequest.threadId,
-            senderActorId: activeActor.id,
-            senderPublicIdentity: activeActor.publicIdentity,
-            senderSeq: 0n,
-            senderMessageId,
-            payload: outgoingPayload,
-            keyPair: actorKeyPair,
-            recipients: [toActorPublicKeys(activeActor), recipientKeys],
-            existingSecret: null,
-            latestKnownSecretVersion: null,
-            rotateSecret: false,
-          });
-
-          await Promise.resolve(
-            sendEncryptedMessageReducer({
-              agentDbId: activeActor.id,
-              threadId: pendingRequest.threadId,
-              secretVersion: prepared.secretVersion,
-              signingKeyVersion: prepared.signingKeyVersion,
-              senderSeq: 0n,
-              senderMessageId,
-              ciphertext: prepared.ciphertext,
-              iv: prepared.iv,
-              cipherAlgorithm: prepared.cipherAlgorithm,
-              signature: prepared.signature,
-              replyToMessageId: undefined,
-              attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
-            })
-          );
-
-          cacheSenderSecret(
-            pendingRequest.threadId,
-            activeActor.publicIdentity,
-            prepared.senderSecret.secretVersion,
-            prepared.senderSecret.secretHex
-          );
-          setComposeThreadTitle('');
-          setComposeFirstMessage('');
-          setComposeSelectedActorIds([]);
-          setActorFeedback('First-contact request sent for approval.');
-          closeComposeDialog();
-          return;
-        }
-
         if (!thread) {
           throw new Error('Direct thread did not become visible.');
         }
 
         const directThread = thread;
         const currentState = readCurrentVisibleState();
-        const currentThreadParticipants = currentState.participants.filter(participant => {
+        const directMembership = await loadFullThreadParticipants(directThread.id);
+        const currentThreadParticipants = directMembership.participants.filter(participant => {
           return participant.threadId === directThread.id && participant.active;
         });
         const senderParticipant =
@@ -5021,16 +5299,16 @@ function AuthenticatedInboxPage() {
             'Current actor is not visible as a participant in the direct thread.'
           );
         }
-        // senderSeq is deprecated; rely on the participant's cached
-        // lastSentSecretVersion / lastSentMembershipVersion instead of
-        // scanning thread messages to find the latest sender state.
+        // The new schema dropped `lastSentMembershipVersion` from the
+        // participant row. Use the thread's current membership version paired
+        // with the participant's last-sent secret version.
+        const senderLastSentSecretVersion = senderParticipant.lastSentSecretVersion ?? 0;
         const latestThreadSenderState =
-          senderParticipant.lastSentMembershipVersion !== undefined &&
-          senderParticipant.lastSentSecretVersion !== undefined
+          senderLastSentSecretVersion !== 0
             ? {
                 threadId: directThread.id,
-                membershipVersion: senderParticipant.lastSentMembershipVersion,
-                secretVersion: senderParticipant.lastSentSecretVersion,
+                membershipVersion: directThread.membershipVersion,
+                secretVersion: senderLastSentSecretVersion,
               }
             : undefined;
         const existingSecret = latestThreadSenderState
@@ -5043,6 +5321,9 @@ function AuthenticatedInboxPage() {
         const currentActorById = new Map<bigint, Agent>(
           currentState.actors.map(actor => [actor.id, actor])
         );
+        for (const actor of directMembership.actors) {
+          currentActorById.set(actor.id, actor);
+        }
         currentActorById.set(activeActor.id, activeActor);
         const directThreadSecretEnvelopes =
           selectedThread?.id === directThread.id
@@ -5052,7 +5333,10 @@ function AuthenticatedInboxPage() {
                 threadId: directThread.id,
                 membershipVersion: latestThreadSenderState?.membershipVersion,
                 senderAgentDbId: latestThreadSenderState ? activeActor.id : undefined,
+                recipientAgentDbId: undefined,
                 secretVersion: latestThreadSenderState?.secretVersion,
+                afterId: undefined,
+                limit: undefined,
               });
         const composeRequiresSecretRotation = secretRotationRequired({
           senderActor: activeActor,
@@ -5068,11 +5352,10 @@ function AuthenticatedInboxPage() {
           threadId: directThread.id,
           senderActorId: activeActor.id,
           senderPublicIdentity: activeActor.publicIdentity,
-          senderSeq: 0n,
           senderMessageId,
           payload: outgoingPayload,
           keyPair: actorKeyPair,
-          recipients: [toActorPublicKeys(activeActor), recipientKeys],
+          recipients: [activeActorKeys, recipientKeys],
           existingSecret,
           latestKnownSecretVersion: latestThreadSenderState?.secretVersion ?? null,
           rotateSecret: composeRequiresSecretRotation,
@@ -5084,14 +5367,13 @@ function AuthenticatedInboxPage() {
             threadId: directThread.id,
             secretVersion: prepared.secretVersion,
             signingKeyVersion: prepared.signingKeyVersion,
-            senderSeq: 0n,
             senderMessageId,
-            ciphertext: prepared.ciphertext,
-            iv: prepared.iv,
-            cipherAlgorithm: prepared.cipherAlgorithm,
-            signature: prepared.signature,
+            ciphertext: fromHex(prepared.ciphertext),
+            iv: fromHex(prepared.iv),
+            cipherAlgorithm: toCipherAlgorithm(prepared.cipherAlgorithm),
+            signature: fromHex(prepared.signature),
             replyToMessageId: undefined,
-            attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
+            attachedSecretEnvelopes: toReducerEnvelopes(prepared.attachedSecretEnvelopes),
           })
         );
 
@@ -5119,18 +5401,16 @@ function AuthenticatedInboxPage() {
     }
 
     try {
-      const existingThreadIds = new Set(visibleThreads.map(thread => thread.id.toString()));
+      const existingThreadIds = new Set(visible_threads.map(thread => thread.id.toString()));
       await Promise.resolve(
-        createGroupThreadReducer({
+        createGroupThread({
           agentDbId: activeActor.id,
           participantPublicIdentities: composeSelectedActorIds,
-          membershipLocked: composeThreadLocked,
           title: composeThreadTitle.trim() || undefined,
         })
       );
       const createdThread = await waitForNewVisibleThread({ existingThreadIds });
       setComposeThreadTitle('');
-      setComposeThreadLocked(false);
       setComposeSelectedActorIds([]);
       setComposeResolvedTargets([]);
       setComposeFirstMessage('');
@@ -5173,12 +5453,12 @@ function AuthenticatedInboxPage() {
         addThreadParticipantReducer({
           agentDbId: activeActor.id,
           threadId: selectedThread.id,
-          participantPublicIdentity: pendingParticipantId,
+          inviteePublicIdentity: pendingParticipantId,
         })
       );
       const addResult = await waitForParticipantAddResult({
         threadId: selectedThread.id,
-        participantPublicIdentity: pendingParticipantId,
+        inviteePublicIdentity: pendingParticipantId,
       });
       setResolvedAddTargets([]);
       if (addResult === 'added') {
@@ -5204,7 +5484,7 @@ function AuthenticatedInboxPage() {
         removeThreadParticipantReducer({
           agentDbId: activeActor.id,
           threadId: selectedThread.id,
-          participantAgentDbId: participantActorId,
+          targetAgentDbId: participantActorId,
         })
       );
       if (participantActorId === activeActor.id) {
@@ -5231,7 +5511,7 @@ function AuthenticatedInboxPage() {
         setThreadParticipantAdminReducer({
           agentDbId: activeActor.id,
           threadId: selectedThread.id,
-          participantAgentDbId: participantActorId,
+          targetAgentDbId: participantActorId,
           isAdmin,
         })
       );
@@ -5250,7 +5530,7 @@ function AuthenticatedInboxPage() {
     confirmImportedRotationKey(activeActorIdentity, actorKeyPair);
     refreshImportedRotationKeyConfirmation();
     setActorActionError(null);
-    setActorFeedback('Rotated private keys confirmed on this browser.');
+    setActorFeedback('Reset private keys confirmed on this browser.');
   }
 
   async function handleSendMessage(event: React.FormEvent) {
@@ -5292,27 +5572,47 @@ function AuthenticatedInboxPage() {
         contentType: 'text/plain',
         body: composerInput,
       } as const;
-      const recipients = selectedThreadParticipants
-        .map(participant => actorById.get(participant.agentDbId))
-        .filter((actor): actor is Agent => Boolean(actor))
-        .map(
-          actor =>
-            ({
-              actorId: actor.id,
-              normalizedEmail: actor.normalizedEmail,
-              slug: actor.slug,
-              inboxIdentifier: actor.inboxIdentifier ?? undefined,
-              isDefault: actor.isDefault,
-              publicIdentity: actor.publicIdentity,
-              displayName: actor.displayName,
-              encryptionPublicKey: actor.currentEncryptionPublicKey,
-              encryptionKeyVersion: actor.currentEncryptionKeyVersion,
-              signingPublicKey: actor.currentSigningPublicKey,
-              signingKeyVersion: actor.currentSigningKeyVersion,
-            }) satisfies ActorPublicKeys
-        );
-      const unsupportedRecipients = selectedThreadParticipants
-        .map(participant => actorById.get(participant.agentDbId))
+      const selectedMembership = await loadFullThreadParticipants(selectedThread.id);
+      const fullSelectedThreadParticipants = selectedMembership.participants.filter(
+        participant => participant.threadId === selectedThread.id && participant.active
+      );
+      const fullActorById = new Map(actorById);
+      for (const actor of selectedMembership.actors) {
+        fullActorById.set(actor.id, actor);
+      }
+      const senderParticipant =
+        fullSelectedThreadParticipants.find(participant => participant.agentDbId === activeActor.id) ??
+        activeParticipant;
+      if (!senderParticipant) {
+        throw new Error('Current actor is not visible as a participant in this thread.');
+      }
+      const senderLastSentSecretVersion = senderParticipant.lastSentSecretVersion ?? 0;
+      const latestSenderState =
+        senderLastSentSecretVersion !== 0
+          ? {
+              threadId: selectedThread.id,
+              membershipVersion: selectedThread.membershipVersion,
+              secretVersion: senderLastSentSecretVersion,
+            }
+          : undefined;
+      const recipientActors = fullSelectedThreadParticipants
+        .map(participant => fullActorById.get(participant.agentDbId))
+        .filter((actor): actor is Agent => Boolean(actor));
+      const recipients = await Promise.all(recipientActors.map(resolveActorPublicKeys));
+      const recipientKeysByActorId = new Map(
+        recipients
+          .filter((recipient): recipient is ActorPublicKeys & { actorId: bigint } =>
+            recipient.actorId !== undefined
+          )
+          .map(recipient => [recipient.actorId, recipient] as const)
+      );
+      const activeActorKeys = recipientKeysByActorId.get(activeActor.id);
+      if (!activeActorKeys) {
+        throw new Error(`Public keys for ${activeActor.slug} are unavailable.`);
+      }
+      assertActorKeyPairMatchesPublicKeys(activeActorKeys, actorKeyPair);
+      const unsupportedRecipients = fullSelectedThreadParticipants
+        .map(participant => fullActorById.get(participant.agentDbId))
         .filter((actor): actor is Agent => actor != null)
         .filter(actor => actor.id !== activeActor.id)
         .map(actor => ({
@@ -5331,40 +5631,51 @@ function AuthenticatedInboxPage() {
         return;
       }
 
-      const recipientPeers = selectedThreadParticipants
-        .map(participant => actorById.get(participant.agentDbId))
+      const recipientPeers = fullSelectedThreadParticipants
+        .map(participant => fullActorById.get(participant.agentDbId))
         .filter((actor): actor is Agent => Boolean(actor))
         .filter(actor => actor.id !== activeActor.id);
       for (const recipientActor of recipientPeers) {
+        const recipientKeys = recipientKeysByActorId.get(recipientActor.id);
+        if (!recipientKeys) {
+          throw new Error(`Public keys for ${recipientActor.slug} are unavailable.`);
+        }
         await ensurePeerTrust({
           slug: recipientActor.slug,
           publicIdentity: recipientActor.publicIdentity,
-          observed: tupleFromVisibleActor(recipientActor),
+          observed: tupleFromActorPublicKeys(recipientKeys),
           allowFirstContactTrust: false,
         });
       }
 
-      const existingSecret = latestSelectedThreadSenderState
+      const existingSecret = latestSenderState
         ? getCachedSenderSecret(
             selectedThread.id,
             activeActor.publicIdentity,
-            latestSelectedThreadSenderState.secretVersion
+            latestSenderState.secretVersion
           )
         : null;
+      const sendRequiresSecretRotation = secretRotationRequired({
+        senderActor: activeActor,
+        latestSenderState,
+        currentMembershipVersion: selectedThread.membershipVersion,
+        participants: fullSelectedThreadParticipants,
+        actorById: fullActorById,
+        envelopes: loadedThreadSecretEnvelopes,
+      });
 
       const senderMessageId = randomSenderMessageId();
       const prepared = await prepareEncryptedMessage({
         threadId: selectedThread.id,
         senderActorId: activeActor.id,
         senderPublicIdentity: activeActor.publicIdentity,
-        senderSeq: 0n,
         senderMessageId,
         payload: outgoingPayload,
         keyPair: actorKeyPair,
         recipients,
         existingSecret,
-        latestKnownSecretVersion: latestSelectedThreadSenderState?.secretVersion ?? null,
-        rotateSecret: rotateSecret || requiresSecretRotation,
+        latestKnownSecretVersion: latestSenderState?.secretVersion ?? null,
+        rotateSecret: rotateSecret || sendRequiresSecretRotation,
       });
 
       await Promise.resolve(
@@ -5373,14 +5684,13 @@ function AuthenticatedInboxPage() {
           threadId: selectedThread.id,
           secretVersion: prepared.secretVersion,
           signingKeyVersion: prepared.signingKeyVersion,
-          senderSeq: 0n,
           senderMessageId,
-          ciphertext: prepared.ciphertext,
-          iv: prepared.iv,
-          cipherAlgorithm: prepared.cipherAlgorithm,
-          signature: prepared.signature,
+          ciphertext: fromHex(prepared.ciphertext),
+          iv: fromHex(prepared.iv),
+          cipherAlgorithm: toCipherAlgorithm(prepared.cipherAlgorithm),
+          signature: fromHex(prepared.signature),
           replyToMessageId: undefined,
-          attachedSecretEnvelopes: prepared.attachedSecretEnvelopes,
+          attachedSecretEnvelopes: toReducerEnvelopes(prepared.attachedSecretEnvelopes),
         })
       );
 
@@ -5405,19 +5715,24 @@ function AuthenticatedInboxPage() {
     setActorFeedback(null);
     const actorId = activeActor.id;
     const threadId = selectedThread.id;
-    const upToThreadSeq = selectedThread.lastMessageSeq;
+    const upToMessageId =
+      selectedThread.lastMessageId;
     const optimisticUpdatedAt = Timestamp.fromDate(new Date());
     let rolledBack: ThreadReadState[] | null = null;
     setPagedThreadReadStates(current => {
       rolledBack = current;
       return patchOptimisticReadState(current, actorId, threadId, {
-        lastReadThreadSeq: upToThreadSeq,
+        lastReadMessageId: upToMessageId,
         updatedAt: optimisticUpdatedAt,
       });
     });
     try {
       await Promise.resolve(
-        markThreadReadReducer({ agentDbId: actorId, threadId, upToThreadSeq })
+        updateThreadReadPosition({
+          agentDbId: actorId,
+          threadId,
+          lastReadMessageId: upToMessageId,
+        })
       );
       refreshFirstVisibleThreadPage();
     } catch (error) {
@@ -5445,7 +5760,7 @@ function AuthenticatedInboxPage() {
     });
     try {
       await Promise.resolve(
-        setThreadArchivedReducer({ agentDbId: actorId, threadId, archived })
+        updateThreadArchivedState({ agentDbId: actorId, threadId, archived })
       );
       refreshFirstVisibleThreadPage();
     } catch (error) {
@@ -5526,7 +5841,7 @@ function AuthenticatedInboxPage() {
         : !actorKeysMatchPublished
           ? 'Current inbox keys are still loading or out of sync with published keys.'
         : importedRotationKeyConfirmation.status === 'pending'
-          ? 'Rotated private keys were imported automatically on this browser. Confirm them locally before sending.'
+          ? 'Reset private keys were imported automatically on this browser. Confirm them locally before sending.'
     : !activeParticipant
             ? 'Current inbox is not an active participant in this thread.'
             : null;
@@ -5577,10 +5892,10 @@ function AuthenticatedInboxPage() {
   }
 
   const pendingIncomingContactRequestCount = incomingContactRequests.filter(
-    request => request.status === 'pending'
+    request => request.status.tag === 'Pending'
   ).length;
   const pendingIncomingThreadInviteCount = incomingThreadInvites.filter(
-    invite => invite.status === 'pending'
+    invite => invite.status.tag === 'Pending'
   ).length;
   const pendingIncomingCount =
     pendingIncomingContactRequestCount + pendingIncomingThreadInviteCount;
@@ -5664,7 +5979,7 @@ function AuthenticatedInboxPage() {
             setShowKeysRecoveryDialog(open);
           }}
           mode="recovery"
-          normalizedEmail={displayInbox.normalizedEmail}
+          email={displayInbox.email}
           defaultKeyIssue={localKeyIssue}
           vaultUnlocked={vaultUnlocked}
           deviceShareBusy={deviceActionBusy}
@@ -5890,7 +6205,7 @@ function AuthenticatedInboxPage() {
             <AlertDescription className="space-y-3">
               <p>
                 {vaultInitialized
-                ? 'Unlock the local private key vault before decrypting messages, rotating keys, or sending updates from this inbox.'
+                ? 'Unlock the local private key vault before decrypting messages, resetting keys, or sending updates from this inbox.'
                 : 'Create a local private key vault before generating or storing inbox keys in this browser.'}
               </p>
               <Button
@@ -5912,7 +6227,7 @@ function AuthenticatedInboxPage() {
             title={vaultInitialized ? 'Unlock Private Keys' : 'Create Private Key Vault'}
             description={
               vaultInitialized
-                ? 'Enter your passphrase to unlock local private keys for decryption, key rotation, and sending.'
+                ? 'Enter your passphrase to unlock local private keys for decryption, key reset, and sending.'
                 : 'Create a passphrase to encrypt this browser’s private key vault before generating or importing inbox keys.'
             }
             submitLabel={vaultInitialized ? 'Unlock keys' : 'Create vault'}
@@ -6000,8 +6315,6 @@ function AuthenticatedInboxPage() {
                 }}
                 composeThreadTitle={composeThreadTitle}
                 onComposeThreadTitleChange={setComposeThreadTitle}
-                composeThreadLocked={composeThreadLocked}
-                onComposeThreadLockedChange={setComposeThreadLocked}
                 composeFirstMessage={composeFirstMessage}
                 onComposeFirstMessageChange={setComposeFirstMessage}
                 onSubmitCompose={handleSubmitCompose}
@@ -6015,7 +6328,7 @@ function AuthenticatedInboxPage() {
                 actorById={actorById}
                 activeActorId={activeActor?.id ?? null}
                 activeParticipantIsAdmin={activeParticipantIsAdmin}
-                locked={selectedThread?.membershipLocked ?? false}
+                locked={selectedThread?.kind.tag === 'Direct'}
                 canWriteToActiveInbox={canWriteToActiveInbox}
                 pendingParticipantLookupSlug={pendingParticipantLookupSlug}
                 onPendingParticipantLookupSlugChange={setPendingParticipantLookupSlug}
@@ -6071,7 +6384,7 @@ function AuthenticatedInboxPage() {
                           onScrollCapture={handleThreadRailScroll}
                         >
                           <div className="space-y-1">
-                          {visibleThreads.length === 0 ? (
+                          {visible_threads.length === 0 ? (
                             <EmptyState
                               icon={ChatText}
                               title="Your inbox is quiet"
@@ -6107,9 +6420,10 @@ function AuthenticatedInboxPage() {
                                   key={thread.id.toString()}
                                   title={title}
                                   participants={participantsForRow}
+                                  participantCount={Number(thread.activeParticipantCount)}
                                   preview={null}
                                   unreadCount={unreadCount}
-                                  locked={thread.membershipLocked}
+                                  locked={(thread.kind.tag === 'Direct')}
                                   archived={archived}
                                   active={selectedThreadId === thread.id}
                                   onSelect={() => {
@@ -6150,8 +6464,8 @@ function AuthenticatedInboxPage() {
                       </p>
                       {selectedThread ? (
                         <p className="text-xs text-muted-foreground">
-                          {selectedThreadParticipants.length} participant{selectedThreadParticipants.length === 1 ? '' : 's'}
-                          {selectedThread.membershipLocked ? ' · locked' : ''}
+                          {Number(selectedThread.activeParticipantCount)} participant{selectedThread.activeParticipantCount === 1n ? '' : 's'}
+                          {selectedThread.kind.tag === 'Direct' ? ' · locked' : ''}
                         </p>
                       ) : null}
                     </div>
@@ -6212,7 +6526,7 @@ function AuthenticatedInboxPage() {
                             <AlertTitle>Confirm imported keys</AlertTitle>
                             <AlertDescription className="space-y-3">
                               <p>
-                                Rotated private keys were imported automatically on this browser.
+                                Reset private keys were imported automatically on this browser.
                                 Confirm them locally before sending new messages.
                               </p>
                               <Button
@@ -6292,11 +6606,11 @@ function AuthenticatedInboxPage() {
                                   const groupedFlags = computeGroupedFlags(timelineMeta);
                                   const dayBoundaries = computeDayBoundaries(timelineMeta);
                                   const firstUnreadIndex =
-                                    unreadAnchorSeq !== null
+                                    unreadAnchorMessageId !== null
                                       ? paginatedThreadTimeline.findIndex(
                                           entry =>
                                             entry.kind !== 'keyRotation' &&
-                                            entry.message.threadSeq > unreadAnchorSeq &&
+                                            entry.message.id > unreadAnchorMessageId &&
                                             entry.message.senderAgentDbId !== activeActor?.id
                                         )
                                       : -1;
@@ -6441,10 +6755,10 @@ function AuthenticatedInboxPage() {
                         <div className="min-w-0">
                           <p className="truncate text-sm">{request.requesterSlug}</p>
                           <p className="text-xs text-muted-foreground">
-                            {request.status === 'pending' ? 'Waiting for approval' : request.status}
+                            {request.status.tag === 'Pending' ? 'Waiting for approval' : request.status.tag}
                           </p>
                         </div>
-                        {request.status === 'pending' ? (
+                        {request.status.tag === 'Pending' ? (
                           <div className="flex gap-2">
                             <Button
                               size="xs"
@@ -6465,7 +6779,7 @@ function AuthenticatedInboxPage() {
                             </Button>
                           </div>
                         ) : (
-                          <Badge variant="secondary" className="text-[10px]">{request.status}</Badge>
+                          <Badge variant="secondary" className="text-[10px]">{request.status.tag}</Badge>
                         )}
                       </div>
                     ))}
@@ -6496,13 +6810,15 @@ function AuthenticatedInboxPage() {
                       >
                         <div className="min-w-0">
                           <p className="truncate text-sm">
-                            {invite.threadTitle ?? `Thread #${invite.threadId.toString()}`}
+                            {`Thread #${invite.threadId.toString()}`}
                           </p>
                           <p className="text-xs text-muted-foreground">
-                            Invited by {invite.inviterDisplayName ?? invite.inviterSlug}
+                            Invited by {actorById.get(invite.inviterAgentDbId)?.displayName
+                              ?? actorById.get(invite.inviterAgentDbId)?.slug
+                              ?? `agent#${invite.inviterAgentDbId.toString()}`}
                           </p>
                         </div>
-                        {invite.status === 'pending' ? (
+                        {invite.status.tag === 'Pending' ? (
                           <div className="flex gap-2">
                             <Button
                               size="xs"
@@ -6524,7 +6840,7 @@ function AuthenticatedInboxPage() {
                           </div>
                         ) : (
                           <Badge variant="secondary" className="text-[10px]">
-                            {invite.status}
+                            {invite.status.tag}
                           </Badge>
                         )}
                       </div>
@@ -6553,9 +6869,21 @@ function AuthenticatedInboxPage() {
                         >
                         <div className="min-w-0">
                           <p className="truncate text-sm">{request.targetSlug}</p>
-                          <p className="text-xs text-muted-foreground">{request.status}</p>
+                          <p className="text-xs text-muted-foreground">{request.status.tag}</p>
                         </div>
-                        <Badge variant="secondary" className="text-[10px]">{request.status}</Badge>
+                        {request.status.tag === 'Pending' ? (
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            onClick={() => void handleCancelContactRequest(request.id)}
+                            disabled={approvalActionRequestId !== null}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                            Cancel
+                          </Button>
+                        ) : (
+                          <Badge variant="secondary" className="text-[10px]">{request.status.tag}</Badge>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -6582,14 +6910,16 @@ function AuthenticatedInboxPage() {
                       >
                         <div className="min-w-0">
                           <p className="truncate text-sm">
-                            {invite.inviteeDisplayName ?? invite.inviteeSlug}
+                            {actorById.get(invite.inviteeAgentDbId)?.displayName
+                              ?? actorById.get(invite.inviteeAgentDbId)?.slug
+                              ?? `agent#${invite.inviteeAgentDbId.toString()}`}
                           </p>
                           <p className="text-xs text-muted-foreground">
-                            {invite.threadTitle ?? `Thread #${invite.threadId.toString()}`}
+                            {`Thread #${invite.threadId.toString()}`}
                           </p>
                         </div>
                         <Badge variant="secondary" className="text-[10px]">
-                          {invite.status}
+                          {invite.status.tag}
                         </Badge>
                       </div>
                     ))}
@@ -6657,8 +6987,7 @@ function AuthenticatedInboxPage() {
                         >
                         <p className="truncate text-xs">
                           {entry.agentPublicIdentity ??
-                            entry.displayEmail ??
-                            entry.normalizedEmail ??
+                            entry.email ??
                             `Entry #${entry.id.toString()}`}
                         </p>
                         <Button
@@ -6667,7 +6996,7 @@ function AuthenticatedInboxPage() {
                           className="h-8 w-8 px-0"
                           onClick={() => void handleRemoveAllowlistEntry(entry.id)}
                           disabled={allowlistBusy}
-                          aria-label={`Remove ${entry.agentPublicIdentity ?? entry.normalizedEmail ?? entry.id.toString()}`}
+                          aria-label={`Remove ${entry.agentPublicIdentity ?? entry.email ?? entry.id.toString()}`}
                         >
                           <X className="h-3.5 w-3.5" />
                         </Button>

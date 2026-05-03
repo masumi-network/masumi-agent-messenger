@@ -16,11 +16,13 @@ type InboxComposeModeInput = InboxComposeMode | 'add';
 export type WorkspaceTab = 'inbox' | 'approvals';
 export type AppShellSection = 'inbox' | 'discover' | 'agents' | 'security' | 'channels';
 
+type ChannelPermissionTag = { tag: string };
+
 export type ChannelNavEntry = {
   channelId: bigint;
   slug: string;
   title: string | null;
-  permission: string;
+  permission: ChannelPermissionTag;
   isAdmin: boolean;
   pendingApprovals: number;
 };
@@ -34,20 +36,20 @@ type ChannelNavChannelLike = {
 type ChannelNavMembershipLike = {
   channelId: bigint;
   agentDbId: bigint;
-  permission: string;
+  permission: ChannelPermissionTag;
   active: boolean;
 };
 
 type ChannelNavJoinRequestLike = {
   channelId: bigint;
-  direction: string;
-  status: string;
+  requesterAgentDbId: bigint;
+  status: { tag: string };
 };
 
-function channelPermissionRank(permission: string): number {
-  if (permission === 'admin') return 3;
-  if (permission === 'read_write') return 2;
-  if (permission === 'read') return 1;
+function channelPermissionRank(permission: ChannelPermissionTag): number {
+  if (permission.tag === 'Admin') return 3;
+  if (permission.tag === 'ReadWrite') return 2;
+  if (permission.tag === 'Read') return 1;
   return 0;
 }
 
@@ -84,13 +86,17 @@ export function buildChannelNavEntries<
       slug: channel.slug,
       title: channel.title ?? null,
       permission: membership.permission,
-      isAdmin: membership.permission === 'admin',
+      isAdmin: membership.permission.tag === 'Admin',
       pendingApprovals: existing?.pendingApprovals ?? 0,
     });
   }
 
   for (const request of params.joinRequests) {
-    if (request.direction !== 'incoming' || request.status !== 'pending') {
+    // Direction is "incoming" relative to the caller when the requester is
+    // not an owned agent — i.e. someone else is asking to join a channel
+    // the caller administers.
+    const isIncoming = !params.ownedActorIds.has(request.requesterAgentDbId);
+    if (!isIncoming || request.status.tag !== 'Pending') {
       continue;
     }
     const entry = byChannelId.get(request.channelId);
@@ -118,7 +124,7 @@ export type OwnedInboxActorLike = ActorLike & {
   masumiRegistrationNetwork?: string | null;
   masumiInboxAgentId?: string | null;
   masumiAgentIdentifier?: string | null;
-  masumiRegistrationState?: string | null;
+  masumiRegistrationState?: { tag: string } | string | null;
 };
 
 export type OwnedInboxAgentEntry<Actor extends OwnedInboxActorLike> = {
@@ -134,30 +140,27 @@ export type ContactRequestLike = {
   requesterSlug: string;
   targetAgentDbId: bigint;
   targetSlug: string;
-  direction: string;
-  status: string;
+  status: { tag: string };
   updatedAt: TimestampLike;
 };
 
 export type ThreadInviteLike = {
   id: bigint;
   inviterAgentDbId: bigint;
-  inviterSlug: string;
   inviteeAgentDbId: bigint;
-  inviteeSlug: string;
-  status: string;
+  status: { tag: string };
   updatedAt: TimestampLike;
 };
 
 export type ContactAllowlistEntryLike = {
   id: bigint;
-  inboxId: bigint;
+  accountId: bigint;
   createdAt: TimestampLike;
 };
 
 export type SessionOwnedInboxLike = {
   id: bigint;
-  normalizedEmail: string;
+  email: string;
   authIssuer: string;
   authSubject: string;
 };
@@ -258,16 +261,16 @@ export function findSessionOwnedInbox<Inbox extends SessionOwnedInboxLike>(param
   inboxes: Inbox[];
   session: BrowserSessionLike | null;
 }): Inbox | null {
-  const email = params.session?.user.email ?? null;
-  if (!email) {
+  const rawEmail = params.session?.user.email ?? null;
+  if (!rawEmail) {
     return null;
   }
 
-  const normalizedEmail = normalizeEmail(email);
+  const email = normalizeEmail(rawEmail);
   return (
     params.inboxes.find(inbox => {
       return (
-        inbox.normalizedEmail === normalizedEmail &&
+        inbox.email === email &&
         inbox.authIssuer === params.session?.user.issuer &&
         inbox.authSubject === params.session?.user.subject
       );
@@ -277,13 +280,13 @@ export function findSessionOwnedInbox<Inbox extends SessionOwnedInboxLike>(param
 
 export function findDefaultOwnedActor<Actor extends ActorLike>(
   actors: Actor[],
-  inboxId: bigint | null
+  accountId: bigint | null
 ): Actor | null {
-  if (inboxId === null) {
+  if (accountId === null) {
     return null;
   }
 
-  return actors.find(actor => actor.inboxId === inboxId && actor.isDefault) ?? null;
+  return actors.find(actor => actor.accountId === accountId && actor.isDefault) ?? null;
 }
 
 export function describeLocalVaultRequirement(params: {
@@ -296,15 +299,15 @@ export function describeLocalVaultRequirement(params: {
 export function buildOwnedInboxAgentEntries<Actor extends OwnedInboxActorLike>(params: {
   actors: Actor[];
   ownInboxId: bigint | null;
-  normalizedEmail: string;
+  email: string;
 }): OwnedInboxAgentEntry<Actor>[] {
   return params.actors
     .filter(actor => {
       if (params.ownInboxId !== null) {
-        return actor.inboxId === params.ownInboxId;
+        return actor.accountId === params.ownInboxId;
       }
 
-      return actor.normalizedEmail === params.normalizedEmail;
+      return actor.email === params.email;
     })
     .sort((left, right) => {
       if (left.isDefault !== right.isDefault) {
@@ -328,14 +331,15 @@ export function buildOwnedInboxAgentEntries<Actor extends OwnedInboxActorLike>(p
 function readActorRegistrationMetadata(
   actor: OwnedInboxActorLike
 ): MasumiActorRegistrationMetadata | null {
+  const stateRaw = actor.masumiRegistrationState;
+  const stateString =
+    typeof stateRaw === 'string' ? stateRaw : stateRaw?.tag ?? null;
   const metadata: MasumiActorRegistrationMetadata = {
     masumiRegistrationNetwork: actor.masumiRegistrationNetwork ?? undefined,
     masumiInboxAgentId: actor.masumiInboxAgentId ?? undefined,
     masumiAgentIdentifier: actor.masumiAgentIdentifier ?? undefined,
     masumiRegistrationState:
-      actor.masumiRegistrationState && isMasumiInboxAgentState(actor.masumiRegistrationState)
-        ? actor.masumiRegistrationState
-        : undefined,
+      stateString && isMasumiInboxAgentState(stateString) ? stateString : undefined,
   };
 
   return Object.values(metadata).some(value => value !== undefined) ? metadata : null;
@@ -406,7 +410,7 @@ export function resolveWorkspaceSnapshot<
   session: BrowserSessionLike | null;
   selectedSlug?: string | null;
 }): {
-  normalizedEmail: string;
+  email: string;
   ownedInbox: Inbox | null;
   existingDefaultActor: Actor | null;
   ownedInboxAgents: OwnedInboxAgentEntry<Actor>[];
@@ -421,7 +425,7 @@ export function resolveWorkspaceSnapshot<
     pendingOutgoingCount: number;
   };
 } {
-  const normalizedEmail = normalizeEmail(params.session?.user.email ?? '');
+  const email = normalizeEmail(params.session?.user.email ?? '');
   const ownedInbox = findSessionOwnedInbox({
     inboxes: params.inboxes,
     session: params.session,
@@ -433,7 +437,7 @@ export function resolveWorkspaceSnapshot<
   const ownedInboxAgents = buildOwnedInboxAgentEntries({
     actors: params.actors,
     ownInboxId: ownedInbox?.id ?? null,
-    normalizedEmail,
+    email,
   });
   const selectedEntry = params.selectedSlug
     ? ownedInboxAgents.find(entry => entry.actor.slug === params.selectedSlug)
@@ -453,7 +457,7 @@ export function resolveWorkspaceSnapshot<
   });
 
   return {
-    normalizedEmail,
+    email,
     ownedInbox,
     existingDefaultActor,
     ownedInboxAgents,
@@ -506,7 +510,7 @@ export function evaluateWorkspaceWriteAccess<
 
   if (
     !params.normalizedSessionEmail ||
-    params.normalizedSessionEmail !== params.inbox.normalizedEmail
+    params.normalizedSessionEmail !== params.inbox.email
   ) {
     return {
       canWrite: false,
@@ -585,8 +589,13 @@ export function buildApprovalView<
       return Number(right.id - left.id);
     });
 
-  const incoming = relevantRequests.filter(request => request.direction === 'incoming');
-  const outgoing = relevantRequests.filter(request => request.direction === 'outgoing');
+  const incoming = relevantRequests.filter(request => ownedActorIds.has(request.targetAgentDbId));
+  const outgoing = relevantRequests.filter(request => ownedActorIds.has(request.requesterAgentDbId));
+  const ownedActorBySlug = new Map(
+    params.ownedActors.map(actor => [actor.slug, actor.id])
+  );
+  const selectedActorId =
+    selectedSlug !== null ? ownedActorBySlug.get(selectedSlug) ?? null : null;
   const relevantInvites = (params.threadInvites ?? [])
     .filter(invite => {
       return (
@@ -595,11 +604,14 @@ export function buildApprovalView<
       );
     })
     .filter(invite => {
-      if (!selectedSlug) {
+      if (selectedActorId === null) {
         return true;
       }
 
-      return invite.inviteeSlug === selectedSlug || invite.inviterSlug === selectedSlug;
+      return (
+        invite.inviteeAgentDbId === selectedActorId ||
+        invite.inviterAgentDbId === selectedActorId
+      );
     })
     .sort((left, right) => {
       const byUpdatedAt = compareTimestampsDesc(left.updatedAt, right.updatedAt);
@@ -622,24 +634,24 @@ export function buildApprovalView<
     incomingThreadInvites,
     outgoingThreadInvites,
     pendingIncomingCount:
-      incoming.filter(request => request.status === 'pending').length +
-      incomingThreadInvites.filter(invite => invite.status === 'pending').length,
+      incoming.filter(request => request.status.tag === 'Pending').length +
+      incomingThreadInvites.filter(invite => invite.status.tag === 'Pending').length,
     pendingOutgoingCount:
-      outgoing.filter(request => request.status === 'pending').length +
-      outgoingThreadInvites.filter(invite => invite.status === 'pending').length,
+      outgoing.filter(request => request.status.tag === 'Pending').length +
+      outgoingThreadInvites.filter(invite => invite.status.tag === 'Pending').length,
   };
 }
 
 export function filterAllowlistEntriesByInboxId<Entry extends ContactAllowlistEntryLike>(
   entries: Entry[],
-  inboxId: bigint | null
+  accountId: bigint | null
 ): Entry[] {
-  if (inboxId === null) {
+  if (accountId === null) {
     return [];
   }
 
   return entries
-    .filter(entry => entry.inboxId === inboxId)
+    .filter(entry => entry.accountId === accountId)
     .sort((left, right) => {
       const byCreatedAt = compareTimestampsDesc(left.createdAt, right.createdAt);
       if (byCreatedAt !== 0) {

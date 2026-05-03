@@ -11,17 +11,19 @@ import {
 } from "spacetimedb";
 
 import {
-  DeviceKeyBundleAttachment,
+  EncryptionAlgorithm,
+  SigningAlgorithm,
 } from "./types";
 
 export default {
   agentDbId: __t.u64(),
   encryptionPublicKey: __t.string(),
-  encryptionKeyVersion: __t.string(),
-  encryptionAlgorithm: __t.option(__t.string()),
+  keyBundleVersion: __t.u32(),
+  get encryptionAlgorithm() {
+    return EncryptionAlgorithm;
+  },
   signingPublicKey: __t.string(),
-  signingKeyVersion: __t.string(),
-  signingAlgorithm: __t.option(__t.string()),
-  deviceKeyBundles: __t.option(__t.array(DeviceKeyBundleAttachment)),
-  revokeDeviceIds: __t.option(__t.array(__t.string())),
+  get signingAlgorithm() {
+    return SigningAlgorithm;
+  },
 };

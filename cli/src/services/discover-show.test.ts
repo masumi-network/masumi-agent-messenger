@@ -97,10 +97,10 @@ describe('showDiscoveredAgent', () => {
             isDefault: true,
             displayName: 'Spacetime Space Agent',
             agentIdentifier: 'spacetime-agent-id',
-            encryptionKeyVersion: 'enc-v1',
+            encryptionKeyVersion: 1,
             encryptionAlgorithm: 'x25519-xsalsa20-poly1305',
             encryptionPublicKey: 'enc-public',
-            signingKeyVersion: 'sig-v1',
+            signingKeyVersion: 1,
             signingAlgorithm: 'ed25519',
             signingPublicKey: 'sig-public',
           },
@@ -122,8 +122,8 @@ describe('showDiscoveredAgent', () => {
         description: null,
         displayName: 'Spacetime Space Agent',
         publicIdentity: 'did:key:space-agent',
-        encryptionKeyVersion: 'enc-v1',
-        signingKeyVersion: 'sig-v1',
+        encryptionKeyVersion: 1,
+        signingKeyVersion: 1,
       })
     );
     expect(result.publicRoute).toBeNull();

@@ -8,8 +8,8 @@ import {
   countSharedKeyVersions,
   createDeviceShareBundle,
 } from '../../../shared/device-sharing';
+import { fromHex } from '../../../shared/crypto-utils';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
-import { Timestamp } from 'spacetimedb';
 import { ensureAuthenticatedSession } from './auth';
 import {
   commitStoredActorKeyRotation,
@@ -25,10 +25,12 @@ import {
 import {
   applyRegistrationMetadataToActor,
   deregisterMasumiInboxAgentRegistration,
+  importOwnedSaasInboxAgents,
   syncMasumiInboxAgentRegistration,
   type ConfirmLinkedEmailPrompt,
   type ConfirmPublicDescriptionPrompt,
   type ConfirmRegistrationPrompt,
+  type OwnedSaasAgentImportSummary,
   type PauseHandler,
   type RegistrationMode,
 } from './masumi-inbox-agent';
@@ -37,11 +39,11 @@ import {
   connectAuthenticated,
   disconnectConnection,
   readDeviceRows,
-  readInboxRows,
+  readAccounts,
   subscribeDeviceTables,
   subscribeInboxTables,
 } from './spacetimedb';
-import type { VisibleAgentRow } from '../../../webapp/src/module_bindings/types';
+import type { Agent } from '../../../webapp/src/module_bindings/types';
 
 function describeUnknownError(error: unknown): string {
   if (error instanceof Error) {
@@ -61,12 +63,12 @@ type CreatedInboxIdentity = {
   publicIdentity: string;
   displayName: string | null;
   keyVersions: {
-    encryption: string;
-    signing: string;
+    encryption: number;
+    signing: number;
   };
 };
 
-export type CreateInboxIdentityResult = {
+export type CreateAgentResult = {
   profile: string;
   actor: CreatedInboxIdentity;
   registration: MasumiRegistrationResult;
@@ -102,28 +104,34 @@ export type RotateInboxKeysResult = {
     publicIdentity: string;
   };
   keyVersions: {
-    encryption: string;
-    signing: string;
+    encryption: number;
+    signing: number;
   };
   sharedDeviceIds: string[];
   revokedDeviceIds: string[];
+  deviceSyncError?: string;
+};
+
+export type SyncOwnedSaasInboxAgentsResult = {
+  profile: string;
+  import: OwnedSaasAgentImportSummary;
 };
 
 export type RotationDeviceCandidate = {
   deviceId: string;
   label: string | null;
   platform: string | null;
-  status: string;
+  status: { tag: string };
   isCurrentDevice: boolean;
 };
 
 function requireOwnedActor(params: {
-  actors: VisibleAgentRow[];
-  normalizedEmail: string;
+  actors: Agent[];
+  email: string;
   actorSlug?: string;
-}): VisibleAgentRow {
+}): Agent {
   const defaultActor =
-    params.actors.find(actor => actor.normalizedEmail === params.normalizedEmail && actor.isDefault) ??
+    params.actors.find(actor => actor.email === params.email && actor.isDefault) ??
     null;
   if (!defaultActor) {
     throw userError('No default agent found. Run `masumi-agent-messenger account sync` first.', {
@@ -131,7 +139,7 @@ function requireOwnedActor(params: {
     });
   }
 
-  const ownedActors = params.actors.filter(actor => actor.inboxId === defaultActor.inboxId);
+  const ownedActors = params.actors.filter(actor => actor.accountId === defaultActor.accountId);
   if (!params.actorSlug) {
     return defaultActor;
   }
@@ -153,7 +161,7 @@ function requireOwnedActor(params: {
   return actor;
 }
 
-export async function createInboxIdentity(params: {
+export async function createAgent(params: {
   profileName: string;
   slug: string;
   displayName?: string;
@@ -165,10 +173,10 @@ export async function createInboxIdentity(params: {
   confirmLinkedEmailVisibility?: ConfirmLinkedEmailPrompt;
   confirmPublicDescription?: ConfirmPublicDescriptionPrompt;
   pauseAfterRegistrationBlocked?: PauseHandler;
-}): Promise<CreateInboxIdentityResult> {
+}): Promise<CreateAgentResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -186,9 +194,9 @@ export async function createInboxIdentity(params: {
     profile,
     secretStore,
     identity: {
-      normalizedEmail,
+      email,
       slug: normalizedSlug,
-      inboxIdentifier: normalizedSlug,
+      accountIdentifier: normalizedSlug,
     },
   });
 
@@ -205,22 +213,21 @@ export async function createInboxIdentity(params: {
     const subscription = await subscribeInboxTables(conn);
 
     try {
-      await conn.reducers.createInboxIdentity({
+      await conn.reducers.createAgent({
         slug: normalizedSlug,
         displayName: params.displayName?.trim() || undefined,
         encryptionPublicKey: keyPair.encryption.publicKey,
-        encryptionKeyVersion: keyPair.encryption.keyVersion,
-        encryptionAlgorithm: keyPair.encryption.algorithm,
+        keyBundleVersion: keyPair.encryption.keyVersion,
+        encryptionAlgorithm: { tag: 'EcdhP256V1' },
         signingPublicKey: keyPair.signing.publicKey,
-        signingKeyVersion: keyPair.signing.keyVersion,
-        signingAlgorithm: keyPair.signing.algorithm,
+        signingAlgorithm: { tag: 'EcdsaP256Sha256V1' },
       });
 
-      const actor = await new Promise<Awaited<ReturnType<typeof readInboxRows>>['actors'][number]>(
+      const actor = await new Promise<Awaited<ReturnType<typeof readAccounts>>['actors'][number]>(
         (resolve, reject) => {
           const timeoutAt = Date.now() + 10_000;
-          const poll = () => {
-            const row = readInboxRows(conn).actors.find(candidate => candidate.slug === normalizedSlug);
+          const poll = async () => {
+            const row = (await readAccounts(conn)).actors.find(candidate => candidate.slug === normalizedSlug);
             if (row) {
               resolve(row);
               return;
@@ -233,9 +240,11 @@ export async function createInboxIdentity(params: {
               );
               return;
             }
-            setTimeout(poll, 100);
+            setTimeout(() => {
+              void poll().catch(reject);
+            }, 100);
           };
-          poll();
+          void poll().catch(reject);
         }
       );
 
@@ -264,8 +273,8 @@ export async function createInboxIdentity(params: {
           publicIdentity: resolvedActor.publicIdentity,
           displayName: resolvedActor.displayName ?? null,
           keyVersions: {
-            encryption: resolvedActor.currentEncryptionKeyVersion,
-            signing: resolvedActor.currentSigningKeyVersion,
+            encryption: resolvedActor.currentKeyBundleVersion,
+            signing: resolvedActor.currentKeyBundleVersion,
           },
         },
         registration: registration.registration,
@@ -299,8 +308,8 @@ export async function registerInboxAgent(params: {
   pauseAfterRegistrationBlocked?: PauseHandler;
 }): Promise<RegisterInboxAgentResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -319,10 +328,10 @@ export async function registerInboxAgent(params: {
     const subscription = await subscribeInboxTables(conn);
 
     try {
-      const { actors } = readInboxRows(conn);
+      const { actors } = await readAccounts(conn);
       const actor = requireOwnedActor({
         actors,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
       });
       const registration = await syncMasumiInboxAgentRegistration({
@@ -357,10 +366,58 @@ export async function registerInboxAgent(params: {
     if (isCliError(error)) {
       throw error;
     }
-    throw connectivityError('Unable to sync the managed inbox-agent registration.', {
-      code: 'INBOX_AGENT_REGISTER_FAILED',
-      cause: error,
+    const detail = describeUnknownError(error);
+    throw connectivityError(
+      detail
+        ? `Unable to sync the managed inbox-agent registration: ${detail}`
+        : 'Unable to sync the managed inbox-agent registration.',
+      {
+        code: 'INBOX_AGENT_REGISTER_FAILED',
+        cause: error,
+      }
+    );
+  } finally {
+    disconnectConnection(conn);
+  }
+}
+
+export async function syncOwnedSaasInboxAgents(params: {
+  profileName: string;
+  reporter: TaskReporter;
+  apply?: boolean;
+}): Promise<SyncOwnedSaasInboxAgentsResult> {
+  const { profile, session, claims } = await ensureAuthenticatedSession(params);
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
+    throw userError('Current OIDC session is missing an email claim.', {
+      code: 'OIDC_EMAIL_MISSING',
     });
+  }
+
+  const { conn } = await connectAuthenticated({
+    host: profile.spacetimeHost,
+    databaseName: profile.spacetimeDbName,
+    sessionToken: session.idToken,
+  });
+
+  try {
+    const subscription = await subscribeInboxTables(conn);
+    try {
+      const imported = await importOwnedSaasInboxAgents({
+        profile,
+        session,
+        conn,
+        email,
+        reporter: params.reporter,
+        apply: params.apply,
+      });
+      return {
+        profile: profile.name,
+        import: imported,
+      };
+    } finally {
+      subscription.unsubscribe();
+    }
   } finally {
     disconnectConnection(conn);
   }
@@ -372,8 +429,8 @@ export async function deregisterInboxAgent(params: {
   reporter: TaskReporter;
 }): Promise<DeregisterInboxAgentResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -392,10 +449,10 @@ export async function deregisterInboxAgent(params: {
     const subscription = await subscribeInboxTables(conn);
 
     try {
-      const { actors } = readInboxRows(conn);
+      const { actors } = await readAccounts(conn);
       const actor = requireOwnedActor({
         actors,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
       });
       const registration = await deregisterMasumiInboxAgentRegistration({
@@ -447,8 +504,8 @@ export async function listRotationDeviceCandidates(params: {
   devices: RotationDeviceCandidate[];
 }> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -468,12 +525,12 @@ export async function listRotationDeviceCandidates(params: {
   try {
     const subscription = await subscribeDeviceTables(conn);
     try {
-      const rows = readDeviceRows(conn);
+      const rows = await readDeviceRows(conn);
       return {
         profile: profile.name,
         currentDeviceId: currentDevice.deviceId,
         devices: rows.devices
-          .filter(device => device.status === 'approved')
+          .filter(device => device.status.tag === 'Approved')
           .map(device => ({
             deviceId: device.deviceId,
             label: device.label ?? null,
@@ -498,8 +555,8 @@ export async function rotateInboxKeys(params: {
   reporter: TaskReporter;
 }): Promise<RotateInboxKeysResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -520,13 +577,13 @@ export async function rotateInboxKeys(params: {
     const subscription = await subscribeDeviceTables(conn);
 
     try {
-      const rows = readDeviceRows(conn);
+      const rows = await readDeviceRows(conn);
       const actor = requireOwnedActor({
         actors: rows.actors,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
       });
-      if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)) {
+      if (isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState?.tag)) {
         throw userError(
           `Agent \`${actor.slug}\` is deregistering or deregistered and cannot rotate inbox keys.`,
           {
@@ -538,12 +595,10 @@ export async function rotateInboxKeys(params: {
         profile,
         secretStore,
         identity: {
-          normalizedEmail,
+          email,
           slug: actor.slug,
-          inboxIdentifier: actor.inboxIdentifier ?? undefined,
         },
-        currentEncryptionKeyVersion: actor.currentEncryptionKeyVersion,
-        currentSigningKeyVersion: actor.currentSigningKeyVersion,
+        currentKeyBundleVersion: actor.currentKeyBundleVersion,
       });
       const sourceDevice = await getOrCreateCliDeviceKeyMaterial(profile.name, secretStore);
       await conn.reducers.registerDevice({
@@ -552,7 +607,7 @@ export async function rotateInboxKeys(params: {
         platform: process.platform,
         deviceEncryptionPublicKey: sourceDevice.keyPair.publicKey,
         deviceEncryptionKeyVersion: sourceDevice.keyPair.keyVersion,
-        deviceEncryptionAlgorithm: sourceDevice.keyPair.algorithm,
+        deviceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
       });
 
       const snapshot = await exportNamespaceKeyShareSnapshot({
@@ -561,9 +616,8 @@ export async function rotateInboxKeys(params: {
         overrides: [
           {
             identity: {
-              normalizedEmail,
+              email,
               slug: actor.slug,
-              inboxIdentifier: actor.inboxIdentifier ?? undefined,
             },
             current: rotationPlan.rotated,
             archived:
@@ -575,10 +629,11 @@ export async function rotateInboxKeys(params: {
       });
       const sharedActorCount = countSharedActors(snapshot);
       const sharedKeyVersionCount = countSharedKeyVersions(snapshot);
-      const approvedDevices = rows.devices.filter(device => device.status === 'approved');
+      const approvedDevices = rows.devices.filter(device => device.status.tag === 'Approved');
       const requestedRevokeIds = Array.from(new Set(params.revokeDeviceIds ?? []));
       const requestedShareIds = Array.from(new Set(params.shareDeviceIds ?? []));
       const sharedDeviceIds: string[] = [];
+      const revokedDeviceIds: string[] = [];
       const deviceShareBundles = [];
 
       for (const deviceId of requestedShareIds) {
@@ -596,12 +651,11 @@ export async function rotateInboxKeys(params: {
         const bundle = await createDeviceShareBundle({
           sourceKeyPair: sourceDevice.keyPair,
           targetPublicKey: targetDevice.deviceEncryptionPublicKey,
-          context: buildDeviceShareContext(normalizedEmail, targetDevice.deviceId),
+          context: buildDeviceShareContext(email, targetDevice.deviceId),
           snapshot,
         });
         deviceShareBundles.push({
           deviceId: targetDevice.deviceId,
-          sourceDeviceId: sourceDevice.deviceId,
           sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
           sourceEncryptionKeyVersion: bundle.sourceEncryptionKeyVersion,
           sourceEncryptionAlgorithm: bundle.sourceEncryptionAlgorithm,
@@ -610,34 +664,54 @@ export async function rotateInboxKeys(params: {
           bundleAlgorithm: bundle.bundleAlgorithm,
           sharedAgentCount: sharedActorCount,
           sharedKeyVersionCount,
-          expiresAt: Timestamp.fromDate(new Date(Date.now() + 15 * 60_000)),
-          expiryMode: { tag: 'NeverExpires' as const },
         });
-        sharedDeviceIds.push(targetDevice.deviceId);
       }
 
       await conn.reducers.rotateAgentKeys({
         agentDbId: actor.id,
         encryptionPublicKey: rotationPlan.rotated.encryption.publicKey,
-        encryptionKeyVersion: rotationPlan.rotated.encryption.keyVersion,
-        encryptionAlgorithm: rotationPlan.rotated.encryption.algorithm,
+        keyBundleVersion: rotationPlan.rotated.encryption.keyVersion,
+        encryptionAlgorithm: { tag: 'EcdhP256V1' },
         signingPublicKey: rotationPlan.rotated.signing.publicKey,
-        signingKeyVersion: rotationPlan.rotated.signing.keyVersion,
-        signingAlgorithm: rotationPlan.rotated.signing.algorithm,
-        deviceKeyBundles: deviceShareBundles,
-        revokeDeviceIds: requestedRevokeIds,
+        signingAlgorithm: { tag: 'EcdsaP256Sha256V1' },
       });
-
       await commitStoredActorKeyRotation({
         profile,
         secretStore,
         identity: {
-          normalizedEmail,
+          email,
           slug: actor.slug,
-          inboxIdentifier: actor.inboxIdentifier ?? undefined,
         },
         plan: rotationPlan,
       });
+
+      let deviceSyncError: string | undefined;
+      try {
+        for (const bundle of deviceShareBundles) {
+          await conn.reducers.shareDeviceKeyBundle({
+            targetDeviceId: bundle.deviceId,
+            sourceEncryptionPublicKey: bundle.sourceEncryptionPublicKey,
+            sourceEncryptionKeyVersion: bundle.sourceEncryptionKeyVersion,
+            sourceEncryptionAlgorithm: { tag: 'EcdhP256DeviceV1' },
+            bundleCiphertext: fromHex(bundle.bundleCiphertext),
+            bundleIv: fromHex(bundle.bundleIv),
+            bundleAlgorithm: { tag: 'AesGcm256V1' },
+            sharedAgentCount: bundle.sharedAgentCount,
+            sharedKeyVersionCount: bundle.sharedKeyVersionCount,
+          });
+          sharedDeviceIds.push(bundle.deviceId);
+        }
+
+        for (const deviceId of requestedRevokeIds) {
+          await conn.reducers.revokeDevice({ deviceId });
+          revokedDeviceIds.push(deviceId);
+        }
+      } catch (error) {
+        deviceSyncError =
+          error instanceof Error
+            ? error.message
+            : 'Unable to finish device sharing or revocation.';
+      }
 
       return {
         profile: profile.name,
@@ -651,7 +725,8 @@ export async function rotateInboxKeys(params: {
           signing: rotationPlan.rotated.signing.keyVersion,
         },
         sharedDeviceIds,
-        revokedDeviceIds: requestedRevokeIds,
+        revokedDeviceIds,
+        ...(deviceSyncError ? { deviceSyncError } : {}),
       };
     } finally {
       subscription.unsubscribe();
@@ -661,10 +736,10 @@ export async function rotateInboxKeys(params: {
       throw error;
     }
     throw connectivityError(
-      'Unable to rotate inbox keys. Existing published keys are still active unless rotation completed successfully.',
+      'Unable to reset inbox keys. Existing published keys are still active unless reset completed successfully.',
       {
-      code: 'INBOX_ROTATE_KEYS_FAILED',
-      cause: error,
+        code: 'INBOX_ROTATE_KEYS_FAILED',
+        cause: error,
       }
     );
   } finally {

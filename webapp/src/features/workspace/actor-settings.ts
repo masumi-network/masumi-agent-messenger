@@ -33,11 +33,13 @@ export function matchesPublishedActorKeys(
     return false;
   }
 
+  // Public-key material is no longer on the agent row — it lives in
+  // `agent_key_bundle` and is resolved per version. Pin by version match;
+  // a matching version pair implies a matching key pair (bundles are
+  // append-only and immutable).
   return (
-    actor.currentEncryptionPublicKey === keyPair.encryption.publicKey &&
-    actor.currentEncryptionKeyVersion === keyPair.encryption.keyVersion &&
-    actor.currentSigningPublicKey === keyPair.signing.publicKey &&
-    actor.currentSigningKeyVersion === keyPair.signing.keyVersion
+    actor.currentKeyBundleVersion === keyPair.encryption.keyVersion &&
+    actor.currentKeyBundleVersion === keyPair.signing.keyVersion
   );
 }
 
@@ -161,13 +163,12 @@ export function inferAllowAllFromSelection(values: readonly string[]): boolean {
 
 export function toActorIdentity(actor: Agent) {
   return {
-    normalizedEmail: actor.normalizedEmail,
+    email: actor.email,
     slug: actor.slug,
-    inboxIdentifier: actor.inboxIdentifier ?? undefined,
   };
 }
 
 export function formatRotateKeysError(error: unknown): string {
-  const message = error instanceof Error ? error.message : 'Unable to rotate keys';
-  return `Key rotation did not finish. Existing published keys are still active. ${message}`;
+  const message = error instanceof Error ? error.message : 'Unable to reset keys';
+  return `Key reset did not finish. Existing published keys are still active. ${message}`;
 }

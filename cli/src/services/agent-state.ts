@@ -12,7 +12,7 @@ import {
   normalizeSupportedHeaderNames,
 } from '../../../shared/message-format';
 import type { DbConnection } from '../../../webapp/src/module_bindings';
-import type { VisibleAgentRow } from '../../../webapp/src/module_bindings/types';
+import type { Agent } from '../../../webapp/src/module_bindings/types';
 import { ensureAuthenticatedSession } from './auth';
 import type { TaskReporter } from './command-runtime';
 import {
@@ -29,7 +29,7 @@ import type { StoredOidcSession } from './oidc';
 import {
   connectAuthenticated,
   disconnectConnection,
-  readInboxRows,
+  readAccounts,
   subscribeInboxTables,
 } from './spacetimedb';
 
@@ -80,14 +80,14 @@ function resolveStoredActiveAgentSlug(profile: ResolvedProfile): string | null {
 }
 
 function requireOwnedActors(params: {
-  actors: VisibleAgentRow[];
-  normalizedEmail: string;
+  actors: Agent[];
+  email: string;
 }): {
-  defaultActor: VisibleAgentRow;
-  ownedActors: VisibleAgentRow[];
+  defaultActor: Agent;
+  ownedActors: Agent[];
 } {
   const defaultActor =
-    params.actors.find(actor => actor.normalizedEmail === params.normalizedEmail && actor.isDefault) ??
+    params.actors.find(actor => actor.email === params.email && actor.isDefault) ??
     null;
   if (!defaultActor) {
     throw userError('No default agent found. Run `masumi-agent-messenger account sync` first.', {
@@ -97,16 +97,16 @@ function requireOwnedActors(params: {
 
   return {
     defaultActor,
-    ownedActors: params.actors.filter(actor => actor.inboxId === defaultActor.inboxId),
+    ownedActors: params.actors.filter(actor => actor.accountId === defaultActor.accountId),
   };
 }
 
 function resolveOwnedActor(params: {
-  actors: VisibleAgentRow[];
-  normalizedEmail: string;
+  actors: Agent[];
+  email: string;
   actorSlug?: string | null;
   activeAgentSlug?: string | null;
-}): VisibleAgentRow {
+}): Agent {
   const { defaultActor, ownedActors } = requireOwnedActors(params);
   const requestedSlug =
     (params.actorSlug ? normalizeInboxSlug(params.actorSlug) : null) ??
@@ -120,10 +120,10 @@ function resolveOwnedActor(params: {
 }
 
 function requireOwnedActorBySlug(params: {
-  actors: VisibleAgentRow[];
-  normalizedEmail: string;
+  actors: Agent[];
+  email: string;
   actorSlug: string;
-}): VisibleAgentRow {
+}): Agent {
   const { ownedActors } = requireOwnedActors(params);
   const normalizedSlug = normalizeInboxSlug(params.actorSlug);
   if (!normalizedSlug) {
@@ -143,7 +143,7 @@ function requireOwnedActorBySlug(params: {
 }
 
 function toOwnedAgentSummary(
-  actor: VisibleAgentRow,
+  actor: Agent,
   activeAgentSlug: string | null
 ): OwnedAgentSummary {
   const metadata = readActorRegistrationMetadata(actor);
@@ -161,13 +161,13 @@ function toOwnedAgentSummary(
   };
 }
 
-function isDeregisteredOwnedActor(actor: VisibleAgentRow): boolean {
+function isDeregisteredOwnedActor(actor: Agent): boolean {
   return isDeregisteringOrDeregisteredMasumiRegistrationMetadata(
     readActorRegistrationMetadata(actor)
   );
 }
 
-function assertActorCanBeActive(actor: VisibleAgentRow): void {
+function assertActorCanBeActive(actor: Agent): void {
   if (!isDeregisteredOwnedActor(actor)) {
     return;
   }
@@ -181,7 +181,7 @@ function assertActorCanBeActive(actor: VisibleAgentRow): void {
 }
 
 function toOwnedAgentProfile(
-  actor: VisibleAgentRow,
+  actor: Agent,
   activeAgentSlug: string | null
 ): OwnedAgentProfile {
   return {
@@ -190,29 +190,48 @@ function toOwnedAgentProfile(
     publicLinkedEmailEnabled: actor.publicLinkedEmailEnabled,
     registrationNetwork: actor.masumiRegistrationNetwork ?? null,
     agentIdentifier: actor.masumiAgentIdentifier ?? null,
-    registrationState: actor.masumiRegistrationState ?? null,
+    registrationState: actor.masumiRegistrationState?.tag ?? null,
     messageCapabilities: toOwnedAgentMessageCapabilities(actor),
   };
 }
 
+function rowStateTagToGranular(
+  state: Agent['masumiRegistrationState']
+): string | undefined {
+  if (!state) return undefined;
+  switch (state.tag) {
+    case 'PendingRegistration':
+      return 'RegistrationRequested';
+    case 'Registered':
+      return 'RegistrationConfirmed';
+    case 'PendingDeregistration':
+      return 'DeregistrationRequested';
+    case 'Deregistered':
+      return 'DeregistrationConfirmed';
+    case 'Failed':
+      return 'RegistrationFailed';
+    default:
+      return undefined;
+  }
+}
+
 function readActorRegistrationMetadata(
-  actor: VisibleAgentRow
+  actor: Agent
 ): MasumiActorRegistrationMetadata | null {
+  const granularState = rowStateTagToGranular(actor.masumiRegistrationState);
   const metadata: MasumiActorRegistrationMetadata = {
     masumiRegistrationNetwork: actor.masumiRegistrationNetwork ?? undefined,
     masumiInboxAgentId: actor.masumiInboxAgentId ?? undefined,
     masumiAgentIdentifier: actor.masumiAgentIdentifier ?? undefined,
     masumiRegistrationState:
-      actor.masumiRegistrationState && isMasumiInboxAgentState(actor.masumiRegistrationState)
-        ? actor.masumiRegistrationState
-        : undefined,
+      granularState && isMasumiInboxAgentState(granularState) ? granularState : undefined,
   };
 
   return Object.values(metadata).some(value => value !== undefined) ? metadata : null;
 }
 
 function toOwnedAgentMessageCapabilities(
-  actor: VisibleAgentRow
+  actor: Agent
 ): OwnedAgentMessageCapabilities {
   const capabilities =
     actor.supportedMessageContentTypes && actor.supportedMessageHeaderNames
@@ -245,9 +264,9 @@ async function refreshOwnedAgentRegistration(params: {
   profile: ResolvedProfile;
   session: StoredOidcSession;
   conn: DbConnection;
-  actor: VisibleAgentRow;
+  actor: Agent;
   reporter: TaskReporter;
-}): Promise<VisibleAgentRow> {
+}): Promise<Agent> {
   const syncedRegistration = await syncMasumiInboxAgentRegistration({
     profile: params.profile,
     session: params.session,
@@ -281,8 +300,8 @@ export async function listOwnedAgents(params: {
 }): Promise<OwnedAgentListResult> {
   const profileState = await loadProfile(params.profileName);
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -299,8 +318,8 @@ export async function listOwnedAgents(params: {
     const subscription = await subscribeInboxTables(conn);
     try {
       const { ownedActors, defaultActor } = requireOwnedActors({
-        actors: readInboxRows(conn).actors,
-        normalizedEmail,
+        actors: (await readAccounts(conn)).actors,
+        email,
       });
       const selectedSlug = activeAgentSlug ?? defaultActor.slug;
       const sortedActors = ownedActors.sort((left, right) => {
@@ -311,7 +330,7 @@ export async function listOwnedAgents(params: {
         }
         return left.slug.localeCompare(right.slug);
       });
-      const refreshedActors: VisibleAgentRow[] = [];
+      const refreshedActors: Agent[] = [];
       for (const actor of sortedActors) {
         refreshedActors.push(
           await refreshOwnedAgentRegistration({
@@ -362,8 +381,8 @@ export async function getOwnedAgentProfile(params: {
 }> {
   const profileState = await loadProfile(params.profileName);
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -378,10 +397,10 @@ export async function getOwnedAgentProfile(params: {
   try {
     const subscription = await subscribeInboxTables(conn);
     try {
-      const snapshot = readInboxRows(conn);
+      const snapshot = await readAccounts(conn);
       const actor = resolveOwnedActor({
         actors: snapshot.actors,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
         activeAgentSlug: resolveStoredActiveAgentSlug(profileState),
       });
@@ -418,8 +437,8 @@ export async function useOwnedAgent(params: {
   agent: OwnedAgentProfile;
 }> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -435,8 +454,8 @@ export async function useOwnedAgent(params: {
     const subscription = await subscribeInboxTables(conn);
     try {
       const actor = requireOwnedActorBySlug({
-        actors: readInboxRows(conn).actors,
-        normalizedEmail,
+        actors: (await readAccounts(conn)).actors,
+        email,
         actorSlug: params.actorSlug,
       });
       const refreshedActor = await refreshOwnedAgentRegistration({
@@ -489,8 +508,8 @@ export async function updateOwnedAgentProfile(params: {
 
   const profileState = await loadProfile(params.profileName);
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -505,11 +524,11 @@ export async function updateOwnedAgentProfile(params: {
   try {
     const subscription = await subscribeInboxTables(conn);
     try {
-      const read = () => readInboxRows(conn);
-      const snapshot = read();
+      const read = () => readAccounts(conn);
+      const snapshot = await read();
       const actor = resolveOwnedActor({
         actors: snapshot.actors,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
         activeAgentSlug: resolveStoredActiveAgentSlug(profileState),
       });
@@ -528,17 +547,23 @@ export async function updateOwnedAgentProfile(params: {
 
       await conn.reducers.updateAgentProfile({
         agentDbId: actor.id,
-        displayName: params.displayName?.trim() || undefined,
-        clearDisplayName: params.clearDisplayName || undefined,
-        publicDescription: params.publicDescription?.trim() || undefined,
-        clearPublicDescription: params.clearPublicDescription || undefined,
+        displayName: params.clearDisplayName
+          ? ''
+          : params.displayName?.trim() || undefined,
+        publicDescription: params.clearPublicDescription
+          ? ''
+          : params.publicDescription?.trim() || undefined,
         publicLinkedEmailEnabled: params.publicLinkedEmailEnabled,
+        allowAllMessageContentTypes: undefined,
+        allowAllMessageHeaders: undefined,
+        supportedMessageContentTypes: undefined,
+        supportedMessageHeaderNames: undefined,
       });
 
-      const updatedActor = await new Promise<VisibleAgentRow>((resolve, reject) => {
+      const updatedActor = await new Promise<Agent>((resolve, reject) => {
         const timeoutAt = Date.now() + 10_000;
-        const poll = () => {
-          const nextActor = read().actors.find(row => row.id === actor.id) ?? null;
+        const poll = async () => {
+          const nextActor = (await read()).actors.find(row => row.id === actor.id) ?? null;
           if (
             nextActor &&
             (nextActor.displayName ?? null) === expectedDisplayName &&
@@ -556,9 +581,11 @@ export async function updateOwnedAgentProfile(params: {
             );
             return;
           }
-          setTimeout(poll, 100);
+          setTimeout(() => {
+            void poll().catch(reject);
+          }, 100);
         };
-        poll();
+        void poll().catch(reject);
       });
 
       const requestedActorSlug = params.actorSlug ? normalizeInboxSlug(params.actorSlug) : null;
@@ -618,8 +645,8 @@ export async function updateOwnedAgentMessageCapabilities(params: {
 
   const profileState = await loadProfile(params.profileName);
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -634,11 +661,11 @@ export async function updateOwnedAgentMessageCapabilities(params: {
   try {
     const subscription = await subscribeInboxTables(conn);
     try {
-      const read = () => readInboxRows(conn);
-      const snapshot = read();
+      const read = () => readAccounts(conn);
+      const snapshot = await read();
       const actor = resolveOwnedActor({
         actors: snapshot.actors,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
         activeAgentSlug: resolveStoredActiveAgentSlug(profileState),
       });
@@ -664,18 +691,21 @@ export async function updateOwnedAgentMessageCapabilities(params: {
         supportedHeaders: nextSupportedHeaders,
       };
 
-      await conn.reducers.setAgentPublicMessageCapabilities({
+      await conn.reducers.updateAgentProfile({
         agentDbId: actor.id,
-        allowAllContentTypes: expectedCapabilities.allowAllContentTypes,
-        allowAllHeaders: expectedCapabilities.allowAllHeaders,
-        supportedContentTypes: expectedCapabilities.supportedContentTypes,
-        supportedHeaders: expectedCapabilities.supportedHeaders,
+        displayName: undefined,
+        publicDescription: undefined,
+        publicLinkedEmailEnabled: undefined,
+        allowAllMessageContentTypes: expectedCapabilities.allowAllContentTypes,
+        allowAllMessageHeaders: expectedCapabilities.allowAllHeaders,
+        supportedMessageContentTypes: expectedCapabilities.supportedContentTypes,
+        supportedMessageHeaderNames: expectedCapabilities.supportedHeaders,
       });
 
-      const updatedActor = await new Promise<VisibleAgentRow>((resolve, reject) => {
+      const updatedActor = await new Promise<Agent>((resolve, reject) => {
         const timeoutAt = Date.now() + 10_000;
-        const poll = () => {
-          const nextActor = read().actors.find(row => row.id === actor.id) ?? null;
+        const poll = async () => {
+          const nextActor = (await read()).actors.find(row => row.id === actor.id) ?? null;
           if (nextActor) {
             const nextCapabilities = toOwnedAgentMessageCapabilities(nextActor);
             if (
@@ -703,9 +733,11 @@ export async function updateOwnedAgentMessageCapabilities(params: {
             );
             return;
           }
-          setTimeout(poll, 100);
+          setTimeout(() => {
+            void poll().catch(reject);
+          }, 100);
         };
-        poll();
+        void poll().catch(reject);
       });
 
       const requestedActorSlug = params.actorSlug ? normalizeInboxSlug(params.actorSlug) : null;

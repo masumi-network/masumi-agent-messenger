@@ -21,8 +21,8 @@ export function normalizeInboxSlug(value: string): string {
     .replace(/-{2,}/g, '-');
 }
 
-export function emailSlugBase(normalizedEmail: string): string {
-  const slug = normalizeInboxSlug(normalizedEmail);
+export function emailSlugBase(email: string): string {
+  const slug = normalizeInboxSlug(email);
   return slug || 'inbox';
 }
 
@@ -37,23 +37,23 @@ function hashBase36(value: string): string {
   return hash.toString(36).padStart(13, '0');
 }
 
-export function buildDefaultInboxSlug(email: string): string {
-  const normalizedEmail = normalizeEmail(email);
-  return `${emailSlugBase(normalizedEmail)}-${hashBase36(normalizedEmail).slice(0, 8)}`;
+export function buildDefaultInboxSlug(emailInput: string): string {
+  const email = normalizeEmail(emailInput);
+  return `${emailSlugBase(email)}-${hashBase36(email).slice(0, 8)}`;
 }
 
 export function buildPreferredDefaultInboxSlug(
-  email: string,
+  emailInput: string,
   isTaken: (slug: string) => boolean
 ): string {
-  const normalizedEmail = normalizeEmail(email);
-  const baseSlug = emailSlugBase(normalizedEmail);
+  const email = normalizeEmail(emailInput);
+  const baseSlug = emailSlugBase(email);
 
   if (!isReservedInboxSlug(baseSlug) && !isTaken(baseSlug)) {
     return baseSlug;
   }
 
-  const hashedSlug = buildDefaultInboxSlug(normalizedEmail);
+  const hashedSlug = buildDefaultInboxSlug(email);
   if (!isReservedInboxSlug(hashedSlug) && !isTaken(hashedSlug)) {
     return hashedSlug;
   }

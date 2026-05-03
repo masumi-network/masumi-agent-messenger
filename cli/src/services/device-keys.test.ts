@@ -33,8 +33,7 @@ function createProfile(): ResolvedProfile {
       spacetimeIdentity: 'identity',
       inbox: {
         id: '1',
-        normalizedEmail: 'agent@example.com',
-        displayEmail: 'agent@example.com',
+        email: 'agent@example.com',
       },
       actor: {
         id: '2',
@@ -43,8 +42,8 @@ function createProfile(): ResolvedProfile {
         displayName: 'Live',
       },
       keyVersions: {
-        encryption: 'enc-v1',
-        signing: 'sig-v1',
+        encryption: 1,
+        signing: 1,
       },
       updatedAt: '2026-04-15T00:00:00.000Z',
     },
@@ -54,21 +53,20 @@ function createProfile(): ResolvedProfile {
 function createOverride(): SharedActorKeyMaterial {
   return {
     identity: {
-      normalizedEmail: 'agent@example.com',
+      email: 'agent@example.com',
       slug: 'live',
-      inboxIdentifier: 'live',
     },
     current: {
       encryption: {
         publicKey: 'enc-pub',
         privateKey: 'enc-priv',
-        keyVersion: 'enc-v2',
+        keyVersion: 2,
         algorithm: 'ecdh-p256-v1',
       },
       signing: {
         publicKey: 'sig-pub',
         privateKey: 'sig-priv',
-        keyVersion: 'sig-v2',
+        keyVersion: 2,
         algorithm: 'ecdsa-p256-sha256-v1',
       },
     },
@@ -85,7 +83,7 @@ describe('device-keys', () => {
       overrides: [createOverride()],
     });
 
-    expect(snapshot.normalizedEmail).toBe('agent@example.com');
+    expect(snapshot.email).toBe('agent@example.com');
     expect(snapshot.actors).toEqual([createOverride()]);
   });
 

@@ -31,12 +31,12 @@ export async function maybeOfferBackupAfterKeyCreation(params: {
   }
 
   const profile = await loadProfile(params.profileName);
-  const normalizedEmail = profile.bootstrapSnapshot?.inbox.normalizedEmail ?? 'masumi-agent-messenger';
+  const email = profile.bootstrapSnapshot?.inbox.email ?? 'masumi-agent-messenger';
   const filePath =
     params.filePathOverride ||
     (await promptText({
       question: 'Backup file path',
-      defaultValue: defaultBackupFilePath(normalizedEmail),
+      defaultValue: defaultBackupFilePath(email),
     }));
 
   const passphrase =

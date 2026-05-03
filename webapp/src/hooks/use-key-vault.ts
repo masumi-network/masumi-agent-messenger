@@ -35,7 +35,7 @@ export function useKeyVault(): UseKeyVaultResult {
       authenticatedSession
         ? {
             userId: `${authenticatedSession.user.issuer}:${authenticatedSession.user.subject}`,
-            normalizedEmail: normalizeEmail(authenticatedSession.user.email ?? ''),
+            email: normalizeEmail(authenticatedSession.user.email ?? ''),
           }
         : null,
     [authenticatedSession]

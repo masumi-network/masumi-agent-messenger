@@ -10,11 +10,21 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+import {
+  ChannelAccessMode,
+  ChannelPermission,
+} from "./types";
+
 export default {
   agentDbId: __t.u64(),
-  channelId: __t.option(__t.u64()),
-  channelSlug: __t.option(__t.string()),
-  accessMode: __t.option(__t.string()),
-  publicJoinPermission: __t.option(__t.string()),
+  channelId: __t.u64(),
+  title: __t.option(__t.string()),
+  description: __t.option(__t.string()),
+  get accessMode() {
+    return __t.option(ChannelAccessMode);
+  },
   discoverable: __t.option(__t.bool()),
+  get defaultPermission() {
+    return __t.option(ChannelPermission);
+  },
 };

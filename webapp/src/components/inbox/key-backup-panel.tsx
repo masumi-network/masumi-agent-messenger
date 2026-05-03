@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
 type KeyBackupPanelProps = {
-  normalizedEmail: string;
+  email: string;
   disabled?: boolean;
   disabledMessage?: string;
   emphasisMessage?: string | null;
@@ -31,7 +31,7 @@ function downloadBackupFile(fileName: string, json: string): void {
 }
 
 export function KeyBackupPanel({
-  normalizedEmail,
+  email,
   disabled = false,
   disabledMessage = 'Unlock your vault before exporting or importing backups.',
   emphasisMessage,
@@ -67,7 +67,7 @@ export function KeyBackupPanel({
 
     try {
       const backup = await createEncryptedNamespaceKeyBackupForInbox(
-        normalizedEmail,
+        email,
         exportPassphrase
       );
       downloadBackupFile(backup.fileName, backup.json);
@@ -103,7 +103,7 @@ export function KeyBackupPanel({
       await importEncryptedNamespaceKeyBackupForInbox(
         json,
         importPassphrase,
-        normalizedEmail
+        email
       );
       setImportPassphrase('');
       setImportFile(null);

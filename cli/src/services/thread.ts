@@ -2,7 +2,9 @@ import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import {
   buildOwnActorIds,
   buildParticipantsByThreadId,
+  findActorIdByPublicIdentity,
   findDefaultActorByEmail,
+  isDirectThreadBetween,
   summarizeThread,
 } from '../../../shared/inbox-state';
 import {
@@ -12,17 +14,17 @@ import {
 import { timestampToISOString } from '../../../shared/spacetime-time';
 import type { DbConnection } from '../../../webapp/src/module_bindings';
 import type {
-  VisibleAgentRow,
-  VisibleThreadMessagePage,
-  VisibleThreadParticipantRow,
-  VisibleThreadReadStateRow,
-  VisibleThreadRow,
-  VisibleThreadInviteRow,
-  VisibleContactRequestRow,
-  VisibleMessageRow,
-  VisibleThreadSecretEnvelopeRow,
-  VisibleThreadPage,
+  Agent,
+  ThreadParticipantPreview,
+  Thread,
+  ThreadInvite,
+  ContactRequest,
+  Message,
+  ThreadSecretEnvelope as VisibleThreadSecretEnvelopeRow,
 } from '../../../webapp/src/module_bindings/types';
+import type {
+  ListThreadMessagesPage as VisibleThreadMessagePage,
+} from '../../../webapp/src/lib/procedures';
 import { ensureAuthenticatedSession } from './auth';
 import { getStoredActorKeyPair } from './actor-keys';
 import type { TaskReporter } from './command-runtime';
@@ -37,22 +39,33 @@ import { resolvePublishedActorLookup } from './published-actor-lookup';
 import {
   connectAuthenticated,
   disconnectConnection,
+  readAllThreadParticipants,
   readLatestMetadataRows,
-  repairOwnSenderReadStatesOnce,
+  type VisibleThreadReadStateRow,
 } from './spacetimedb';
 import { mergeRowsById } from './row-utils';
 import type { EncryptedMessageHeader } from '../../../shared/message-format';
 
 type MessageSnapshot = {
-  actors: VisibleAgentRow[];
-  participants: VisibleThreadParticipantRow[];
+  actors: Agent[];
+  participants: ThreadParticipantPreview[];
   readStates: VisibleThreadReadStateRow[];
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
-  threads: VisibleThreadRow[];
-  contactRequests: VisibleContactRequestRow[];
-  threadInvites: VisibleThreadInviteRow[];
-  messages: VisibleMessageRow[];
+  threads: Thread[];
+  contactRequests: ContactRequest[];
+  threadInvites: ThreadInvite[];
+  messages: Message[];
 };
+type VisibleThreadPage = {
+  actors: Agent[];
+  participantPreviews: ThreadParticipantPreview[];
+  readStates: VisibleThreadReadStateRow[];
+  threads: Thread[];
+  nextAfterSortKey?: string | null;
+};
+type GeneratedVisibleThreadPage = Awaited<
+  ReturnType<DbConnection['procedures']['listVisibleThreads']>
+>;
 type ThreadListFilter = 'active' | 'latest' | 'archived' | 'all';
 
 export type ActorLookupMetadata = {
@@ -72,7 +85,7 @@ export type ThreadListItem = {
   participantCount: number;
   participants: string[];
   lastMessageAt: string;
-  lastMessageSeq: string;
+  lastMessageId: string;
 };
 
 export type ThreadListResult = {
@@ -93,7 +106,7 @@ export type ThreadListResult = {
 
 export type ThreadHistoryMessage = {
   id: string;
-  threadSeq: string;
+  messageId: string;
   secretVersion: string;
   createdAt: string;
   sender: {
@@ -128,7 +141,7 @@ export type ThreadHistoryResult = {
     locked: boolean;
     archived: boolean;
   };
-  lastReadThreadSeq: string;
+  lastReadMessageId: string;
   totalMessages: number;
   messages: ThreadHistoryMessage[];
 };
@@ -148,7 +161,7 @@ export type ThreadMessageCountResult = {
     participants: string[];
   };
   messageCount: number;
-  lastMessageSeq: string;
+  lastMessageId: string;
   lastMessageAt: string;
 };
 
@@ -187,7 +200,7 @@ export type ThreadMembershipResult = ThreadMutationResult & {
 };
 
 export type ThreadReadResult = ThreadMutationResult & {
-  throughSeq: string;
+  throughMessageId: string;
 };
 
 export type ThreadArchiveResult = ThreadMutationResult & {
@@ -236,37 +249,62 @@ function parseThreadId(value: string): bigint {
   }
 }
 
+function parseMessageId(value: string): bigint {
+  try {
+    const parsed = BigInt(value);
+    if (parsed < 0n) {
+      throw new Error('invalid');
+    }
+    return parsed;
+  } catch {
+    throw userError('Message id must be a non-negative integer.', {
+      code: 'INVALID_MESSAGE_ID',
+    });
+  }
+}
+
 function emptyVisibleThreadPage(): VisibleThreadPage {
   return {
     actors: [],
-    participants: [],
+    participantPreviews: [],
     readStates: [],
     threads: [],
     nextAfterSortKey: undefined,
   };
 }
 
+function toVisibleThreadPage(page: GeneratedVisibleThreadPage): VisibleThreadPage {
+  return {
+    actors: [...page.actors],
+    participantPreviews: [...page.participantPreviews],
+    readStates: page.participantPreviews.filter(participant => participant.lastReadMessageId !== undefined),
+    threads: [...page.threads],
+    nextAfterSortKey: page.nextAfterSortKey,
+  };
+}
+
 async function readThreadMessagePageRows(params: {
   conn: DbConnection;
-  actorId: bigint;
+  agentDbId: bigint;
   threadId: bigint;
-  beforeThreadSeq?: bigint;
+  beforeMessageId?: bigint;
   limit: number;
-}): Promise<Pick<VisibleThreadMessagePage, 'messages' | 'secretEnvelopes'>> {
+}): Promise<Pick<VisibleThreadMessagePage, 'messages' | 'secretEnvelopes' | 'nextBeforeMessageId'>> {
   const page = await params.conn.procedures.listThreadMessages({
-    agentDbId: params.actorId,
+    agentDbId: params.agentDbId,
     threadId: params.threadId,
-    beforeThreadSeq: params.beforeThreadSeq,
-    limit: BigInt(params.limit),
+    beforeMessageId: params.beforeMessageId,
+    limit: params.limit,
   });
 
   return {
     messages: mergeRowsById(page.messages),
     secretEnvelopes: mergeRowsById(page.secretEnvelopes),
+    nextBeforeMessageId: page.nextBeforeMessageId,
   };
 }
 
-function sortActors(left: VisibleAgentRow, right: VisibleAgentRow): number {
+function sortActors(left: Agent, right: Agent): number {
   if (left.isDefault !== right.isDefault) {
     return left.isDefault ? -1 : 1;
   }
@@ -287,9 +325,9 @@ function buildReadStateByThreadId(
 
 function requireDefaultActor(
   snapshot: MessageSnapshot,
-  normalizedEmail: string
-): VisibleAgentRow {
-  const actor = findDefaultActorByEmail(snapshot.actors, normalizedEmail);
+  email: string
+): Agent {
+  const actor = findDefaultActorByEmail(snapshot.actors, email);
   if (!actor) {
     throw userError('No default agent found. Run `masumi-agent-messenger account sync` first.', {
       code: 'INBOX_BOOTSTRAP_REQUIRED',
@@ -301,13 +339,13 @@ function requireDefaultActor(
 
 function resolveOwnedActor(params: {
   snapshot: MessageSnapshot;
-  normalizedEmail: string;
+  email: string;
   actorSlug?: string;
   threadId?: bigint;
-}): VisibleAgentRow {
-  const defaultActor = requireDefaultActor(params.snapshot, params.normalizedEmail);
+}): Agent {
+  const defaultActor = requireDefaultActor(params.snapshot, params.email);
   const ownedActors = params.snapshot.actors
-    .filter(actor => actor.inboxId === defaultActor.inboxId)
+    .filter(actor => actor.accountId === defaultActor.accountId)
     .sort(sortActors);
 
   if (params.actorSlug) {
@@ -345,7 +383,7 @@ function resolveOwnedActor(params: {
   return defaultActor;
 }
 
-function requireThread(snapshot: MessageSnapshot, threadId: bigint): VisibleThreadRow {
+function requireThread(snapshot: MessageSnapshot, threadId: bigint): Thread {
   const thread = snapshot.threads.find(row => row.id === threadId);
   if (!thread) {
     throw userError(`Thread ${threadId.toString()} is not visible.`, {
@@ -374,7 +412,6 @@ function normalizeThreadListFilter(
 async function readVisibleThreadListPage(params: {
   conn: DbConnection;
   actorId: bigint;
-  filter: ThreadListFilter;
   page: number;
   pageSize: number;
   afterSortKey?: string;
@@ -387,17 +424,15 @@ async function readVisibleThreadListPage(params: {
 
   let afterSortKey = params.afterSortKey;
   for (let currentPage = 1; currentPage <= params.page; currentPage += 1) {
-    const page = await params.conn.procedures.listVisibleThreads({
+    const page = toVisibleThreadPage(await params.conn.procedures.listVisibleThreads({
       agentDbId: params.actorId,
       afterSortKey,
-      filter: params.filter,
-      query: undefined,
-      limit: BigInt(params.pageSize),
-    });
+      limit: params.pageSize,
+    }));
     if (currentPage === params.page) {
       return page;
     }
-    if (page.nextAfterSortKey === undefined) {
+    if (page.nextAfterSortKey === undefined || page.nextAfterSortKey === null) {
       return emptyVisibleThreadPage();
     }
     afterSortKey = page.nextAfterSortKey;
@@ -409,30 +444,31 @@ async function readVisibleThreadListPage(params: {
 async function readVisibleThreadPageForActor(params: {
   conn: DbConnection;
   snapshot: MessageSnapshot;
-  normalizedEmail: string;
+  email: string;
   actorSlug?: string;
   threadId: bigint;
-}): Promise<{ actor: VisibleAgentRow; page: VisibleThreadPage }> {
-  const defaultActor = requireDefaultActor(params.snapshot, params.normalizedEmail);
+}): Promise<{ actor: Agent; page: VisibleThreadPage }> {
+  const defaultActor = requireDefaultActor(params.snapshot, params.email);
   const candidates = params.actorSlug
     ? [
         resolveOwnedActor({
           snapshot: params.snapshot,
-          normalizedEmail: params.normalizedEmail,
+          email: params.email,
           actorSlug: params.actorSlug,
         }),
       ]
     : params.snapshot.actors
-        .filter(actor => actor.inboxId === defaultActor.inboxId)
+        .filter(actor => actor.accountId === defaultActor.accountId)
         .sort(sortActors);
 
   for (const actor of candidates) {
     try {
-      const page = await params.conn.procedures.readVisibleThread({
+      const candidatePage = await params.conn.procedures.readVisibleThread({
         agentDbId: actor.id,
         threadId: params.threadId,
       });
-      if (page.threads.some(thread => thread.id === params.threadId)) {
+      if (candidatePage && candidatePage.threads.some(thread => thread.id === params.threadId)) {
+        const page = toVisibleThreadPage(candidatePage);
         return { actor, page };
       }
     } catch {
@@ -445,11 +481,72 @@ async function readVisibleThreadPageForActor(params: {
   });
 }
 
+function mergeVisibleThreadPageIntoSnapshot(
+  snapshot: MessageSnapshot,
+  page: VisibleThreadPage
+): MessageSnapshot {
+  return {
+    ...snapshot,
+    actors: mergeRowsById(snapshot.actors, page.actors),
+    participants: mergeRowsById(snapshot.participants, page.participantPreviews),
+    readStates: mergeRowsById(snapshot.readStates, page.readStates),
+    threads: mergeRowsById(snapshot.threads, page.threads),
+  };
+}
+
+async function readThreadScopedMetadataRows(params: {
+  conn: DbConnection;
+  email: string;
+  actorSlug?: string;
+  threadId: bigint;
+}): Promise<{
+  snapshot: MessageSnapshot;
+  actor: Agent;
+  thread: Thread;
+  participant: ThreadParticipantPreview;
+}> {
+  const baseSnapshot = await readLatestMetadataRows(params.conn, {
+    email: params.email,
+    actorSlug: params.actorSlug,
+  });
+  const { actor, page } = await readVisibleThreadPageForActor({
+    conn: params.conn,
+    snapshot: baseSnapshot,
+    email: params.email,
+    actorSlug: params.actorSlug,
+    threadId: params.threadId,
+  });
+  const participantPage = await readAllThreadParticipants(params.conn, params.threadId);
+  const snapshot = mergeVisibleThreadPageIntoSnapshot(
+    {
+      ...baseSnapshot,
+      actors: mergeRowsById(baseSnapshot.actors, participantPage.actors),
+      participants: mergeRowsById(baseSnapshot.participants, participantPage.participants),
+      readStates: mergeRowsById(
+        baseSnapshot.readStates,
+        participantPage.participants.filter(
+          participant => participant.lastReadMessageId !== undefined
+        )
+      ),
+    },
+    page
+  );
+  const thread = requireThread(snapshot, params.threadId);
+  const participant = requireActiveThreadParticipant(snapshot, params.threadId, actor.id);
+
+  return {
+    snapshot,
+    actor,
+    thread,
+    participant,
+  };
+}
+
 function requireActiveThreadParticipant(
   snapshot: MessageSnapshot,
   threadId: bigint,
   actorId: bigint
-): VisibleThreadParticipantRow {
+): ThreadParticipantPreview {
   const participant = snapshot.participants.find(row => {
     return row.threadId === threadId && row.agentDbId === actorId && row.active;
   });
@@ -462,9 +559,9 @@ function requireActiveThreadParticipant(
 }
 
 function buildThreadLabel(params: {
-  thread: VisibleThreadRow;
-  participantsByThreadId: Map<bigint, VisibleThreadParticipantRow[]>;
-  actorsById: Map<bigint, VisibleAgentRow>;
+  thread: Thread;
+  participantsByThreadId: Map<bigint, ThreadParticipantPreview[]>;
+  actorsById: Map<bigint, Agent>;
   ownActorIds: Set<bigint>;
 }): string {
   return summarizeThread(
@@ -475,24 +572,21 @@ function buildThreadLabel(params: {
   );
 }
 
-function buildDirectKey(
-  left: { publicIdentity: string },
-  right: { publicIdentity: string }
-): string {
-  const values = [left.publicIdentity, right.publicIdentity].sort();
-  return `direct:${values[0]}:${values[1]}`;
-}
 
 function isApprovalRequiredForFirstContactError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return message.includes('requires approval for first contact');
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('requires approval for first contact') ||
+    normalized.includes('direct contact requires approval')
+  );
 }
 
 async function waitForThread(params: {
   read: () => Promise<MessageSnapshot>;
-  predicate: (snapshot: MessageSnapshot) => VisibleThreadRow | null;
+  predicate: (snapshot: MessageSnapshot) => Thread | null;
   timeoutMs?: number;
-}): Promise<VisibleThreadRow> {
+}): Promise<Thread> {
   const timeoutAt = Date.now() + (params.timeoutMs ?? 10_000);
 
   while (Date.now() < timeoutAt) {
@@ -512,9 +606,9 @@ async function waitForThread(params: {
 }
 
 function listThreadParticipants(params: {
-  participantsByThreadId: Map<bigint, VisibleThreadParticipantRow[]>;
+  participantsByThreadId: Map<bigint, ThreadParticipantPreview[]>;
   threadId: bigint;
-  actorsById: Map<bigint, VisibleAgentRow>;
+  actorsById: Map<bigint, Agent>;
 }): string[] {
   return (params.participantsByThreadId.get(params.threadId) ?? [])
     .map(participant => params.actorsById.get(participant.agentDbId)?.slug ?? null)
@@ -523,12 +617,15 @@ function listThreadParticipants(params: {
 }
 
 function listPendingThreadInvitees(
-  threadInvites: VisibleThreadInviteRow[],
-  threadId: bigint
+  threadInvites: ThreadInvite[],
+  threadId: bigint,
+  actorsById: Map<bigint, Agent>
 ): string[] {
   return threadInvites
-    .filter(invite => invite.threadId === threadId && invite.status === 'pending')
-    .map(invite => invite.inviteeSlug)
+    .filter(invite => invite.threadId === threadId && invite.status.tag === 'Pending')
+    .map(invite =>
+      actorsById.get(invite.inviteeAgentDbId)?.slug ?? `agent#${invite.inviteeAgentDbId.toString()}`
+    )
     .sort((left, right) => left.localeCompare(right));
 }
 
@@ -547,7 +644,7 @@ function summarizeThreadMembership(
       threadId,
       actorsById,
     }),
-    invitedParticipants: listPendingThreadInvitees(snapshot.threadInvites, threadId),
+    invitedParticipants: listPendingThreadInvitees(snapshot.threadInvites, threadId, actorsById),
   };
 }
 
@@ -565,8 +662,11 @@ function buildRepresentedThreadPublicIdentities(
   }
 
   for (const invite of snapshot.threadInvites) {
-    if (invite.threadId === threadId && invite.status === 'pending') {
-      represented.add(invite.inviteePublicIdentity);
+    if (invite.threadId === threadId && invite.status.tag === 'Pending') {
+      const inviteeActor = actorsById.get(invite.inviteeAgentDbId);
+      if (inviteeActor) {
+        represented.add(inviteeActor.publicIdentity);
+      }
     }
   }
 
@@ -612,8 +712,8 @@ export async function listThreads(params: {
   reporter: TaskReporter;
 }): Promise<ThreadListResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -630,17 +730,13 @@ export async function listThreads(params: {
   try {
     params.reporter.verbose?.('Reading latest thread state');
     const snapshot = await readLatestMetadataRows(conn, {
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const actor = resolveOwnedActor({
       snapshot,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
-    });
-    await repairOwnSenderReadStatesOnce(conn, {
-      profileName: profile.name,
-      actorId: actor.id,
     });
     const page = normalizePage(params.page);
     const pageSize = normalizePageSize(params.pageSize);
@@ -648,45 +744,52 @@ export async function listThreads(params: {
     const threadPage = await readVisibleThreadListPage({
       conn,
       actorId: actor.id,
-      filter,
       page,
       pageSize,
       afterSortKey: params.afterSortKey,
     });
     const mergedActors = mergeRowsById(snapshot.actors, threadPage.actors);
-    const ownActorIds = buildOwnActorIds(mergedActors, actor.inboxId);
+    const ownActorIds = buildOwnActorIds(mergedActors, actor.accountId);
     const participantsByThreadId = buildParticipantsByThreadId(
-      threadPage.participants.filter(participant => participant.active)
+      threadPage.participantPreviews.filter(participant => participant.active)
     );
     const actorsById = new Map(mergedActors.map(row => [row.id, row] as const));
     const readStateByThreadId = buildReadStateByThreadId(threadPage.readStates, actor.id);
 
-    const threads = threadPage.threads.map(thread => {
+    const filteredThreads = threadPage.threads.filter(thread => {
+      const archived = readStateByThreadId.get(thread.id)?.archived ?? false;
+      if (filter === 'archived') return archived;
+      if (filter === 'active') return !archived;
+      return true;
+    });
+
+    const threads = filteredThreads.map(thread => {
       const readState = readStateByThreadId.get(thread.id);
-      const lastRead = readState?.lastReadThreadSeq ?? 0n;
+      const lastRead = readState?.lastReadMessageId ?? 0n;
+      const lastAssigned = thread.lastMessageId;
       const unreadMessages =
-        thread.lastMessageSeq > lastRead ? Number(thread.lastMessageSeq - lastRead) : 0;
+        lastAssigned > lastRead ? 1 : 0;
 
       return {
         id: thread.id.toString(),
-        kind: thread.kind,
+        kind: thread.kind.tag === 'Direct' ? 'direct' : 'group',
         label: buildThreadLabel({
           thread,
           participantsByThreadId,
           actorsById,
           ownActorIds,
         }),
-        locked: thread.membershipLocked,
+        locked: thread.kind.tag === 'Direct',
         archived: readState?.archived ?? false,
         unreadMessages,
-        participantCount: (participantsByThreadId.get(thread.id) ?? []).length,
+        participantCount: Number(thread.activeParticipantCount),
         participants: listThreadParticipants({
           participantsByThreadId,
           threadId: thread.id,
           actorsById,
         }),
         lastMessageAt: timestampToISOString(thread.lastMessageAt),
-        lastMessageSeq: thread.lastMessageSeq.toString(),
+        lastMessageId: thread.lastMessageId.toString(),
       } satisfies ThreadListItem;
     });
 
@@ -704,7 +807,7 @@ export async function listThreads(params: {
         page,
         pageSize,
         hasPrevious: Boolean(params.afterSortKey) || page > 1,
-        hasNext: threadPage.nextAfterSortKey !== undefined,
+        hasNext: threadPage.nextAfterSortKey !== null && threadPage.nextAfterSortKey !== undefined,
         nextAfterSortKey: threadPage.nextAfterSortKey ?? null,
         totalThreads: threads.length,
         threads,
@@ -729,8 +832,8 @@ export async function countThreadMessages(params: {
   reporter: TaskReporter;
 }): Promise<ThreadMessageCountResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -749,52 +852,48 @@ export async function countThreadMessages(params: {
   try {
     params.reporter.verbose?.('Reading latest thread message state');
     const snapshot = await readLatestMetadataRows(conn, {
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
       const { actor, page: initialPage } = await readVisibleThreadPageForActor({
         conn,
         snapshot,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
         threadId: requestedThreadId,
       });
-      await repairOwnSenderReadStatesOnce(conn, {
-        profileName: profile.name,
-        actorId: actor.id,
-      });
-      const page = await conn.procedures.readVisibleThread({
+      const refreshed = await conn.procedures.readVisibleThread({
         agentDbId: actor.id,
         threadId: requestedThreadId,
-      }).then(refreshedPage =>
-        refreshedPage.threads.some(row => row.id === requestedThreadId)
-          ? refreshedPage
-          : initialPage
-      );
+      });
+      const page: VisibleThreadPage =
+        refreshed && refreshed.threads.some(row => row.id === requestedThreadId)
+          ? toVisibleThreadPage(refreshed)
+          : initialPage;
       const thread = requireThread(
         { ...snapshot, threads: page.threads },
         requestedThreadId
       );
       requireActiveThreadParticipant(
-        { ...snapshot, participants: page.participants },
+        { ...snapshot, participants: page.participantPreviews },
         requestedThreadId,
         actor.id
       );
 
-      const ownActorIds = buildOwnActorIds(snapshot.actors, actor.inboxId);
+      const ownActorIds = buildOwnActorIds(snapshot.actors, actor.accountId);
       const participantsByThreadId = buildParticipantsByThreadId(
-        page.participants.filter(participant => participant.active)
+        page.participantPreviews.filter(participant => participant.active)
       );
       const actorsById = new Map(
         mergeRowsById(snapshot.actors, page.actors).map(row => [row.id, row] as const)
       );
-      const readState = buildReadStateByThreadId(page.readStates, actor.id).get(thread.id);
+      const readState = buildReadStateByThreadId(page.participantPreviews, actor.id).get(thread.id);
       const participants = listThreadParticipants({
         participantsByThreadId,
         threadId: thread.id,
         actorsById,
       });
-      const messageCount = Number(thread.lastMessageSeq);
+      const messageCount = Number(thread.messageCount);
       const label = buildThreadLabel({
         thread,
         participantsByThreadId,
@@ -815,15 +914,15 @@ export async function countThreadMessages(params: {
         actorSlug: actor.slug,
         thread: {
           id: thread.id.toString(),
-          kind: thread.kind,
+          kind: thread.kind.tag === 'Direct' ? 'direct' : 'group',
           label,
-          locked: thread.membershipLocked,
+          locked: thread.kind.tag === 'Direct',
           archived: readState?.archived ?? false,
-          participantCount: participants.length,
+          participantCount: Number(thread.activeParticipantCount),
           participants,
         },
         messageCount,
-        lastMessageSeq: thread.lastMessageSeq.toString(),
+        lastMessageId: thread.lastMessageId.toString(),
         lastMessageAt: timestampToISOString(thread.lastMessageAt),
       };
   } catch (error) {
@@ -849,8 +948,8 @@ export async function readThreadHistory(params: {
   readUnsupported?: boolean;
 }): Promise<PaginatedThreadHistoryResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -870,73 +969,75 @@ export async function readThreadHistory(params: {
   try {
     params.reporter.verbose?.('Reading latest thread history');
     const snapshot = await readLatestMetadataRows(conn, {
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
       const { actor, page: initialPage } = await readVisibleThreadPageForActor({
         conn,
         snapshot,
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
         threadId: requestedThreadId,
       });
-      await repairOwnSenderReadStatesOnce(conn, {
-        profileName: profile.name,
-        actorId: actor.id,
-      });
-      const page = await conn.procedures.readVisibleThread({
+      const refreshed = await conn.procedures.readVisibleThread({
         agentDbId: actor.id,
         threadId: requestedThreadId,
-      }).then(refreshedPage =>
-        refreshedPage.threads.some(row => row.id === requestedThreadId)
-          ? refreshedPage
-          : initialPage
-      );
+      });
+      const page: VisibleThreadPage =
+        refreshed && refreshed.threads.some(row => row.id === requestedThreadId)
+          ? toVisibleThreadPage(refreshed)
+          : initialPage;
       const thread = requireThread(
         { ...snapshot, threads: page.threads },
         requestedThreadId
       );
       requireActiveThreadParticipant(
-        { ...snapshot, participants: page.participants },
+        { ...snapshot, participants: page.participantPreviews },
         requestedThreadId,
         actor.id
       );
 
       const mergedActors = mergeRowsById(snapshot.actors, page.actors);
-      const ownActorIds = buildOwnActorIds(mergedActors, actor.inboxId);
+      const ownActorIds = buildOwnActorIds(mergedActors, actor.accountId);
       const participantsByThreadId = buildParticipantsByThreadId(
-        page.participants.filter(participant => participant.active)
+        page.participantPreviews.filter(participant => participant.active)
       );
       const actorsById = new Map(mergedActors.map(row => [row.id, row] as const));
 
       const requestedPage = normalizePage(params.page);
       const pageSize = normalizePageSize(params.pageSize);
-      const totalMessages = Number(thread.lastMessageSeq);
+      const totalMessages = Number(thread.messageCount);
       const totalPages = Math.max(1, Math.ceil(totalMessages / pageSize));
       const boundedPage = Math.min(requestedPage, totalPages);
-      const messageOffset = BigInt(boundedPage - 1) * BigInt(pageSize);
-      const beforeThreadSeq =
-        boundedPage <= 1 || thread.lastMessageSeq === 0n
-          ? undefined
-          : thread.lastMessageSeq + 1n - messageOffset;
 
       const recipientKeyPair = await getStoredActorKeyPair({
         profile,
         secretStore,
         identity: {
-          normalizedEmail: actor.normalizedEmail,
+          email: actor.email,
           slug: actor.slug,
-          inboxIdentifier: actor.inboxIdentifier ?? undefined,
         },
       });
 
-      const historyRows = await readThreadMessagePageRows({
-        conn,
-        actorId: actor.id,
-        threadId: requestedThreadId,
-        beforeThreadSeq,
-        limit: pageSize,
-      });
+      let beforeMessageId: bigint | undefined;
+      let historyRows: Pick<VisibleThreadMessagePage, 'messages' | 'secretEnvelopes' | 'nextBeforeMessageId'> = {
+        messages: [],
+        secretEnvelopes: [],
+        nextBeforeMessageId: undefined,
+      };
+      for (let currentPage = 1; currentPage <= boundedPage; currentPage += 1) {
+        historyRows = await readThreadMessagePageRows({
+          conn,
+          agentDbId: actor.id,
+          threadId: requestedThreadId,
+          beforeMessageId,
+          limit: pageSize,
+        });
+        beforeMessageId = historyRows.nextBeforeMessageId ?? undefined;
+        if (historyRows.messages.length === 0 || beforeMessageId === undefined) {
+          break;
+        }
+      }
       const secretEnvelopes = mergeRowsById(
         snapshot.secretEnvelopes,
         historyRows.secretEnvelopes
@@ -954,7 +1055,7 @@ export async function readThreadHistory(params: {
       const messages = await Promise.all(
         historyRows.messages
           .filter(message => message.threadId === requestedThreadId)
-          .sort((left, right) => compareBigInt(left.threadSeq, right.threadSeq))
+          .sort((left, right) => compareBigInt(left.id, right.id))
           .map(async message => {
             const senderActor = actorsById.get(message.senderAgentDbId);
             const decrypted = await decryptVisibleMessage({
@@ -966,12 +1067,14 @@ export async function readThreadHistory(params: {
               secretEnvelopes,
               recipientKeyPair,
               readUnsupported: params.readUnsupported,
+              allowFirstContactTrust:
+                thread.messageCount === 1n && thread.lastMessageId === message.id,
             });
 
             return {
               id: message.id.toString(),
-              threadSeq: message.threadSeq.toString(),
-              secretVersion: message.secretVersion,
+              messageId: message.id.toString(),
+              secretVersion: message.secretVersion.toString(),
               createdAt: timestampToISOString(message.createdAt),
               sender: {
                 id: senderActor?.id.toString() ?? message.senderAgentDbId.toString(),
@@ -995,8 +1098,8 @@ export async function readThreadHistory(params: {
           })
       );
 
-      const readState = buildReadStateByThreadId(page.readStates, actor.id).get(thread.id);
-      const lastReadThreadSeq = readState?.lastReadThreadSeq?.toString() ?? '0';
+      const readState = buildReadStateByThreadId(page.participantPreviews, actor.id).get(thread.id);
+      const lastReadMessageId = readState?.lastReadMessageId?.toString() ?? '0';
       const label = buildThreadLabel({
         thread,
         participantsByThreadId,
@@ -1015,12 +1118,12 @@ export async function readThreadHistory(params: {
         actorSlug: actor.slug,
         thread: {
           id: thread.id.toString(),
-          kind: thread.kind,
+          kind: thread.kind.tag === 'Direct' ? 'direct' : 'group',
           label,
-          locked: thread.membershipLocked,
+          locked: thread.kind.tag === 'Direct',
           archived: readState?.archived ?? false,
         },
-        lastReadThreadSeq,
+        lastReadMessageId,
         totalMessages,
         page: boundedPage,
         pageSize,
@@ -1079,8 +1182,8 @@ export async function createDirectThread(params: {
   reporter: TaskReporter;
 }): Promise<CreateThreadResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1098,19 +1201,24 @@ export async function createDirectThread(params: {
     params.reporter.verbose?.('Reading latest thread state');
     const read = () =>
       readLatestMetadataRows(conn, {
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
       });
     const snapshot = await read();
     const actor = resolveOwnedActor({
       snapshot,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const targetLookup = await resolvePublishedActorLookup({
       identifier: params.to,
       lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-      lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+      lookupByEmail: input =>
+        conn.procedures.lookupPublishedAgentsByEmailPage({
+          ...input,
+          afterId: undefined,
+          limit: undefined,
+        }),
       invalidMessage: 'Inbox slug or email is invalid.',
       invalidCode: 'INVALID_AGENT_IDENTIFIER',
       notFoundCode: 'ACTOR_NOT_FOUND',
@@ -1123,24 +1231,21 @@ export async function createDirectThread(params: {
       });
     }
 
+    const targetActorId = findActorIdByPublicIdentity(snapshot.actors, target.publicIdentity);
     const beforeThreadIds = new Set(
       snapshot.threads
-        .filter(thread => {
-          return (
-            thread.kind === 'direct' &&
-            thread.dedupeKey === buildDirectKey(actor, {
-              publicIdentity: target.publicIdentity,
-            })
-          );
-        })
+        .filter(thread =>
+          targetActorId !== null && isDirectThreadBetween(thread, actor.id, targetActorId)
+        )
         .map(thread => thread.id.toString())
     );
 
     try {
-      await conn.reducers.createDirectThread({
+      await conn.reducers.createThread({
         agentDbId: actor.id,
+        kind: { tag: 'Direct' },
         otherAgentPublicIdentity: target.publicIdentity,
-        membershipLocked: undefined,
+        participantPublicIdentities: undefined,
         title: params.title?.trim() || undefined,
       });
     } catch (error) {
@@ -1157,16 +1262,20 @@ export async function createDirectThread(params: {
 
     const thread = await waitForThread({
       read,
-      predicate: nextSnapshot =>
-        nextSnapshot.threads.find(row => {
-          return (
-            row.kind === 'direct' &&
-            row.dedupeKey === buildDirectKey(actor, {
-              publicIdentity: target.publicIdentity,
-            }) &&
-            !beforeThreadIds.has(row.id.toString())
-          );
-        }) ?? null,
+      predicate: nextSnapshot => {
+        const nextTargetActorId = findActorIdByPublicIdentity(
+          nextSnapshot.actors,
+          target.publicIdentity
+        );
+        if (nextTargetActorId === null) return null;
+        return (
+          nextSnapshot.threads.find(
+            row =>
+              isDirectThreadBetween(row, actor.id, nextTargetActorId) &&
+              !beforeThreadIds.has(row.id.toString())
+          ) ?? null
+        );
+      },
     });
 
     params.reporter.success(`Created direct thread ${thread.id.toString()}`);
@@ -1177,7 +1286,7 @@ export async function createDirectThread(params: {
       threadId: thread.id.toString(),
       label: params.title?.trim() || target.displayName || target.slug,
       kind: 'direct',
-      locked: thread.membershipLocked,
+      locked: thread.kind.tag === 'Direct',
       participants: [actor.slug, target.slug].sort((left, right) => left.localeCompare(right)),
       invitedParticipants: [],
       targetLookup: {
@@ -1215,8 +1324,8 @@ export async function createGroupThread(params: {
   }
 
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1234,13 +1343,13 @@ export async function createGroupThread(params: {
     params.reporter.verbose?.('Reading latest thread state');
     const read = () =>
       readLatestMetadataRows(conn, {
-        normalizedEmail,
+        email,
         actorSlug: params.actorSlug,
       });
     const snapshot = await read();
     const actor = resolveOwnedActor({
       snapshot,
-      normalizedEmail,
+      email,
       actorSlug: params.actorSlug,
     });
     const resolvedParticipants = await Promise.all(
@@ -1248,7 +1357,12 @@ export async function createGroupThread(params: {
         resolvePublishedActorLookup({
           identifier,
           lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-          lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+          lookupByEmail: input =>
+            conn.procedures.lookupPublishedAgentsByEmailPage({
+              ...input,
+              afterId: undefined,
+              limit: undefined,
+            }),
           invalidMessage: 'Participant slug or email is invalid.',
           invalidCode: 'INVALID_AGENT_IDENTIFIER',
           notFoundCode: 'ACTOR_NOT_FOUND',
@@ -1261,10 +1375,13 @@ export async function createGroupThread(params: {
       .map(participant => participant.selected.publicIdentity);
 
     const beforeThreadIds = new Set(snapshot.threads.map(thread => thread.id.toString()));
-    await conn.reducers.createGroupThread({
+    // Direct/group behavior is encoded in `kind`.
+    void params.locked;
+    await conn.reducers.createThread({
       agentDbId: actor.id,
+      kind: { tag: 'Group' },
+      otherAgentPublicIdentity: undefined,
       participantPublicIdentities,
-      membershipLocked: params.locked,
       title: params.title?.trim() || undefined,
     });
 
@@ -1273,7 +1390,7 @@ export async function createGroupThread(params: {
       predicate: nextSnapshot =>
         nextSnapshot.threads.find(row => {
           return (
-            row.kind === 'group' &&
+            row.kind.tag === 'Group' &&
             row.creatorAgentDbId === actor.id &&
             !beforeThreadIds.has(row.id.toString())
           );
@@ -1297,7 +1414,7 @@ export async function createGroupThread(params: {
       threadId: thread.id.toString(),
       label: params.title?.trim() || `Group thread ${thread.id.toString()}`,
       kind: 'group',
-      locked: thread.membershipLocked,
+      locked: thread.kind.tag === 'Direct',
       participants: membership.participants,
       invitedParticipants: membership.invitedParticipants,
       participantLookups: resolvedParticipants.map(participant => ({
@@ -1328,8 +1445,8 @@ export async function addThreadParticipant(params: {
   reporter: TaskReporter;
 }): Promise<ThreadMembershipResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1348,22 +1465,27 @@ export async function addThreadParticipant(params: {
   try {
     params.reporter.verbose?.('Reading latest thread state');
     const read = () =>
-      readLatestMetadataRows(conn, {
-        normalizedEmail,
+      readThreadScopedMetadataRows({
+        conn,
+        email,
         actorSlug: params.actorSlug,
-      });
-    const snapshot = await read();
-    const actor = resolveOwnedActor({
-      snapshot,
-      normalizedEmail,
+        threadId: requestedThreadId,
+      }).then(result => result.snapshot);
+    const { actor } = await readThreadScopedMetadataRows({
+      conn,
+      email,
       actorSlug: params.actorSlug,
       threadId: requestedThreadId,
     });
-    requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
     const targetLookup = await resolvePublishedActorLookup({
       identifier: params.participant,
       lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-      lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+      lookupByEmail: input =>
+        conn.procedures.lookupPublishedAgentsByEmailPage({
+          ...input,
+          afterId: undefined,
+          limit: undefined,
+        }),
       invalidMessage: 'Participant slug or email is invalid.',
       invalidCode: 'INVALID_AGENT_IDENTIFIER',
       notFoundCode: 'ACTOR_NOT_FOUND',
@@ -1374,7 +1496,7 @@ export async function addThreadParticipant(params: {
     await conn.reducers.addThreadParticipant({
       agentDbId: actor.id,
       threadId: requestedThreadId,
-      participantPublicIdentity: target.publicIdentity,
+      inviteePublicIdentity: target.publicIdentity,
     });
 
     const membershipSnapshot = await waitForThreadMembership({
@@ -1431,8 +1553,8 @@ export async function removeThreadParticipant(params: {
   reporter: TaskReporter;
 }): Promise<ThreadMembershipResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1456,17 +1578,12 @@ export async function removeThreadParticipant(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const snapshot = await readLatestMetadataRows(conn, {
-      normalizedEmail,
-      actorSlug: params.actorSlug,
-    });
-    const actor = resolveOwnedActor({
-      snapshot,
-      normalizedEmail,
+    const { snapshot, actor } = await readThreadScopedMetadataRows({
+      conn,
+      email,
       actorSlug: params.actorSlug,
       threadId: requestedThreadId,
     });
-    requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
 
     const threadParticipants = snapshot.participants.filter(row => {
       return row.threadId === requestedThreadId && row.active;
@@ -1487,12 +1604,14 @@ export async function removeThreadParticipant(params: {
     await conn.reducers.removeThreadParticipant({
       agentDbId: actor.id,
       threadId: requestedThreadId,
-      participantAgentDbId: targetActor.id,
+      targetAgentDbId: targetActor.id,
     });
 
-    const nextSnapshot = await readLatestMetadataRows(conn, {
-      normalizedEmail,
+    const { snapshot: nextSnapshot } = await readThreadScopedMetadataRows({
+      conn,
+      email,
       actorSlug: params.actorSlug,
+      threadId: requestedThreadId,
     });
     const thread = requireThread(nextSnapshot, requestedThreadId);
     const membership = summarizeThreadMembership(nextSnapshot, requestedThreadId);
@@ -1523,12 +1642,12 @@ export async function markThreadRead(params: {
   profileName: string;
   actorSlug?: string;
   threadId: string;
-  throughSeq?: string;
+  throughMessageId?: string;
   reporter: TaskReporter;
 }): Promise<ThreadReadResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1546,24 +1665,28 @@ export async function markThreadRead(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const snapshot = await readLatestMetadataRows(conn, {
-      normalizedEmail,
-      actorSlug: params.actorSlug,
-    });
-    const actor = resolveOwnedActor({
-      snapshot,
-      normalizedEmail,
+    const { actor, thread } = await readThreadScopedMetadataRows({
+      conn,
+      email,
       actorSlug: params.actorSlug,
       threadId: requestedThreadId,
     });
-    const thread = requireThread(snapshot, requestedThreadId);
-    requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
 
-    const throughSeq = params.throughSeq ? parseThreadId(params.throughSeq) : thread.lastMessageSeq;
-    await conn.reducers.markThreadRead({
+    const lastAssignedMessageId = thread.lastMessageId;
+    const throughMessageId = params.throughMessageId
+      ? parseMessageId(params.throughMessageId)
+      : lastAssignedMessageId;
+    if (throughMessageId > lastAssignedMessageId) {
+      throw userError(
+        `Message id cannot be greater than the latest message id (${lastAssignedMessageId.toString()}).`,
+        { code: 'MESSAGE_ID_OUT_OF_RANGE' }
+      );
+    }
+    await conn.reducers.updateThreadReadState({
       agentDbId: actor.id,
       threadId: requestedThreadId,
-      upToThreadSeq: throughSeq,
+      lastReadMessageId: throughMessageId,
+      archived: undefined,
     });
 
     return {
@@ -1571,7 +1694,7 @@ export async function markThreadRead(params: {
       actorSlug: actor.slug,
       threadId: thread.id.toString(),
       label: thread.title?.trim() || `Thread ${thread.id.toString()}`,
-      throughSeq: throughSeq.toString(),
+      throughMessageId: throughMessageId.toString(),
     };
   } catch (error) {
     if (isCliError(error)) {
@@ -1594,8 +1717,8 @@ export async function setThreadArchived(params: {
   reporter: TaskReporter;
 }): Promise<ThreadArchiveResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1613,22 +1736,17 @@ export async function setThreadArchived(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const snapshot = await readLatestMetadataRows(conn, {
-      normalizedEmail,
-      actorSlug: params.actorSlug,
-    });
-    const actor = resolveOwnedActor({
-      snapshot,
-      normalizedEmail,
+    const { actor, thread } = await readThreadScopedMetadataRows({
+      conn,
+      email,
       actorSlug: params.actorSlug,
       threadId: requestedThreadId,
     });
-    const thread = requireThread(snapshot, requestedThreadId);
-    requireActiveThreadParticipant(snapshot, requestedThreadId, actor.id);
 
-    await conn.reducers.setThreadArchived({
+    await conn.reducers.updateThreadReadState({
       agentDbId: actor.id,
       threadId: requestedThreadId,
+      lastReadMessageId: undefined,
       archived: params.archived,
     });
 
@@ -1659,8 +1777,8 @@ export async function deleteThread(params: {
   reporter: TaskReporter;
 }): Promise<ThreadDeleteResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -1678,17 +1796,12 @@ export async function deleteThread(params: {
 
   try {
     params.reporter.verbose?.('Reading latest thread state');
-    const snapshot = await readLatestMetadataRows(conn, {
-      normalizedEmail,
-      actorSlug: params.actorSlug,
-    });
-    const actor = resolveOwnedActor({
-      snapshot,
-      normalizedEmail,
+    const { actor, thread } = await readThreadScopedMetadataRows({
+      conn,
+      email,
       actorSlug: params.actorSlug,
       threadId: requestedThreadId,
     });
-    const thread = requireThread(snapshot, requestedThreadId);
 
     await conn.reducers.deleteThread({
       agentDbId: actor.id,

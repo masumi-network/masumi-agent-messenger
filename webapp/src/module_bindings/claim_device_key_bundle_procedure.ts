@@ -11,10 +11,10 @@ import {
 } from "spacetimedb";
 
 import {
-  ClaimedDeviceKeyBundleRow,
+  DeviceKeyBundle,
 } from "./types";
 
 export const params = {
   deviceId: __t.string(),
 };
-export const returnType = __t.array(ClaimedDeviceKeyBundleRow)
+export const returnType = __t.array(DeviceKeyBundle)

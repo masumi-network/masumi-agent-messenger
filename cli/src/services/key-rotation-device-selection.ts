@@ -69,7 +69,7 @@ export async function resolveRotationDeviceSelection(params: {
   }
 
   params.reporter.info(
-    'Review approved devices. Sync keeps them online after rotation; revoke removes future access.'
+    'Review approved devices. Sync keeps them online after reset; revoke removes future access.'
   );
 
   const shareDeviceIds: string[] = [];
@@ -77,10 +77,10 @@ export async function resolveRotationDeviceSelection(params: {
 
   for (const device of otherApprovedDevices) {
     const decision = await promptChoice<RotationDeviceDecision>({
-      question: `After rotation, ${cyan(formatDeviceLabel(device))}:`,
+      question: `After reset, ${cyan(formatDeviceLabel(device))}:`,
       defaultValue: 'share',
       options: [
-        { value: 'share', label: 'Sync rotated keys' },
+        { value: 'share', label: 'Sync reset keys' },
         { value: 'revoke', label: 'Revoke device' },
         { value: 'skip', label: 'Leave unsynced' },
       ],

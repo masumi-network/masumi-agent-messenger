@@ -1,6 +1,7 @@
 import { Link, createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Hash, Radio, SignIn } from '@phosphor-icons/react';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { Timestamp } from 'spacetimedb';
 import { useReducer, useSpacetimeDB } from 'spacetimedb/tanstack';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -26,11 +27,13 @@ import { Textarea } from '@/components/ui/textarea';
 import { buildLoginHref, useAuthSession } from '@/lib/auth-session';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { buildRouteHead } from '@/lib/seo';
+import { readAllOwnedAgents } from '@/lib/spacetime-procedure-reads';
 import { useLiveTable } from '@/lib/spacetime-live-table';
+import { useProcedureSnapshot } from '@/lib/spacetime-procedure-snapshot';
 import { useWorkspaceShell } from '@/features/workspace/use-workspace-shell';
 import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell';
 import { reducers, tables, type DbConnection } from '@/module_bindings';
-import type { Agent, PublicChannelPageRow } from '@/module_bindings/types';
+import type { AccountChangeSignal, Agent, Channel } from '@/module_bindings/types';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 
@@ -77,7 +80,7 @@ type PublicChannelCursor = {
   beforeChannelId?: bigint;
 };
 
-function sortPublicChannels<T extends PublicChannelPageRow>(channels: T[]): T[] {
+function sortPublicChannels<T extends Channel>(channels: T[]): T[] {
   return [...channels].sort((left, right) => {
     if (left.lastMessageAt.microsSinceUnixEpoch > right.lastMessageAt.microsSinceUnixEpoch) {
       return -1;
@@ -85,8 +88,8 @@ function sortPublicChannels<T extends PublicChannelPageRow>(channels: T[]): T[] 
     if (left.lastMessageAt.microsSinceUnixEpoch < right.lastMessageAt.microsSinceUnixEpoch) {
       return 1;
     }
-    if (left.channelId > right.channelId) return -1;
-    if (left.channelId < right.channelId) return 1;
+    if (left.id > right.id) return -1;
+    if (left.id < right.id) return 1;
     return left.slug.localeCompare(right.slug);
   });
 }
@@ -98,12 +101,14 @@ function readPublicChannelPageError(error: unknown): string {
 }
 
 function usePublicChannelPage() {
+  const auth = useAuthSession();
   const connectionState = useSpacetimeDB();
   const connection = connectionState.getConnection?.() as DbConnection | null;
   const isActive = connectionState.isActive && connection !== null;
+  const isAuthenticated = auth.status === 'authenticated';
   const [cursorStack, setCursorStack] = useState<PublicChannelCursor[]>([{}]);
   const [pageIndex, setPageIndex] = useState(0);
-  const [pageRows, setPageRows] = useState<PublicChannelPageRow[]>([]);
+  const [pageRows, setPageRows] = useState<Channel[]>([]);
   const [loadingPage, setLoadingPage] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const cursor = cursorStack[pageIndex] ?? {};
@@ -119,6 +124,13 @@ function usePublicChannelPage() {
   }, [connection]);
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      return deferEffectStateUpdate(() => {
+        setPageRows([]);
+        setLoadingPage(false);
+        setPageError('Sign in to browse the public channel index.');
+      });
+    }
     if (!isActive || !connection) {
       return deferEffectStateUpdate(() => {
         setPageRows([]);
@@ -135,11 +147,16 @@ function usePublicChannelPage() {
       setLoadingPage(true);
       setPageError(null);
 
+      const beforeLastMessageAt =
+        cursor.beforeLastMessageAtMicros === undefined
+          ? undefined
+          : new Timestamp(cursor.beforeLastMessageAtMicros);
+
       void connection.procedures
-        .listPublicChannels({
-          beforeLastMessageAtMicros: cursor.beforeLastMessageAtMicros,
+        .listDiscoverableChannels({
+          beforeLastMessageAt,
           beforeChannelId: cursor.beforeChannelId,
-          limit: BigInt(PUBLIC_CHANNEL_PAGE_SIZE),
+          limit: PUBLIC_CHANNEL_PAGE_SIZE,
         })
         .then(rows => {
           if (cancelled) {
@@ -148,7 +165,7 @@ function usePublicChannelPage() {
           setPageRows(rows);
           setLoadingPage(false);
         })
-        .catch(error => {
+        .catch((error: unknown) => {
           if (cancelled) {
             return;
           }
@@ -162,7 +179,14 @@ function usePublicChannelPage() {
       cancelled = true;
       cancelStart();
     };
-  }, [connection, cursor.beforeChannelId, cursor.beforeLastMessageAtMicros, cursorKey, isActive]);
+  }, [
+    connection,
+    cursor.beforeChannelId,
+    cursor.beforeLastMessageAtMicros,
+    cursorKey,
+    isActive,
+    isAuthenticated,
+  ]);
 
   const channels = useMemo(() => {
     return sortPublicChannels(pageRows);
@@ -180,7 +204,7 @@ function usePublicChannelPage() {
       const nextCursors = existingCursors.slice(0, nextPageIndex);
       nextCursors[nextPageIndex] = {
         beforeLastMessageAtMicros: lastChannel.lastMessageAt.microsSinceUnixEpoch,
-        beforeChannelId: lastChannel.channelId,
+        beforeChannelId: lastChannel.id,
       };
       return nextCursors;
     });
@@ -193,7 +217,7 @@ function usePublicChannelPage() {
 
   return {
     channels,
-    ready: isActive && !loadingPage,
+    ready: (!isAuthenticated || isActive) && !loadingPage,
     error: pageError,
     pageIndex,
     canPrevious: pageIndex > 0,
@@ -202,11 +226,6 @@ function usePublicChannelPage() {
     goToPreviousPage,
     goToNextPage,
   };
-}
-
-function describePublicJoinPermission(permission: string | null | undefined): string {
-  if (permission === 'read_write') return 'Read/write join';
-  return 'Read-only join';
 }
 
 function PublicChannelsPageContent() {
@@ -222,8 +241,8 @@ function PublicChannelsPageContent() {
           </div>
           <h1 className="text-3xl font-semibold tracking-tight">Public channels</h1>
           <p className="max-w-2xl text-sm text-muted-foreground">
-            Read the latest public channel messages without OIDC. Sign in from the home page when
-            you need full history, posting, or administration.
+            Open public channel links directly without OIDC. Sign in to browse the channel index,
+            post messages, or administer channels.
           </p>
         </div>
         <Button asChild>
@@ -235,16 +254,18 @@ function PublicChannelsPageContent() {
       </header>
 
       {publicChannelPage.error ? (
-        <Alert variant="destructive">
-          <AlertTitle>Channel subscription failed</AlertTitle>
+        <Alert>
+          <AlertTitle>Channel index unavailable</AlertTitle>
           <AlertDescription>{publicChannelPage.error}</AlertDescription>
         </Alert>
       ) : null}
 
       <Alert>
-        <AlertTitle>Sign in to create channels</AlertTitle>
+        <AlertTitle>Sign in to browse channels</AlertTitle>
         <AlertDescription className="space-y-3">
-          <span className="block">Anonymous visitors can read public channels.</span>
+          <span className="block">
+            Anonymous visitors can still read a public channel when they have its direct URL.
+          </span>
           <Button asChild variant="outline">
             <a href={buildLoginHref('/channels')}>Sign in</a>
           </Button>
@@ -270,16 +291,20 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
   const navigate = useNavigate();
   const createChannelReducer = useReducer(reducers.createChannel);
   const publicChannelPage = usePublicChannelPage();
-  const [actors, actorsReady, actorsError] = useLiveTable<Agent>(
-    tables.visibleAgents,
-    'visibleAgents'
+  const [accountSignals] = useLiveTable<AccountChangeSignal>(
+    tables.visible_account_change_signal,
+    'visible_account_change_signal'
   );
+  const accountSignal = accountSignals[0] ?? null;
+  const [actors, actorsReady, actorsError] =
+    useProcedureSnapshot<Agent>(
+      readAllOwnedAgents,
+      accountSignal?.ownedAgentsVersion.toString() ?? null
+    );
   const [draftSlug, setDraftSlug] = useState('');
   const [draftTitle, setDraftTitle] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
   const [draftAccessMode, setDraftAccessMode] = useState<'public' | 'approval_required'>('public');
-  const [draftPublicJoinPermission, setDraftPublicJoinPermission] =
-    useState<'read' | 'read_write'>('read');
   const [draftDiscoverable, setDraftDiscoverable] = useState(true);
   const [creating, setCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -293,13 +318,13 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
       actors.find(
         actor =>
           actor.isDefault &&
-          actor.normalizedEmail === normalizedSessionEmail &&
-          !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+          actor.email === normalizedSessionEmail &&
+          !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState?.tag)
       ) ??
       actors.find(
         actor =>
-          actor.normalizedEmail === normalizedSessionEmail &&
-          !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState)
+          actor.email === normalizedSessionEmail &&
+          !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState?.tag)
       ) ??
       null,
     [actors, normalizedSessionEmail]
@@ -322,16 +347,16 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
           slug: createdSlug,
           title: draftTitle.trim() || undefined,
           description: draftDescription.trim() || undefined,
-          accessMode: draftAccessMode,
-          publicJoinPermission: draftPublicJoinPermission,
+          accessMode:
+            draftAccessMode === 'public' ? { tag: 'Public' } : { tag: 'ApprovalRequired' },
           discoverable: draftDiscoverable,
+          defaultPermission: undefined,
         })
       );
       setDraftSlug('');
       setDraftTitle('');
       setDraftDescription('');
       setDraftAccessMode('public');
-      setDraftPublicJoinPermission('read');
       setDraftDiscoverable(true);
       void navigate({
         to: '/channels/$slug',
@@ -461,27 +486,6 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
                       </SelectContent>
                     </Select>
                   </div>
-                  {draftAccessMode === 'public' ? (
-                    <div className="space-y-2">
-                      <Label>Public join</Label>
-                      <Select
-                        value={draftPublicJoinPermission}
-                        onValueChange={value =>
-                          setDraftPublicJoinPermission(
-                            value === 'read_write' ? 'read_write' : 'read'
-                          )
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="read">Read only</SelectItem>
-                          <SelectItem value="read_write">Read/write</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  ) : null}
                   <label className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm">
                     <input
                       type="checkbox"
@@ -555,7 +559,7 @@ function PublicChannelList({
   onNextPage,
 }: {
   ready: boolean;
-  channels: PublicChannelPageRow[];
+  channels: Channel[];
   pageIndex: number;
   canPrevious: boolean;
   canNext: boolean;
@@ -599,7 +603,7 @@ function PublicChannelList({
     <section className="space-y-3">
       <div className="grid gap-3 md:grid-cols-2">
         {channels.map(channel => (
-          <Card key={channel.channelId.toString()}>
+          <Card key={channel.id.toString()}>
             <CardHeader className="space-y-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 space-y-1">
@@ -613,17 +617,13 @@ function PublicChannelList({
                   {channel.discoverable ? 'Discoverable' : 'Public'}
                 </Badge>
               </div>
-              <Badge variant="outline" className="w-fit">
-                {describePublicJoinPermission(channel.publicJoinPermission)}
-              </Badge>
               {channel.description ? (
                 <p className="line-clamp-2 text-sm text-muted-foreground">{channel.description}</p>
               ) : null}
             </CardHeader>
             <CardContent className="flex items-center justify-between gap-3">
               <span className="text-sm text-muted-foreground">
-                {channel.lastMessageSeq.toString()} message
-                {channel.lastMessageSeq === 1n ? '' : 's'}
+                {channel.lastMessageId === 0n ? 'No messages yet' : 'Messages available'}
               </span>
               <Button asChild size="sm">
                 <Link to="/channels/$slug" params={{ slug: channel.slug }}>

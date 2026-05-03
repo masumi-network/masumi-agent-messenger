@@ -50,7 +50,7 @@ async function readStore() {
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
       return emptyImportedRotationKeyConfirmationStore();
     }
-    if (error instanceof SyntaxError || error instanceof Error) {
+    if (error instanceof SyntaxError) {
       throw userError('Imported rotation key confirmation store is corrupt.', {
         code: 'IMPORTED_ROTATION_KEY_CONFIRMATION_CORRUPT',
         cause: error,
@@ -103,7 +103,7 @@ function isDefaultProfileActor(profile: ResolvedProfile, identity: ActorIdentity
   const snapshot = profile.bootstrapSnapshot;
   return Boolean(
     snapshot &&
-      snapshot.inbox.normalizedEmail === identity.normalizedEmail &&
+      snapshot.inbox.email === identity.email &&
       normalizeInboxSlug(snapshot.actor.slug) === normalizeInboxSlug(identity.slug)
   );
 }
@@ -192,7 +192,7 @@ export async function requireImportedRotationKeyConfirmed(params: {
   }
 
   throw userError(
-    `Rotated private keys for \`${params.identity.slug}\` were imported automatically on this CLI profile. Confirm them locally before sending.`,
+    `Reset private keys for \`${params.identity.slug}\` were imported automatically on this CLI profile. Confirm them locally before sending.`,
     {
       code: 'IMPORTED_ROTATION_KEYS_UNCONFIRMED',
       hint: `masumi-agent-messenger account keys confirm --slug ${params.identity.slug}`,
@@ -250,7 +250,7 @@ function defaultIdentityForSlug(
     return null;
   }
   return {
-    normalizedEmail: snapshot.inbox.normalizedEmail,
+    email: snapshot.inbox.email,
     slug: snapshot.actor.slug,
   };
 }

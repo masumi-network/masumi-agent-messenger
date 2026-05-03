@@ -16,7 +16,6 @@ import {
 } from "./types";
 
 export const params = {
-  agentDbId: __t.u64(),
   get requests() {
     return __t.array(AgentPublicKeyLookupRequest);
   },

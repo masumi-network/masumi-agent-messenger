@@ -180,7 +180,7 @@ export async function resolveAccountRecoveryFlow(params: {
         filePath,
         passphrase,
         reporter: params.reporter,
-        expectedNormalizedEmail: current.inbox.normalizedEmail,
+        expectedNormalizedEmail: current.inbox.email,
       });
 
       params.reporter.success('Encrypted backup imported');
@@ -190,13 +190,13 @@ export async function resolveAccountRecoveryFlow(params: {
     }
 
     params.reporter.info(
-      'Rotating keys will permanently remove access to previous messages encrypted to the old keys. This CLI profile will only receive and decrypt new messages after rotation.'
+      'Resetting keys will permanently remove access to previous messages encrypted to the old keys. This CLI profile will only receive and decrypt new messages after reset.'
     );
     const confirmation = await promptText({
-      question: 'Type ROTATE to confirm destructive key rotation',
+      question: 'Type RESET to confirm destructive key reset',
     });
-    if (confirmation !== 'ROTATE') {
-      params.reporter.info('Key rotation cancelled.');
+    if (confirmation !== 'RESET') {
+      params.reporter.info('Key reset cancelled.');
       continue;
     }
 
@@ -205,7 +205,7 @@ export async function resolveAccountRecoveryFlow(params: {
       reporter: params.reporter,
     });
     params.reporter.info(
-      'Keys rotated. Previous encrypted messages will remain inaccessible on this CLI profile unless the older private keys are recovered later.'
+      'Keys reset. Previous encrypted messages will remain inaccessible on this CLI profile unless the older private keys are recovered later.'
     );
     const refreshed = await runBootstrapRefresh(params);
     current = mergeRecoveredBootstrap(current, refreshed, 'rotated');
@@ -246,7 +246,7 @@ export function toRecoveredAccountResult(result: BootstrapResult): Authenticated
     authenticated: true,
     expiresAt: null,
     issuer: null,
-    email: result.inbox.displayEmail,
+    email: result.inbox.email,
     subject: null,
     grantedScopes: [],
     ...result,

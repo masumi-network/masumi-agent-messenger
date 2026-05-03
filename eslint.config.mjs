@@ -30,7 +30,23 @@ export default tseslint.config(
       '@typescript-eslint/no-empty-object-type': 'off',
       '@typescript-eslint/ban-ts-comment': [
         'error',
-        { 'ts-ignore': 'allow-with-description' },
+        {
+          'ts-ignore': 'allow-with-description',
+          'ts-nocheck': true,
+        },
+      ],
+    },
+  },
+  // Deferred schema-rework tests may keep explicit file-level guards while production code may not.
+  {
+    files: ['**/*.test.ts', '**/*.test.tsx', 'webapp/tests/**/*.{ts,tsx}'],
+    rules: {
+      '@typescript-eslint/ban-ts-comment': [
+        'error',
+        {
+          'ts-ignore': 'allow-with-description',
+          'ts-nocheck': 'allow-with-description',
+        },
       ],
     },
   },

@@ -12,8 +12,9 @@ import {
   connectAuthenticated,
   disconnectConnection,
   readLatestMetadataRows,
-  readMessageRows,
+  type MessageRows,
 } from './spacetimedb';
+import { mergeRowsById } from './row-utils';
 
 const MAX_LOOKUP_RESULTS = 25;
 
@@ -47,7 +48,7 @@ export type InboxLookupResult = {
   discoveryError: string | null;
 };
 
-type MessageSnapshot = ReturnType<typeof readMessageRows>;
+type MessageSnapshot = MessageRows;
 
 function normalizeLimit(limit: number | undefined): number {
   if (limit === undefined) return 20;
@@ -95,7 +96,7 @@ export function buildDiscoveredInboxLookupItems(params: {
 
 export function buildInboxLookupEntries(params: {
   snapshot: MessageSnapshot;
-  normalizedEmail: string;
+  email: string;
   profileName?: string;
   query?: string;
   limit?: number;
@@ -104,7 +105,7 @@ export function buildInboxLookupEntries(params: {
   const query = normalizeQuery(params.query);
   const defaultActor = findDefaultActorByEmail(
     params.snapshot.actors,
-    params.normalizedEmail
+    params.email
   );
   if (!defaultActor) {
     throw userError('No default agent found. Run `masumi-agent-messenger account sync` first.', {
@@ -115,9 +116,9 @@ export function buildInboxLookupEntries(params: {
   const matched = buildDirectInboxEntries({
     actors: params.snapshot.actors,
     threads: params.snapshot.threads,
-    participants: params.snapshot.participants,
-    readStates: params.snapshot.readStates,
-    ownInboxId: defaultActor.inboxId,
+    participants: mergeRowsById(params.snapshot.participants, params.snapshot.readStates),
+    messages: params.snapshot.messages,
+    ownAccountId: defaultActor.accountId,
     dateFormat: 'iso',
   })
     .map(entry => ({
@@ -163,8 +164,8 @@ export async function lookupInboxes(params: {
   reporter: TaskReporter;
 }): Promise<InboxLookupResult> {
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
       code: 'OIDC_EMAIL_MISSING',
     });
@@ -181,18 +182,18 @@ export async function lookupInboxes(params: {
   try {
     params.reporter.verbose?.('Reading latest inbox message state');
     params.reporter.verbose?.('Collecting inboxes');
-    const snapshot = await readLatestMetadataRows(conn, { normalizedEmail });
+    const snapshot = await readLatestMetadataRows(conn, { email });
     const result = buildInboxLookupEntries({
       snapshot,
-      normalizedEmail,
+      email,
       profileName: profile.name,
       query: params.query,
       limit: params.limit,
     });
-    const defaultActor = findDefaultActorByEmail(snapshot.actors, normalizedEmail);
+    const defaultActor = findDefaultActorByEmail(snapshot.actors, email);
     const ownPublicIdentities = new Set(
       snapshot.actors
-        .filter(actor => actor.inboxId === defaultActor?.inboxId)
+        .filter(actor => actor.accountId === defaultActor?.accountId)
         .map(actor => actor.publicIdentity)
     );
     const existingPublicIdentities = new Set(
@@ -206,7 +207,12 @@ export async function lookupInboxes(params: {
         const lookup = await resolvePublishedActorLookup({
           identifier: params.query,
           lookupBySlug: input => conn.procedures.lookupPublishedAgentBySlug(input),
-          lookupByEmail: input => conn.procedures.lookupPublishedAgentsByEmail(input),
+          lookupByEmail: input =>
+            conn.procedures.lookupPublishedAgentsByEmailPage({
+              ...input,
+              afterId: undefined,
+              limit: undefined,
+            }),
           invalidMessage: 'Inbox slug or email is invalid.',
           invalidCode: 'INVALID_AGENT_IDENTIFIER',
           notFoundCode: 'ACTOR_NOT_FOUND',

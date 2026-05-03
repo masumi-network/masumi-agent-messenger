@@ -1,6 +1,7 @@
 import {
   actorIdentityKey,
   generateAgentKeyPair,
+  normalizeAgentKeyPairVersions,
   nextKeyVersion,
   type ActorIdentity,
   type AgentKeyPair,
@@ -12,6 +13,7 @@ import {
 } from './passphrase-crypto';
 import {
   generateDeviceKeyPair,
+  normalizeDeviceKeyPairVersion,
   type DeviceKeyPair,
   type DeviceKeyShareSnapshot,
   type SharedActorKeyMaterial,
@@ -54,7 +56,7 @@ type VaultMetaPayload = {
 
 export type KeyVaultOwner = {
   userId: string;
-  normalizedEmail: string;
+  email: string;
 };
 
 type ActorKeyMaterial = {
@@ -82,7 +84,7 @@ type ActorKeyVaultRecord = {
 
 type DeviceKeyVaultRecord = {
   id: string;
-  normalizedEmail: string;
+  email: string;
   ownerUserId?: string;
   version: number;
   updatedAt: string;
@@ -90,7 +92,7 @@ type DeviceKeyVaultRecord = {
 
 type PendingBootstrapKeyRecord = {
   id: string;
-  normalizedEmail: string;
+  email: string;
   ownerUserId?: string;
   version: number;
   updatedAt: string;
@@ -98,7 +100,7 @@ type PendingBootstrapKeyRecord = {
 
 type PendingDeviceShareKeyRecord = {
   id: string;
-  normalizedEmail: string;
+  email: string;
   ownerUserId?: string;
   version: number;
   updatedAt: string;
@@ -138,24 +140,24 @@ function cacheKey(identity: ActorIdentity): string {
   return actorIdentityKey(identity);
 }
 
-function activeActorStorageKey(normalizedEmail: string): string {
-  return `${ACTIVE_ACTOR_KEY_PREFIX}${normalizedEmail.trim().toLowerCase()}`;
+function activeActorStorageKey(email: string): string {
+  return `${ACTIVE_ACTOR_KEY_PREFIX}${email.trim().toLowerCase()}`;
 }
 
-function deviceCacheKey(normalizedEmail: string): string {
-  return normalizedEmail.trim().toLowerCase();
+function deviceCacheKey(email: string): string {
+  return email.trim().toLowerCase();
 }
 
-function pendingBootstrapCacheKey(normalizedEmail: string): string {
-  return normalizedEmail.trim().toLowerCase();
+function pendingBootstrapCacheKey(email: string): string {
+  return email.trim().toLowerCase();
 }
 
-function pendingDeviceShareCacheKey(normalizedEmail: string): string {
-  return normalizedEmail.trim().toLowerCase();
+function pendingDeviceShareCacheKey(email: string): string {
+  return email.trim().toLowerCase();
 }
 
-function pendingDeviceShareDeviceIdStorageKey(normalizedEmail: string): string {
-  return `${PENDING_DEVICE_SHARE_DEVICE_ID_PREFIX}${normalizedEmail.trim().toLowerCase()}`;
+function pendingDeviceShareDeviceIdStorageKey(email: string): string {
+  return `${PENDING_DEVICE_SHARE_DEVICE_ID_PREFIX}${email.trim().toLowerCase()}`;
 }
 
 function normalizeVaultUserId(userId: string): string {
@@ -172,20 +174,20 @@ function vaultMetaRecordId(owner: KeyVaultOwner): string {
 
 function cloneMaterial(material: ActorKeyMaterial): ActorKeyMaterial {
   return {
-    current: material.current ? structuredClone(material.current) : null,
-    archived: material.archived.map(pair => structuredClone(pair)),
+    current: material.current ? cloneAgentKeyPair(material.current) : null,
+    archived: material.archived.map(pair => cloneAgentKeyPair(pair)),
   };
 }
 
 function cloneDeviceMaterial(material: DeviceKeyMaterial): DeviceKeyMaterial {
   return {
     deviceId: material.deviceId,
-    keyPair: structuredClone(material.keyPair),
+    keyPair: normalizeDeviceKeyPairVersion(structuredClone(material.keyPair)),
   };
 }
 
 function cloneAgentKeyPair(keyPair: AgentKeyPair): AgentKeyPair {
-  return structuredClone(keyPair);
+  return normalizeAgentKeyPairVersions(structuredClone(keyPair));
 }
 
 function getCachedMaterial(identity: ActorIdentity): ActorKeyMaterial | null {
@@ -193,21 +195,21 @@ function getCachedMaterial(identity: ActorIdentity): ActorKeyMaterial | null {
   return cached ? cloneMaterial(cached) : null;
 }
 
-function getCachedDeviceMaterial(normalizedEmail: string): DeviceKeyMaterial | null {
-  const cached = unlockedDeviceMaterial.get(deviceCacheKey(normalizedEmail));
+function getCachedDeviceMaterial(email: string): DeviceKeyMaterial | null {
+  const cached = unlockedDeviceMaterial.get(deviceCacheKey(email));
   return cached ? cloneDeviceMaterial(cached) : null;
 }
 
-function getCachedPendingBootstrapKeyPair(normalizedEmail: string): AgentKeyPair | null {
+function getCachedPendingBootstrapKeyPair(email: string): AgentKeyPair | null {
   const cached = unlockedPendingBootstrapMaterial.get(
-    pendingBootstrapCacheKey(normalizedEmail)
+    pendingBootstrapCacheKey(email)
   );
   return cached ? cloneAgentKeyPair(cached) : null;
 }
 
-function getCachedPendingDeviceShareMaterial(normalizedEmail: string): DeviceKeyMaterial | null {
+function getCachedPendingDeviceShareMaterial(email: string): DeviceKeyMaterial | null {
   const cached = unlockedPendingDeviceShareMaterial.get(
-    pendingDeviceShareCacheKey(normalizedEmail)
+    pendingDeviceShareCacheKey(email)
   );
   return cached ? cloneDeviceMaterial(cached) : null;
 }
@@ -216,26 +218,26 @@ function setCachedMaterial(identity: ActorIdentity, material: ActorKeyMaterial):
   unlockedActorMaterial.set(cacheKey(identity), cloneMaterial(material));
 }
 
-function setCachedDeviceMaterial(normalizedEmail: string, material: DeviceKeyMaterial): void {
-  unlockedDeviceMaterial.set(deviceCacheKey(normalizedEmail), cloneDeviceMaterial(material));
+function setCachedDeviceMaterial(email: string, material: DeviceKeyMaterial): void {
+  unlockedDeviceMaterial.set(deviceCacheKey(email), cloneDeviceMaterial(material));
 }
 
 function setCachedPendingBootstrapKeyPair(
-  normalizedEmail: string,
+  email: string,
   keyPair: AgentKeyPair
 ): void {
   unlockedPendingBootstrapMaterial.set(
-    pendingBootstrapCacheKey(normalizedEmail),
+    pendingBootstrapCacheKey(email),
     cloneAgentKeyPair(keyPair)
   );
 }
 
 function setCachedPendingDeviceShareMaterial(
-  normalizedEmail: string,
+  email: string,
   material: DeviceKeyMaterial
 ): void {
   unlockedPendingDeviceShareMaterial.set(
-    pendingDeviceShareCacheKey(normalizedEmail),
+    pendingDeviceShareCacheKey(email),
     cloneDeviceMaterial(material)
   );
 }
@@ -345,10 +347,10 @@ async function getAllActorVaultRecords(): Promise<ActorKeyVaultRecord[]> {
   });
 }
 
-async function getDeviceVaultRecord(normalizedEmail: string): Promise<DeviceKeyVaultRecord | null> {
+async function getDeviceVaultRecord(email: string): Promise<DeviceKeyVaultRecord | null> {
   return withTransaction(DEVICE_KEYS_STORE, 'readonly', async transaction => {
     const store = transaction.objectStore(DEVICE_KEYS_STORE);
-    const result = await requestToPromise(store.get(deviceCacheKey(normalizedEmail)));
+    const result = await requestToPromise(store.get(deviceCacheKey(email)));
     return (result as DeviceKeyVaultRecord | undefined) ?? null;
   });
 }
@@ -360,12 +362,12 @@ async function setDeviceVaultRecord(record: DeviceKeyVaultRecord): Promise<void>
 }
 
 async function getPendingBootstrapKeyRecord(
-  normalizedEmail: string
+  email: string
 ): Promise<PendingBootstrapKeyRecord | null> {
   return withTransaction(PENDING_BOOTSTRAP_KEYS_STORE, 'readonly', async transaction => {
     const store = transaction.objectStore(PENDING_BOOTSTRAP_KEYS_STORE);
     const result = await requestToPromise(
-      store.get(pendingBootstrapCacheKey(normalizedEmail))
+      store.get(pendingBootstrapCacheKey(email))
     );
     return (result as PendingBootstrapKeyRecord | undefined) ?? null;
   });
@@ -380,12 +382,12 @@ async function setPendingBootstrapKeyRecord(
 }
 
 async function getPendingDeviceShareKeyRecord(
-  normalizedEmail: string
+  email: string
 ): Promise<PendingDeviceShareKeyRecord | null> {
   return withTransaction(PENDING_DEVICE_SHARE_KEYS_STORE, 'readonly', async transaction => {
     const store = transaction.objectStore(PENDING_DEVICE_SHARE_KEYS_STORE);
     const result = await requestToPromise(
-      store.get(pendingDeviceShareCacheKey(normalizedEmail))
+      store.get(pendingDeviceShareCacheKey(email))
     );
     return (result as PendingDeviceShareKeyRecord | undefined) ?? null;
   });
@@ -399,19 +401,19 @@ async function setPendingDeviceShareKeyRecord(
   });
 }
 
-async function deletePendingDeviceShareKeyRecord(normalizedEmail: string): Promise<void> {
+async function deletePendingDeviceShareKeyRecord(email: string): Promise<void> {
   await withTransaction(PENDING_DEVICE_SHARE_KEYS_STORE, 'readwrite', async transaction => {
     transaction
       .objectStore(PENDING_DEVICE_SHARE_KEYS_STORE)
-      .delete(pendingDeviceShareCacheKey(normalizedEmail));
+      .delete(pendingDeviceShareCacheKey(email));
   });
 }
 
-async function deletePendingBootstrapKeyRecord(normalizedEmail: string): Promise<void> {
+async function deletePendingBootstrapKeyRecord(email: string): Promise<void> {
   await withTransaction(PENDING_BOOTSTRAP_KEYS_STORE, 'readwrite', async transaction => {
     transaction
       .objectStore(PENDING_BOOTSTRAP_KEYS_STORE)
-      .delete(pendingBootstrapCacheKey(normalizedEmail));
+      .delete(pendingBootstrapCacheKey(email));
   });
 }
 
@@ -438,8 +440,9 @@ async function persistMaterial(
   material: ActorKeyMaterial,
   passphrase: string
 ): Promise<void> {
+  const normalized = cloneMaterial(material);
   const encrypted = await encryptJsonWithPassphrase(
-    material,
+    normalized,
     passphrase,
     ACTOR_KEYS_ALGORITHM
   );
@@ -452,7 +455,7 @@ async function persistMaterial(
     updatedAt: new Date().toISOString(),
     ...encrypted,
   });
-  setCachedMaterial(identity, material);
+  setCachedMaterial(identity, normalized);
 }
 
 async function loadMaterialFromRecord(
@@ -474,29 +477,30 @@ async function loadMaterialFromRecord(
 }
 
 async function persistDeviceMaterial(
-  normalizedEmail: string,
+  email: string,
   material: DeviceKeyMaterial,
   passphrase: string
 ): Promise<void> {
+  const normalized = cloneDeviceMaterial(material);
   const encrypted = await encryptJsonWithPassphrase(
-    material,
+    normalized,
     passphrase,
     DEVICE_KEYS_ALGORITHM
   );
 
   await setDeviceVaultRecord({
-    id: deviceCacheKey(normalizedEmail),
-    normalizedEmail,
+    id: deviceCacheKey(email),
+    email,
     ownerUserId: requireUnlockedVaultUserId(),
     version: 1,
     updatedAt: new Date().toISOString(),
     ...encrypted,
   });
-  setCachedDeviceMaterial(normalizedEmail, material);
+  setCachedDeviceMaterial(email, normalized);
 }
 
 async function loadDeviceMaterialFromRecord(
-  normalizedEmail: string,
+  email: string,
   record: DeviceKeyVaultRecord,
   passphrase: string
 ): Promise<DeviceKeyMaterial> {
@@ -509,34 +513,35 @@ async function loadDeviceMaterialFromRecord(
     },
     passphrase
   );
-  setCachedDeviceMaterial(normalizedEmail, decrypted);
+  setCachedDeviceMaterial(email, decrypted);
   return cloneDeviceMaterial(decrypted);
 }
 
 async function persistPendingDeviceShareMaterial(
-  normalizedEmail: string,
+  email: string,
   material: DeviceKeyMaterial,
   passphrase: string
 ): Promise<void> {
+  const normalized = cloneDeviceMaterial(material);
   const encrypted = await encryptJsonWithPassphrase(
-    material,
+    normalized,
     passphrase,
     PENDING_DEVICE_SHARE_KEYS_ALGORITHM
   );
 
   await setPendingDeviceShareKeyRecord({
-    id: pendingDeviceShareCacheKey(normalizedEmail),
-    normalizedEmail,
+    id: pendingDeviceShareCacheKey(email),
+    email,
     ownerUserId: requireUnlockedVaultUserId(),
     version: 1,
     updatedAt: new Date().toISOString(),
     ...encrypted,
   });
-  setCachedPendingDeviceShareMaterial(normalizedEmail, material);
+  setCachedPendingDeviceShareMaterial(email, normalized);
 }
 
 async function loadPendingDeviceShareMaterialFromRecord(
-  normalizedEmail: string,
+  email: string,
   record: PendingDeviceShareKeyRecord,
   passphrase: string
 ): Promise<DeviceKeyMaterial> {
@@ -549,7 +554,7 @@ async function loadPendingDeviceShareMaterialFromRecord(
     },
     passphrase
   );
-  setCachedPendingDeviceShareMaterial(normalizedEmail, decrypted);
+  setCachedPendingDeviceShareMaterial(email, decrypted);
   return cloneDeviceMaterial(decrypted);
 }
 
@@ -654,17 +659,17 @@ function parseStoredActorIdentity(raw: string | null): ActorIdentity | null {
   if (
     typeof parsed === 'object' &&
     parsed !== null &&
-    'normalizedEmail' in parsed &&
+    'email' in parsed &&
     'slug' in parsed &&
-    typeof parsed.normalizedEmail === 'string' &&
+    typeof parsed.email === 'string' &&
     typeof parsed.slug === 'string'
   ) {
     return {
-      normalizedEmail: parsed.normalizedEmail,
+      email: parsed.email,
       slug: parsed.slug,
-      inboxIdentifier:
-        'inboxIdentifier' in parsed && typeof parsed.inboxIdentifier === 'string'
-          ? parsed.inboxIdentifier
+      accountIdentifier:
+        'accountIdentifier' in parsed && typeof parsed.accountIdentifier === 'string'
+          ? parsed.accountIdentifier
           : undefined,
     };
   }
@@ -674,7 +679,7 @@ function parseStoredActorIdentity(raw: string | null): ActorIdentity | null {
 
 export function getAgentKeyPairForEncryptionVersion(
   identity: ActorIdentity,
-  encryptionKeyVersion: string
+  encryptionKeyVersion: number
 ): AgentKeyPair | null {
   const current = getStoredAgentKeyPair(identity);
   if (current && current.encryption.keyVersion === encryptionKeyVersion) {
@@ -685,18 +690,18 @@ export function getAgentKeyPairForEncryptionVersion(
   return archived.find(pair => pair.encryption.keyVersion === encryptionKeyVersion) ?? null;
 }
 
-export function getActiveActorIdentity(normalizedEmail?: string): ActorIdentity | null {
+export function getActiveActorIdentity(email?: string): ActorIdentity | null {
   try {
     const storage = ensureLocalStorage();
-    if (normalizedEmail) {
-      const normalizedKey = activeActorStorageKey(normalizedEmail);
+    if (email) {
+      const normalizedKey = activeActorStorageKey(email);
       const namespaced = parseStoredActorIdentity(storage.getItem(normalizedKey));
       if (namespaced) {
         return namespaced;
       }
 
       const fallback = parseStoredActorIdentity(storage.getItem(ACTIVE_ACTOR_KEY));
-      if (fallback?.normalizedEmail === normalizedEmail) {
+      if (fallback?.email === email) {
         const serialized = JSON.stringify(fallback);
         storage.setItem(normalizedKey, serialized);
         return fallback;
@@ -715,7 +720,7 @@ export function setActiveActorIdentity(identity: ActorIdentity): void {
   const storage = ensureLocalStorage();
   const serialized = JSON.stringify(identity);
   storage.setItem(ACTIVE_ACTOR_KEY, serialized);
-  storage.setItem(activeActorStorageKey(identity.normalizedEmail), serialized);
+  storage.setItem(activeActorStorageKey(identity.email), serialized);
 }
 
 export function getStoredAgentKeyPair(identity: ActorIdentity): AgentKeyPair | null {
@@ -758,44 +763,44 @@ export async function setStoredAgentKeyPair(
 }
 
 export async function loadStoredDeviceKeyMaterial(
-  normalizedEmail: string
+  email: string
 ): Promise<DeviceKeyMaterial | null> {
-  const cached = getCachedDeviceMaterial(normalizedEmail);
+  const cached = getCachedDeviceMaterial(email);
   if (cached) {
     return cached;
   }
 
-  const record = await getDeviceVaultRecord(normalizedEmail);
+  const record = await getDeviceVaultRecord(email);
   if (!record) {
     return null;
   }
 
-  return loadDeviceMaterialFromRecord(normalizedEmail, record, requireUnlockedPassphrase());
+  return loadDeviceMaterialFromRecord(email, record, requireUnlockedPassphrase());
 }
 
 export async function loadPendingDeviceShareKeyMaterial(
-  normalizedEmail: string
+  email: string
 ): Promise<DeviceKeyMaterial | null> {
-  const cached = getCachedPendingDeviceShareMaterial(normalizedEmail);
+  const cached = getCachedPendingDeviceShareMaterial(email);
   if (cached) {
     return cached;
   }
 
-  const record = await getPendingDeviceShareKeyRecord(normalizedEmail);
+  const record = await getPendingDeviceShareKeyRecord(email);
   if (!record) {
     return null;
   }
 
   return loadPendingDeviceShareMaterialFromRecord(
-    normalizedEmail,
+    email,
     record,
     requireUnlockedPassphrase()
   );
 }
 
-function getOrCreatePendingDeviceShareDeviceId(normalizedEmail: string): string {
+function getOrCreatePendingDeviceShareDeviceId(email: string): string {
   const storage = ensureLocalStorage();
-  const storageKey = pendingDeviceShareDeviceIdStorageKey(normalizedEmail);
+  const storageKey = pendingDeviceShareDeviceIdStorageKey(email);
   const existing = storage.getItem(storageKey)?.trim();
   if (existing) {
     return existing;
@@ -807,27 +812,27 @@ function getOrCreatePendingDeviceShareDeviceId(normalizedEmail: string): string 
 }
 
 export async function createPendingDeviceShareKeyMaterial(
-  normalizedEmail: string
+  email: string
 ): Promise<DeviceKeyMaterial> {
   const created: DeviceKeyMaterial = {
-    deviceId: getOrCreatePendingDeviceShareDeviceId(normalizedEmail),
+    deviceId: getOrCreatePendingDeviceShareDeviceId(email),
     keyPair: await generateDeviceKeyPair(),
   };
-  await persistPendingDeviceShareMaterial(normalizedEmail, created, requireUnlockedPassphrase());
+  await persistPendingDeviceShareMaterial(email, created, requireUnlockedPassphrase());
   return created;
 }
 
 export async function clearPendingDeviceShareKeyMaterial(
-  normalizedEmail: string
+  email: string
 ): Promise<void> {
-  await deletePendingDeviceShareKeyRecord(normalizedEmail);
-  unlockedPendingDeviceShareMaterial.delete(pendingDeviceShareCacheKey(normalizedEmail));
+  await deletePendingDeviceShareKeyRecord(email);
+  unlockedPendingDeviceShareMaterial.delete(pendingDeviceShareCacheKey(email));
 }
 
 export async function getOrCreateDeviceKeyMaterial(
-  normalizedEmail: string
+  email: string
 ): Promise<DeviceKeyMaterial> {
-  const existing = await loadStoredDeviceKeyMaterial(normalizedEmail);
+  const existing = await loadStoredDeviceKeyMaterial(email);
   if (existing) {
     return existing;
   }
@@ -836,12 +841,12 @@ export async function getOrCreateDeviceKeyMaterial(
     deviceId: crypto.randomUUID(),
     keyPair: await generateDeviceKeyPair(),
   };
-  await persistDeviceMaterial(normalizedEmail, created, requireUnlockedPassphrase());
+  await persistDeviceMaterial(email, created, requireUnlockedPassphrase());
   return created;
 }
 
 export async function hasPendingBootstrapKeyPair(owner: KeyVaultOwner): Promise<boolean> {
-  const record = await getPendingBootstrapKeyRecord(owner.normalizedEmail);
+  const record = await getPendingBootstrapKeyRecord(owner.email);
   if (!record) {
     return false;
   }
@@ -852,14 +857,14 @@ export async function hasPendingBootstrapKeyPair(owner: KeyVaultOwner): Promise<
 }
 
 export async function loadPendingBootstrapKeyPair(
-  normalizedEmail: string
+  email: string
 ): Promise<AgentKeyPair | null> {
-  const cached = getCachedPendingBootstrapKeyPair(normalizedEmail);
+  const cached = getCachedPendingBootstrapKeyPair(email);
   if (cached) {
     return cached;
   }
 
-  const record = await getPendingBootstrapKeyRecord(normalizedEmail);
+  const record = await getPendingBootstrapKeyRecord(email);
   if (!record) {
     return null;
   }
@@ -873,51 +878,52 @@ export async function loadPendingBootstrapKeyPair(
     },
     requireUnlockedPassphrase()
   );
-  setCachedPendingBootstrapKeyPair(normalizedEmail, keyPair);
+  setCachedPendingBootstrapKeyPair(email, keyPair);
   return cloneAgentKeyPair(keyPair);
 }
 
 export async function setPendingBootstrapKeyPair(
-  normalizedEmail: string,
+  email: string,
   keyPair: AgentKeyPair
 ): Promise<void> {
+  const normalized = cloneAgentKeyPair(keyPair);
   const encrypted = await encryptJsonWithPassphrase(
-    keyPair,
+    normalized,
     requireUnlockedPassphrase(),
     PENDING_BOOTSTRAP_KEYS_ALGORITHM
   );
 
   await setPendingBootstrapKeyRecord({
-    id: pendingBootstrapCacheKey(normalizedEmail),
-    normalizedEmail,
+    id: pendingBootstrapCacheKey(email),
+    email,
     ownerUserId: requireUnlockedVaultUserId(),
     version: 1,
     updatedAt: new Date().toISOString(),
     ...encrypted,
   });
-  setCachedPendingBootstrapKeyPair(normalizedEmail, keyPair);
+  setCachedPendingBootstrapKeyPair(email, normalized);
 }
 
 export async function clearPendingBootstrapKeyPair(
-  normalizedEmail: string
+  email: string
 ): Promise<void> {
-  await deletePendingBootstrapKeyRecord(normalizedEmail);
-  unlockedPendingBootstrapMaterial.delete(pendingBootstrapCacheKey(normalizedEmail));
+  await deletePendingBootstrapKeyRecord(email);
+  unlockedPendingBootstrapMaterial.delete(pendingBootstrapCacheKey(email));
 }
 
 export async function getOrCreatePendingBootstrapKeyPair(
-  normalizedEmail: string
+  email: string
 ): Promise<AgentKeyPair> {
-  const existing = await loadPendingBootstrapKeyPair(normalizedEmail);
+  const existing = await loadPendingBootstrapKeyPair(email);
   if (existing) {
     return existing;
   }
 
   const created = await generateAgentKeyPair({
-    encryptionKeyVersion: 'enc-v1',
-    signingKeyVersion: 'sig-v1',
+    encryptionKeyVersion: 1,
+    signingKeyVersion: 1,
   });
-  await setPendingBootstrapKeyPair(normalizedEmail, created);
+  await setPendingBootstrapKeyPair(email, created);
   return created;
 }
 
@@ -958,7 +964,7 @@ function mergeSharedActorMaterial(
 }
 
 export async function exportInboxKeyShareSnapshot(
-  normalizedEmail: string,
+  email: string,
   options?: {
     overrides?: SharedActorKeyMaterial[];
   }
@@ -975,7 +981,7 @@ export async function exportInboxKeyShareSnapshot(
     if (record.ownerUserId && record.ownerUserId !== ownerUserId) {
       continue;
     }
-    if (record.identity.normalizedEmail !== normalizedEmail) {
+    if (record.identity.email !== email) {
       continue;
     }
 
@@ -999,7 +1005,7 @@ export async function exportInboxKeyShareSnapshot(
   }
 
   for (const override of overrideByIdentityKey.values()) {
-    if (override.identity.normalizedEmail !== normalizedEmail) {
+    if (override.identity.email !== email) {
       continue;
     }
 
@@ -1012,7 +1018,7 @@ export async function exportInboxKeyShareSnapshot(
 
   return {
     version: 1,
-    normalizedEmail,
+    email,
     createdAt: new Date().toISOString(),
     actors,
   };
@@ -1048,8 +1054,8 @@ export async function getOrCreateAgentKeyPair(
   }
 
   const created = await generateAgentKeyPair({
-    encryptionKeyVersion: 'enc-v1',
-    signingKeyVersion: 'sig-v1',
+    encryptionKeyVersion: 1,
+    signingKeyVersion: 1,
   });
   await persistMaterial(
     identity,
@@ -1066,9 +1072,9 @@ export async function previewStoredAgentKeyRotation(
   identity: ActorIdentity,
   publishedCurrent?: {
     encryptionPublicKey: string;
-    encryptionKeyVersion: string;
+    encryptionKeyVersion: number;
     signingPublicKey: string;
-    signingKeyVersion: string;
+    signingKeyVersion: number;
   }
 ): Promise<AgentKeyRotationPlan> {
   const current = await loadStoredAgentKeyPair(identity);
@@ -1077,8 +1083,8 @@ export async function previewStoredAgentKeyRotation(
   const currentSigningKeyVersion =
     publishedCurrent?.signingKeyVersion ?? current?.signing.keyVersion;
   const rotated = await generateAgentKeyPair({
-    encryptionKeyVersion: nextKeyVersion(currentEncryptionKeyVersion, 'enc-v'),
-    signingKeyVersion: nextKeyVersion(currentSigningKeyVersion, 'sig-v'),
+    encryptionKeyVersion: nextKeyVersion(currentEncryptionKeyVersion),
+    signingKeyVersion: nextKeyVersion(currentSigningKeyVersion),
   });
 
   const archived = getArchivedAgentKeyPairs(identity);
@@ -1121,9 +1127,9 @@ export async function rotateStoredAgentKeyPair(
   identity: ActorIdentity,
   publishedCurrent?: {
     encryptionPublicKey: string;
-    encryptionKeyVersion: string;
+    encryptionKeyVersion: number;
     signingPublicKey: string;
-    signingKeyVersion: string;
+    signingKeyVersion: number;
   }
 ): Promise<AgentKeyPair> {
   const plan = await previewStoredAgentKeyRotation(identity, publishedCurrent);

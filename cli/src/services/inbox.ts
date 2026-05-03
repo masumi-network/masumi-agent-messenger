@@ -6,12 +6,14 @@ import {
   registrationResultFromMetadata,
   type MasumiActorRegistrationMetadata,
 } from '../../../shared/inbox-agent-registration';
-import type { VisibleAgentRow, VisibleInboxRow } from '../../../webapp/src/module_bindings/types';
+import type { Agent, Account } from '../../../webapp/src/module_bindings/types';
 import {
   connectAuthenticated,
   disconnectConnection,
-  readInboxRows,
+  readAccounts,
+  readPublishedAgentKeyPair,
   subscribeInboxTables,
+  type PublishedAgentKeyPair,
 } from './spacetimedb';
 import {
   ensureAuthenticatedSession,
@@ -46,8 +48,8 @@ export type InboxStatusResult = {
   actor: BootstrapSnapshot['actor'] | null;
   agentRegistration: MasumiRegistrationResult;
   keyVersions: {
-    encryption: string | null;
-    signing: string | null;
+    encryption: number | null;
+    signing: number | null;
   };
   profile: string;
 };
@@ -55,16 +57,16 @@ export type InboxStatusResult = {
 function toBootstrapSnapshot(params: {
   email: string;
   identityHex: string;
-  inbox: VisibleInboxRow;
-  actor: VisibleAgentRow;
+  inbox: Account;
+  actor: Agent;
+  actorKeys: PublishedAgentKeyPair;
 }): BootstrapSnapshot {
   return {
     email: params.email,
     spacetimeIdentity: params.identityHex,
     inbox: {
       id: params.inbox.id.toString(),
-      normalizedEmail: params.inbox.normalizedEmail,
-      displayEmail: params.inbox.displayEmail,
+      email: params.inbox.email,
     },
     actor: {
       id: params.actor.id.toString(),
@@ -74,20 +76,20 @@ function toBootstrapSnapshot(params: {
       masumiRegistrationNetwork: params.actor.masumiRegistrationNetwork ?? undefined,
       masumiInboxAgentId: params.actor.masumiInboxAgentId ?? undefined,
       masumiAgentIdentifier: params.actor.masumiAgentIdentifier ?? undefined,
-      masumiRegistrationState: params.actor.masumiRegistrationState ?? undefined,
+      masumiRegistrationState: params.actor.masumiRegistrationState?.tag ?? undefined,
     },
     keyVersions: {
-      encryption: params.actor.currentEncryptionKeyVersion,
-      signing: params.actor.currentSigningKeyVersion,
+      encryption: params.actorKeys.encryption.keyVersion,
+      signing: params.actorKeys.signing.keyVersion,
     },
     actorKeys: {
       encryption: {
-        publicKey: params.actor.currentEncryptionPublicKey,
-        keyVersion: params.actor.currentEncryptionKeyVersion,
+        publicKey: params.actorKeys.encryption.publicKey,
+        keyVersion: params.actorKeys.encryption.keyVersion,
       },
       signing: {
-        publicKey: params.actor.currentSigningPublicKey,
-        keyVersion: params.actor.currentSigningKeyVersion,
+        publicKey: params.actorKeys.signing.publicKey,
+        keyVersion: params.actorKeys.signing.keyVersion,
       },
     },
     updatedAt: new Date().toISOString(),
@@ -95,16 +97,16 @@ function toBootstrapSnapshot(params: {
 }
 
 function resolveDefaultInboxState(params: {
-  normalizedEmail: string;
-  inboxes: VisibleInboxRow[];
-  actors: VisibleAgentRow[];
+  email: string;
+  inboxes: Account[];
+  actors: Agent[];
 }): {
-  inbox: VisibleInboxRow;
-  actor: VisibleAgentRow;
+  inbox: Account;
+  actor: Agent;
 } | null {
-  const inbox = params.inboxes.find(row => row.normalizedEmail === params.normalizedEmail);
+  const inbox = params.inboxes.find(row => row.email === params.email);
   const actor = params.actors.find(row => {
-    return row.normalizedEmail === params.normalizedEmail && row.isDefault;
+    return row.email === params.email && row.isDefault;
   });
 
   if (!inbox || !actor) {
@@ -150,8 +152,8 @@ export async function loadCurrentBootstrapSnapshot(params: {
   reporter: TaskReporter;
 }): Promise<BootstrapSnapshot | null> {
   const { session, claims, profile } = await ensureAuthenticatedSession(params);
-  const normalizedEmail = normalizeEmail(claims.email ?? '');
-  if (!normalizedEmail) {
+  const email = normalizeEmail(claims.email ?? '');
+  if (!email) {
     return null;
   }
 
@@ -166,21 +168,28 @@ export async function loadCurrentBootstrapSnapshot(params: {
   try {
     const subscription = await subscribeInboxTables(conn);
     try {
-      const { inboxes, actors } = readInboxRows(conn);
+      const { inboxes, actors } = await readAccounts(conn);
       const liveState = resolveDefaultInboxState({
-        normalizedEmail,
+        email,
         inboxes,
         actors,
       });
       if (!liveState) {
         return null;
       }
+      const actorKeys = await readPublishedAgentKeyPair(conn, liveState.actor);
+      if (!actorKeys) {
+        throw connectivityError('Published default inbox key bundle is missing.', {
+          code: 'BOOTSTRAP_KEYS_UNAVAILABLE',
+        });
+      }
 
       const snapshot = toBootstrapSnapshot({
-        email: normalizedEmail,
+        email: email,
         identityHex,
         inbox: liveState.inbox,
         actor: liveState.actor,
+        actorKeys,
       });
       await saveBootstrapSnapshot(profile.name, snapshot);
       return snapshot;
@@ -209,7 +218,7 @@ export async function inboxStatus(params: {
     const { session, claims, profile: ensuredProfile } = await ensureAuthenticatedSession(params);
     const secretStore = createSecretStore();
     const keyPair = await secretStore.getAgentKeyPair(ensuredProfile.name);
-    const normalizedEmail = normalizeEmail(claims.email ?? '');
+    const email = normalizeEmail(claims.email ?? '');
 
     params.reporter.verbose?.('Connecting to SpacetimeDB');
     const { conn, identityHex } = await connectAuthenticated({
@@ -222,9 +231,9 @@ export async function inboxStatus(params: {
     try {
       const subscription = await subscribeInboxTables(conn);
       try {
-        const { inboxes, actors } = readInboxRows(conn);
+        const { inboxes, actors } = await readAccounts(conn);
         const liveState = resolveDefaultInboxState({
-          normalizedEmail,
+          email,
           inboxes,
           actors,
         });
@@ -248,11 +257,18 @@ export async function inboxStatus(params: {
             liveState.actor,
             syncedRegistration.metadata
           );
+          const actorKeys = await readPublishedAgentKeyPair(conn, resolvedActor);
+          if (!actorKeys) {
+            throw connectivityError('Published default inbox key bundle is missing.', {
+              code: 'BOOTSTRAP_KEYS_UNAVAILABLE',
+            });
+          }
           const snapshot = toBootstrapSnapshot({
-            email: normalizedEmail,
+            email: email,
             identityHex,
             inbox: liveState.inbox,
             actor: resolvedActor,
+            actorKeys,
           });
           await saveBootstrapSnapshot(ensuredProfile.name, snapshot);
 

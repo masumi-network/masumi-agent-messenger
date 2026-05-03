@@ -46,15 +46,6 @@ const onConnectError = (_ctx: ErrorContext, err: Error) => {
   spacetimeDBQueryClient.disconnect();
 };
 
-function fingerprintSessionToken(token: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < token.length; index += 1) {
-    hash ^= token.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16);
-}
-
 function AuthenticatedSpacetimeShell({
   children,
 }: {
@@ -74,18 +65,7 @@ function AuthenticatedSpacetimeShell({
     queryClient.removeQueries({ queryKey: ['spacetimedb'] });
   }, [auth.status]);
 
-  const connectionUri = useMemo(() => {
-    if (!sessionToken) {
-      return null;
-    }
-
-    const uri = new URL(HOST);
-    uri.searchParams.set(
-      '__session',
-      fingerprintSessionToken(sessionToken)
-    );
-    return uri.toString();
-  }, [sessionToken]);
+  const connectionUri = useMemo(() => (sessionToken ? HOST : null), [sessionToken]);
 
   useEffect(() => {
     if (!sessionToken) return;

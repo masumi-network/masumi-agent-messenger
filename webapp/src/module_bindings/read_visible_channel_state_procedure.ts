@@ -15,9 +15,7 @@ import {
 } from "./types";
 
 export const params = {
-  agentDbId: __t.u64(),
   channelId: __t.option(__t.u64()),
   channelSlug: __t.option(__t.string()),
-  requestId: __t.option(__t.u64()),
 };
-export const returnType = VisibleChannelState
+export const returnType = __t.option(VisibleChannelState)

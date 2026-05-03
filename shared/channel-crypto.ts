@@ -16,22 +16,20 @@ import {
   type JsonLike,
   type ParsedDecryptedMessagePayload,
 } from './message-format';
-import { validateSerializedMessagePlaintext } from './message-limits';
+import { ensureSignatureBytes, validateSerializedMessagePlaintext } from './message-limits';
 
 export type ChannelMessageSignatureInput = {
   channelId: bigint;
   senderPublicIdentity: string;
-  senderSeq: bigint;
-  // Random per-sender opaque id used for replay protection. `0n` indicates a
-  // legacy message that was signed before this field existed.
-  senderMessageId?: bigint;
-  senderSigningKeyVersion: string;
+  // Random per-sender opaque id used for replay protection.
+  senderMessageId: bigint;
+  senderSigningKeyVersion: number;
   plaintext: string;
   replyToMessageId?: bigint | null;
 };
 
 export type PreparedChannelMessage = {
-  senderSigningKeyVersion: string;
+  senderSigningKeyVersion: number;
   plaintext: string;
   signature: string;
 };
@@ -46,7 +44,7 @@ async function signCanonicalPayload(
     key,
     toBufferSource(utf8(canonicalJsonStringify(payload)))
   );
-  return toHex(new Uint8Array(signature));
+  return toHex(ensureSignatureBytes(new Uint8Array(signature)));
 }
 
 async function verifyCanonicalPayload(params: {
@@ -66,10 +64,10 @@ async function verifyCanonicalPayload(params: {
 export async function buildChannelMessageSignaturePayload(
   input: ChannelMessageSignatureInput
 ): Promise<JsonLike> {
-  const base: JsonLike = {
+  return {
     channelId: input.channelId.toString(),
     senderPublicIdentity: input.senderPublicIdentity,
-    senderSeq: input.senderSeq.toString(),
+    senderMessageId: input.senderMessageId.toString(),
     senderSigningKeyVersion: input.senderSigningKeyVersion,
     replyToMessageId:
       input.replyToMessageId === undefined || input.replyToMessageId === null
@@ -77,17 +75,6 @@ export async function buildChannelMessageSignaturePayload(
         : input.replyToMessageId.toString(),
     plaintextHash: await sha256Hex(input.plaintext),
   };
-  // Legacy rows carry the schema sentinel (`1n`) or `0n`; their signatures
-  // were built before this field existed, so we must omit it for them to
-  // keep verification working.
-  if (
-    input.senderMessageId !== undefined &&
-    input.senderMessageId !== 0n &&
-    input.senderMessageId !== 1n
-  ) {
-    (base as Record<string, unknown>).senderMessageId = input.senderMessageId.toString();
-  }
-  return base;
 }
 
 export async function signChannelMessage(params: {
@@ -115,12 +102,14 @@ export async function verifyChannelMessageSignature(params: {
 export async function prepareChannelMessage(params: {
   channelId: bigint;
   senderPublicIdentity: string;
-  senderSeq: bigint;
   senderMessageId: bigint;
   payload: EncryptedMessagePayload;
   keyPair: AgentKeyPair;
   replyToMessageId?: bigint | null;
 }): Promise<PreparedChannelMessage> {
+  if (params.senderMessageId === 0n) {
+    throw new Error('senderMessageId must not be 0');
+  }
   const normalizedPayload = normalizeEncryptedMessagePayload(params.payload);
   const plaintext = validateSerializedMessagePlaintext(
     canonicalJsonStringify(normalizedPayload)
@@ -128,7 +117,6 @@ export async function prepareChannelMessage(params: {
   const input: ChannelMessageSignatureInput = {
     channelId: params.channelId,
     senderPublicIdentity: params.senderPublicIdentity,
-    senderSeq: params.senderSeq,
     senderMessageId: params.senderMessageId,
     senderSigningKeyVersion: params.keyPair.signing.keyVersion,
     plaintext,

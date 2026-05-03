@@ -36,25 +36,25 @@ function privateKey(label: string): string {
 function buildSampleSnapshot(): DeviceKeyShareSnapshot {
   return {
     version: 1,
-    normalizedEmail: 'alice@example.com',
+    email: 'alice@example.com',
     createdAt: '2026-04-15T00:00:00.000Z',
     actors: [
       {
         identity: {
-          normalizedEmail: 'alice@example.com',
+          email: 'alice@example.com',
           slug: 'alice',
         },
         current: {
           encryption: {
             publicKey: publicKey('enc-current'),
             privateKey: privateKey('enc-current'),
-            keyVersion: 'enc-v1',
+            keyVersion: 1,
             algorithm: 'ecdh-p256-v1',
           },
           signing: {
             publicKey: publicKey('sig-current'),
             privateKey: privateKey('sig-current'),
-            keyVersion: 'sig-v1',
+            keyVersion: 1,
             algorithm: 'ecdsa-p256-sha256-v1',
           },
         },
@@ -277,7 +277,7 @@ describe('device sharing verification codes', () => {
     const sourceDevice = await generateDeviceKeyPair();
     const targetDevice = await generateDeviceKeyPair();
     const snapshot = buildSampleSnapshot();
-    const context = buildDeviceShareContext(snapshot.normalizedEmail, 'device-target');
+    const context = buildDeviceShareContext(snapshot.email, 'device-target');
 
     const bundle = await createDeviceShareBundle({
       sourceKeyPair: sourceDevice,

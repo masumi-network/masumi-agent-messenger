@@ -53,6 +53,13 @@ type ErrorBody = {
   creditsRemaining?: number;
 };
 
+const INBOX_AGENT_SLUG_CONFLICT_MESSAGE =
+  'Inbox slug is already in use on this network';
+
+function isInboxAgentSlugConflictMessage(message: string): boolean {
+  return message === INBOX_AGENT_SLUG_CONFLICT_MESSAGE;
+}
+
 function parseCreditsPayload(value: unknown): { creditsRemaining: number } {
   if (
     typeof value === 'object' &&
@@ -442,51 +449,62 @@ async function discoverOwnedPayInboxAgentBySlug(params: {
   session: AuthenticatedRequestBrowserSession;
   slug: string;
   filterStatus?: 'Registered' | 'Pending' | 'Deregistered' | 'Failed';
+  fullScanOnMiss?: boolean;
 }): Promise<MasumiInboxAgentEntry | null> {
   const normalizedSlug = normalizeInboxSlug(params.slug);
   if (!normalizedSlug) {
     return null;
   }
 
-  let cursor: string | null = null;
+  const lookup = async (search: string | null): Promise<MasumiInboxAgentEntry | null> => {
+    let cursor: string | null = null;
 
-  do {
-    const url = buildMasumiPayApiUrl(params.session.user.issuer, 'inbox-agents');
-    url.searchParams.set('network', getMasumiInboxAgentNetwork());
-    url.searchParams.set('take', '20');
-    url.searchParams.set('search', normalizedSlug);
-    if (params.filterStatus) {
-      url.searchParams.set('filterStatus', params.filterStatus);
-    }
-    if (cursor) {
-      url.searchParams.set('cursor', cursor);
-    }
+    do {
+      const url = buildMasumiPayApiUrl(params.session.user.issuer, 'inbox-agents');
+      url.searchParams.set('network', getMasumiInboxAgentNetwork());
+      url.searchParams.set('take', '20');
+      if (search) {
+        url.searchParams.set('search', search);
+      }
+      if (params.filterStatus) {
+        url.searchParams.set('filterStatus', params.filterStatus);
+      }
+      if (cursor) {
+        url.searchParams.set('cursor', cursor);
+      }
 
-    const response = await fetchMasumiApi(params.session, url);
-    if (!response.ok) {
-      const body = await readErrorBody(response);
-      throw new Error(body.error ?? `Unable to list inbox agents (${response.status})`);
-    }
+      const response = await fetchMasumiApi(params.session, url);
+      if (!response.ok) {
+        const body = await readErrorBody(response);
+        throw new Error(body.error ?? `Unable to list inbox agents (${response.status})`);
+      }
 
-    const parsed = parseMasumiPayInboxAgentCollection(await response.json());
-    const exact = params.filterStatus
-      ? pickOwnedSaasExactInboxAgentMatch({
-          entries: parsed.agents,
-          slug: normalizedSlug,
-        })
-      : pickNewestExactInboxAgentMatch({
-          entries: parsed.agents,
-          slug: normalizedSlug,
-          includeDeregistered: true,
-        });
-    if (exact) {
-      return exact;
-    }
+      const parsed = parseMasumiPayInboxAgentCollection(await response.json());
+      const exact = params.filterStatus
+        ? pickOwnedSaasExactInboxAgentMatch({
+            entries: parsed.agents,
+            slug: normalizedSlug,
+          })
+        : pickNewestExactInboxAgentMatch({
+            entries: parsed.agents,
+            slug: normalizedSlug,
+            includeDeregistered: true,
+          });
+      if (exact) {
+        return exact;
+      }
 
-    cursor = parsed.nextCursor;
-  } while (cursor);
+      cursor = parsed.nextCursor;
+    } while (cursor);
 
-  return null;
+    return null;
+  };
+
+  const searched = await lookup(normalizedSlug);
+  if (searched || !params.fullScanOnMiss) {
+    return searched;
+  }
+  return await lookup(null);
 }
 
 async function discoverOwnedBlockingPayInboxAgentBySlug(params: {
@@ -855,6 +873,34 @@ export async function registerMasumiInboxAgentForSession(params: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to register inbox agent';
+    if (isInboxAgentSlugConflictMessage(message)) {
+      try {
+        const ownedAfterConflict = await discoverOwnedPayInboxAgentBySlug({
+          session: params.session,
+          slug: params.subject.slug,
+          fullScanOnMiss: true,
+        });
+        if (ownedAfterConflict) {
+          const nextMetadata = mergeMasumiRegistrationMetadataFromEntry({
+            entry: ownedAfterConflict,
+            current: metadata,
+            preserveCurrentAgentIdentifier: true,
+          });
+          const nextRegistration = registrationResultFromMetadata(nextMetadata);
+          return {
+            registration: {
+              ...nextRegistration,
+              attempted: true,
+              creditsRemaining,
+              error: null,
+            },
+            metadata: serializeMasumiRegistrationMetadata(nextMetadata),
+          };
+        }
+      } catch {
+        // Keep the original conflict visible if the reconciliation lookup fails.
+      }
+    }
     return {
       registration: {
         ...result,

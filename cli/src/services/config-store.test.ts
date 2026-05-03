@@ -12,6 +12,8 @@ import {
 } from './config-store';
 import { DEFAULT_OIDC_ISSUER } from './env';
 
+const CURRENT_CONFIG_VERSION = 2;
+
 describe('config-store', () => {
   let tempDir: string;
   const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
@@ -59,13 +61,67 @@ describe('config-store', () => {
     expect(resolveConfigFilePath()).toContain(tempDir);
   });
 
-  it('migrates legacy profile without new auth fields', async () => {
+  it('replaces old config versions with a fresh current config', async () => {
     const configPath = resolveConfigFilePath();
     await mkdir(path.dirname(configPath), { recursive: true });
     await writeFile(
       configPath,
       JSON.stringify({
         version: 1,
+        activeProfile: 'default',
+        profiles: {
+          default: {
+            issuer: 'http://legacy-issuer.test',
+            clientId: 'legacy-client',
+            oidcScope: DEFAULT_MASUMI_OIDC_SCOPE_STRING,
+            activeAgentSlug: 'legacy-agent',
+            bootstrapSnapshot: {
+              email: 'sandro@example.com',
+              spacetimeIdentity: 'identity-old',
+              inbox: {
+                id: '1',
+                normalizedEmail: 'sandro@example.com',
+                displayEmail: 'Sandro@example.com',
+              },
+              actor: {
+                id: '2',
+                slug: 'legacy-agent',
+                publicIdentity: 'legacy-agent',
+                displayName: 'Legacy',
+              },
+              keyVersions: {
+                encryption: 1,
+                signing: 1,
+              },
+              updatedAt: '2026-04-15T09:00:00.000Z',
+            },
+          },
+        },
+      }),
+      'utf8'
+    );
+
+    const profile = await loadProfile('default');
+    const stored = JSON.parse(await readFile(configPath, 'utf8')) as {
+      version: number;
+      profiles: Record<string, { activeAgentSlug?: string; bootstrapSnapshot?: unknown }>;
+    };
+
+    expect(stored.version).toBe(CURRENT_CONFIG_VERSION);
+    expect(profile.issuer).toBe(DEFAULT_OIDC_ISSUER);
+    expect(profile.activeAgentSlug).toBeUndefined();
+    expect(profile.bootstrapSnapshot).toBeUndefined();
+    expect(stored.profiles.default.activeAgentSlug).toBeUndefined();
+    expect(stored.profiles.default.bootstrapSnapshot).toBeUndefined();
+  });
+
+  it('migrates legacy profile without new auth fields', async () => {
+    const configPath = resolveConfigFilePath();
+    await mkdir(path.dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        version: CURRENT_CONFIG_VERSION,
         activeProfile: 'default',
         profiles: {
           default: {
@@ -102,7 +158,7 @@ describe('config-store', () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        version: 1,
+        version: CURRENT_CONFIG_VERSION,
         activeProfile: 'default',
         profiles: {
           default: {
@@ -132,7 +188,7 @@ describe('config-store', () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        version: 1,
+        version: CURRENT_CONFIG_VERSION,
         activeProfile: 'default',
         profiles: {
           default: {
@@ -162,7 +218,7 @@ describe('config-store', () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        version: 1,
+        version: CURRENT_CONFIG_VERSION,
         activeProfile: 'default',
         profiles: {
           default: {
@@ -192,7 +248,7 @@ describe('config-store', () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        version: 1,
+        version: CURRENT_CONFIG_VERSION,
         activeProfile: 'default',
         profiles: {
           default: {
@@ -222,7 +278,7 @@ describe('config-store', () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        version: 1,
+        version: CURRENT_CONFIG_VERSION,
         activeProfile: 'workspace',
         profiles: {
           workspace: {
@@ -299,7 +355,7 @@ describe('config-store', () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        version: 1,
+        version: CURRENT_CONFIG_VERSION,
         activeProfile: 'default',
         profiles: {
           default: {
@@ -314,8 +370,7 @@ describe('config-store', () => {
               spacetimeIdentity: 'identity-old',
               inbox: {
                 id: '1',
-                normalizedEmail: 'sandro@example.com',
-                displayEmail: 'sandro@example.com',
+                email: 'sandro@example.com',
               },
               actor: {
                 id: '2',
@@ -324,8 +379,8 @@ describe('config-store', () => {
                 displayName: 'Sandro',
               },
               keyVersions: {
-                encryption: 'enc-v1',
-                signing: 'sig-v1',
+                encryption: 1,
+                signing: 1,
               },
               updatedAt: '2026-04-15T09:00:00.000Z',
             },
@@ -340,8 +395,7 @@ describe('config-store', () => {
       spacetimeIdentity: 'identity-new',
       inbox: {
         id: '1',
-        normalizedEmail: 'sandro@example.com',
-        displayEmail: 'sandro@example.com',
+        email: 'sandro@example.com',
       },
       actor: {
         id: '2',
@@ -350,8 +404,8 @@ describe('config-store', () => {
         displayName: 'Sandro',
       },
       keyVersions: {
-        encryption: 'enc-v1',
-        signing: 'sig-v1',
+        encryption: 1,
+        signing: 1,
       },
       updatedAt: '2026-04-15T10:00:00.000Z',
     });
@@ -365,7 +419,7 @@ describe('config-store', () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        version: 1,
+        version: CURRENT_CONFIG_VERSION,
         activeProfile: 'default',
         profiles: {
           default: {
@@ -380,8 +434,7 @@ describe('config-store', () => {
               spacetimeIdentity: 'identity-old',
               inbox: {
                 id: '1',
-                normalizedEmail: 'sandro@example.com',
-                displayEmail: 'sandro@example.com',
+                email: 'sandro@example.com',
               },
               actor: {
                 id: '2',
@@ -390,8 +443,8 @@ describe('config-store', () => {
                 displayName: 'Sandro',
               },
               keyVersions: {
-                encryption: 'enc-v1',
-                signing: 'sig-v1',
+                encryption: 1,
+                signing: 1,
               },
               updatedAt: '2026-04-15T09:00:00.000Z',
             },
@@ -406,8 +459,7 @@ describe('config-store', () => {
       spacetimeIdentity: 'identity-new',
       inbox: {
         id: '1',
-        normalizedEmail: 'sandro@example.com',
-        displayEmail: 'sandro@example.com',
+        email: 'sandro@example.com',
       },
       actor: {
         id: '2',
@@ -416,8 +468,8 @@ describe('config-store', () => {
         displayName: 'Sandro',
       },
       keyVersions: {
-        encryption: 'enc-v1',
-        signing: 'sig-v1',
+        encryption: 1,
+        signing: 1,
       },
       updatedAt: '2026-04-15T10:00:00.000Z',
     });

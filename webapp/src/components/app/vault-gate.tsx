@@ -33,7 +33,7 @@ export function VaultGate({
     const resolvedDescription =
       description ??
       (vault.initialized
-        ? 'Enter your passphrase to unlock local private keys for decryption, key rotation, and encrypted sending.'
+        ? 'Enter your passphrase to unlock local private keys for decryption, key reset, and encrypted sending.'
         : 'Create a passphrase to encrypt this browser’s private key vault before generating or importing inbox keys.');
 
     return (
