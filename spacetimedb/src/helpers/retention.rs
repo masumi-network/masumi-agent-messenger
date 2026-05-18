@@ -6,8 +6,7 @@ use crate::constants::{
     ChannelJoinRequestStatus, ContactRequestStatus, ScheduledExpiryKind, ThreadInviteStatus,
     AGENT_KEY_BUNDLE_ARCHIVE_BATCH_SIZE, AGENT_KEY_BUNDLE_RETAIN_RECENT,
     MAX_THREAD_MESSAGE_RETENTION_MS, MESSAGE_EXPIRY_CLEANUP_BATCH_SIZE,
-    RESOLVED_REQUEST_TOMBSTONE_RETENTION_MS, THREAD_SECRET_ENVELOPE_GC_BATCH_SIZE,
-    THREAD_SECRET_ENVELOPE_GC_RETRY_DELAY_MS,
+    RESOLVED_REQUEST_TOMBSTONE_RETENTION_MS,
 };
 use crate::helpers::account_signals::{
     bump_channel_join_requests_signal, bump_contact_requests_signal, bump_thread_invites_signal,
@@ -51,6 +50,72 @@ fn decode_tombstone_target(target_id: u64) -> Option<(ResolvedRequestTombstoneTa
         _ => return None,
     };
     Some((target, row_id))
+}
+
+fn message_secret_tuple_still_referenced(
+    ctx: &ReducerContext,
+    thread_id: u64,
+    membership_version: u64,
+    sender_agent_db_id: u64,
+    secret_version: u32,
+) -> bool {
+    ctx.db
+        .message()
+        .message_thread_id_membership_version_id_desc_sort_key()
+        .filter((thread_id, membership_version, 0u64..))
+        .any(|message| {
+            message.sender_agent_db_id == sender_agent_db_id
+                && message.secret_version == secret_version
+        })
+}
+
+fn delete_unreferenced_thread_secret_tuple(
+    ctx: &ReducerContext,
+    thread_id: u64,
+    membership_version: u64,
+    sender_agent_db_id: u64,
+    secret_version: u32,
+) {
+    if message_secret_tuple_still_referenced(
+        ctx,
+        thread_id,
+        membership_version,
+        sender_agent_db_id,
+        secret_version,
+    ) {
+        return;
+    }
+
+    let envelope_ids: Vec<u64> = ctx
+        .db
+        .thread_secret_envelope()
+        .thread_secret_envelope_thread_id_membership_version_sender_agent_db_id_secret_version()
+        .filter((
+            thread_id,
+            membership_version,
+            sender_agent_db_id,
+            secret_version,
+        ))
+        .map(|env| env.id)
+        .collect();
+    for envelope_id in envelope_ids {
+        ctx.db.thread_secret_envelope().id().delete(&envelope_id);
+    }
+    let coverage_ids: Vec<u64> = ctx
+        .db
+        .thread_secret_coverage()
+        .thread_secret_coverage_tuple()
+        .filter((
+            thread_id,
+            membership_version,
+            sender_agent_db_id,
+            secret_version,
+        ))
+        .map(|coverage| coverage.id)
+        .collect();
+    for coverage_id in coverage_ids {
+        ctx.db.thread_secret_coverage().id().delete(&coverage_id);
+    }
 }
 
 pub fn schedule_resolved_request_tombstone(
@@ -112,7 +177,7 @@ pub fn cleanup_message_expiry_batch(ctx: &ReducerContext, thread_id: u64) {
     };
 
     let mut sender_agent_ids = std::collections::BTreeSet::new();
-    let mut envelope_tuples = Vec::new();
+    let mut envelope_tuples = std::collections::BTreeSet::new();
     let mut to_delete = Vec::new();
     for message in ctx
         .db
@@ -126,57 +191,28 @@ pub fn cleanup_message_expiry_batch(ctx: &ReducerContext, thread_id: u64) {
             break;
         }
         sender_agent_ids.insert(message.sender_agent_db_id);
-        if message.attaches_new_envelopes {
-            envelope_tuples.push((
-                message.membership_version,
-                message.sender_agent_db_id,
-                message.secret_version,
-            ));
-        }
+        envelope_tuples.insert((
+            message.membership_version,
+            message.sender_agent_db_id,
+            message.secret_version,
+        ));
         to_delete.push(message.id);
-    }
-
-    for (membership_version, sender_agent_db_id, secret_version) in envelope_tuples {
-        let envelope_ids: Vec<u64> = ctx
-            .db
-            .thread_secret_envelope()
-            .thread_secret_envelope_thread_id_membership_version_sender_agent_db_id_secret_version()
-            .filter((
-                thread_id,
-                membership_version,
-                sender_agent_db_id,
-                secret_version,
-            ))
-            .map(|env| env.id)
-            .collect();
-        for envelope_id in envelope_ids {
-            ctx.db.thread_secret_envelope().id().delete(&envelope_id);
-        }
-        let coverage_ids: Vec<u64> = ctx
-            .db
-            .thread_secret_coverage()
-            .thread_secret_coverage_tuple()
-            .filter((
-                thread_id,
-                membership_version,
-                sender_agent_db_id,
-                secret_version,
-            ))
-            .map(|coverage| coverage.id)
-            .collect();
-        for coverage_id in coverage_ids {
-            ctx.db.thread_secret_coverage().id().delete(&coverage_id);
-        }
     }
 
     for message_id in &to_delete {
         ctx.db.message().id().delete(message_id);
     }
+    for (membership_version, sender_agent_db_id, secret_version) in envelope_tuples {
+        delete_unreferenced_thread_secret_tuple(
+            ctx,
+            thread_id,
+            membership_version,
+            sender_agent_db_id,
+            secret_version,
+        );
+    }
     for sender_agent_id in sender_agent_ids {
         schedule_agent_key_bundle_archive(ctx, sender_agent_id);
-    }
-    if !to_delete.is_empty() {
-        schedule_thread_secret_envelope_gc(ctx, thread_id);
     }
     schedule_next_message_expiry(ctx, thread_id);
 }
@@ -191,95 +227,11 @@ pub fn schedule_thread_secret_envelope_gc(ctx: &ReducerContext, thread_id: u64) 
 }
 
 pub fn cleanup_thread_secret_envelope_gc_batch(ctx: &ReducerContext, thread_id: u64) {
-    let active_participants: Vec<ThreadParticipant> = ctx
-        .db
-        .thread_participant()
-        .thread_participant_thread_id_active()
-        .filter((thread_id, true))
-        .collect();
-    let Some(min_read_message_id) = active_participants
-        .iter()
-        .map(|p| p.last_read_message_id)
-        .min()
-    else {
-        return;
-    };
-    if min_read_message_id == 0 {
-        return;
-    }
-
-    let mut deleted = 0usize;
-    let upper_message_id = min_read_message_id.saturating_add(1);
-    for message in ctx
-        .db
-        .message()
-        .message_thread_id_attaches_new_envelopes_id()
-        .filter((thread_id, true, 0u64..upper_message_id))
-    {
-        if deleted >= THREAD_SECRET_ENVELOPE_GC_BATCH_SIZE {
-            break;
-        }
-        let remaining = THREAD_SECRET_ENVELOPE_GC_BATCH_SIZE - deleted;
-        let envelope_ids: Vec<u64> = ctx
-            .db
-            .thread_secret_envelope()
-            .thread_secret_envelope_thread_id_membership_version_sender_agent_db_id_secret_version()
-            .filter((
-                thread_id,
-                message.membership_version,
-                message.sender_agent_db_id,
-                message.secret_version,
-            ))
-            .take(remaining)
-            .map(|env| env.id)
-            .collect();
-        for envelope_id in &envelope_ids {
-            ctx.db.thread_secret_envelope().id().delete(envelope_id);
-        }
-        deleted += envelope_ids.len();
-
-        let envelopes_remain = ctx
-            .db
-            .thread_secret_envelope()
-            .thread_secret_envelope_thread_id_membership_version_sender_agent_db_id_secret_version()
-            .filter((
-                thread_id,
-                message.membership_version,
-                message.sender_agent_db_id,
-                message.secret_version,
-            ))
-            .next()
-            .is_some();
-        if !envelopes_remain {
-            let coverage_ids: Vec<u64> = ctx
-                .db
-                .thread_secret_coverage()
-                .thread_secret_coverage_tuple()
-                .filter((
-                    thread_id,
-                    message.membership_version,
-                    message.sender_agent_db_id,
-                    message.secret_version,
-                ))
-                .map(|coverage| coverage.id)
-                .collect();
-            for coverage_id in coverage_ids {
-                ctx.db.thread_secret_coverage().id().delete(&coverage_id);
-            }
-        }
-    }
-
-    if deleted >= THREAD_SECRET_ENVELOPE_GC_BATCH_SIZE {
-        schedule_expiry(
-            ctx,
-            ScheduledExpiryKind::ThreadSecretEnvelopeGc,
-            thread_id,
-            timestamp_plus_ms(
-                ctx.timestamp,
-                THREAD_SECRET_ENVELOPE_GC_RETRY_DELAY_MS as i64,
-            ),
-        );
-    }
+    let _ = (ctx, thread_id);
+    // Historical scheduled rows may still fire after an upgrade. Read-state and membership-change
+    // events are not safe signals for deleting envelopes: clients need the wrapped sender secret
+    // after restart for every retained message using that secret version. Message-retention cleanup
+    // removes envelope tuples only after the last message that references the tuple is deleted.
 }
 
 pub fn schedule_agent_key_bundle_archive(ctx: &ReducerContext, agent_db_id: u64) {

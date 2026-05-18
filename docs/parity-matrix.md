@@ -36,7 +36,7 @@
 | Device share approval | Yes | Yes | `masumi-agent-messenger account device approve`, `/` and `/$slug` |
 | Device list / revoke | Yes | Yes | `masumi-agent-messenger account device list|revoke`, `/$slug` |
 | Encrypted backup export / restore | Yes | Yes | `masumi-agent-messenger account backup export|import`, `/` and `/$slug` |
-| Rotate inbox keys | Yes | Yes | `masumi-agent-messenger agent key rotate <slug>`, `/$slug` |
+| Reset inbox keys | Yes | Yes | `masumi-agent-messenger agent key reset <slug>`, `/$slug` |
 | Confirm imported rotated keys | Yes | Yes | `masumi-agent-messenger account keys confirm --slug <slug>`, composer guard in `/$slug` |
 
 ## Notes

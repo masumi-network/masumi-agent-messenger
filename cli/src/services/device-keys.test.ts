@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import type { AgentKeyPair } from '../../../shared/agent-crypto';
 import type { SharedActorKeyMaterial } from '../../../shared/device-sharing';
 import type { ResolvedProfile } from './config-store';
 import type { KeychainBackend } from './secret-store';
 import { createSecretStore } from './secret-store';
-import { exportNamespaceKeyShareSnapshot } from './device-keys';
+import {
+  ensureNamespaceVaultContainsDefaultActor,
+  exportNamespaceKeyShareSnapshot,
+  importNamespaceKeyShareSnapshot,
+} from './device-keys';
 
 function createMemoryBackend(): KeychainBackend {
   const values = new Map<string, string>();
@@ -50,26 +55,30 @@ function createProfile(): ResolvedProfile {
   };
 }
 
+function createKeyPair(suffix: string, version: number): AgentKeyPair {
+  return {
+    encryption: {
+      publicKey: `enc-pub-${suffix}`,
+      privateKey: `enc-priv-${suffix}`,
+      keyVersion: version,
+      algorithm: 'ecdh-p256-v1',
+    },
+    signing: {
+      publicKey: `sig-pub-${suffix}`,
+      privateKey: `sig-priv-${suffix}`,
+      keyVersion: version,
+      algorithm: 'ecdsa-p256-sha256-v1',
+    },
+  };
+}
+
 function createOverride(): SharedActorKeyMaterial {
   return {
     identity: {
       email: 'agent@example.com',
       slug: 'live',
     },
-    current: {
-      encryption: {
-        publicKey: 'enc-pub',
-        privateKey: 'enc-priv',
-        keyVersion: 2,
-        algorithm: 'ecdh-p256-v1',
-      },
-      signing: {
-        publicKey: 'sig-pub',
-        privateKey: 'sig-priv',
-        keyVersion: 2,
-        algorithm: 'ecdsa-p256-sha256-v1',
-      },
-    },
+    current: createKeyPair('override', 2),
     archived: [],
   };
 }
@@ -96,5 +105,107 @@ describe('device-keys', () => {
         secretStore,
       })
     ).rejects.toThrow('No local private key material is available to share from this CLI profile.');
+  });
+
+  it('keeps the previous current key archived when importing a rotated device snapshot', async () => {
+    const secretStore = createSecretStore(createMemoryBackend());
+    const profile = createProfile();
+    const previous = createKeyPair('previous', 1);
+    const rotated = createKeyPair('rotated', 2);
+
+    await secretStore.setAgentKeyPair(profile.name, previous);
+    await secretStore.setNamespaceKeyVault(profile.name, {
+      version: 1,
+      email: 'agent@example.com',
+      actors: [
+        {
+          identity: {
+            email: 'agent@example.com',
+            slug: 'live',
+          },
+          current: previous,
+          archived: [],
+        },
+      ],
+    });
+
+    await importNamespaceKeyShareSnapshot({
+      profile,
+      secretStore,
+      snapshot: {
+        version: 1,
+        email: 'agent@example.com',
+        createdAt: '2026-05-12T00:00:00.000Z',
+        actors: [
+          {
+            identity: {
+              email: 'agent@example.com',
+              slug: 'live',
+            },
+            current: rotated,
+            archived: [],
+          },
+        ],
+      },
+    });
+
+    expect(await secretStore.getAgentKeyPair(profile.name)).toEqual(rotated);
+    expect(await secretStore.getNamespaceKeyVault(profile.name)).toEqual({
+      version: 1,
+      email: 'agent@example.com',
+      actors: [
+        {
+          identity: {
+            email: 'agent@example.com',
+            slug: 'live',
+          },
+          current: rotated,
+          archived: [previous],
+        },
+      ],
+    });
+  });
+
+  it('archives the existing default key when syncing a new default key into the vault', async () => {
+    const secretStore = createSecretStore(createMemoryBackend());
+    const profile = createProfile();
+    const previous = createKeyPair('previous', 1);
+    const current = createKeyPair('current', 2);
+
+    await secretStore.setNamespaceKeyVault(profile.name, {
+      version: 1,
+      email: 'agent@example.com',
+      actors: [
+        {
+          identity: {
+            email: 'agent@example.com',
+            slug: 'live',
+          },
+          current: previous,
+          archived: [],
+        },
+      ],
+    });
+
+    await ensureNamespaceVaultContainsDefaultActor({
+      profile,
+      secretStore,
+      keyPair: current,
+    });
+
+    expect(await secretStore.getNamespaceKeyVault(profile.name)).toEqual({
+      version: 1,
+      email: 'agent@example.com',
+      actors: [
+        {
+          identity: {
+            email: 'agent@example.com',
+            slug: 'live',
+          },
+          current,
+          archived: [previous],
+        },
+      ],
+    });
   });
 });

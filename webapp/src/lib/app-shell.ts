@@ -13,7 +13,7 @@ export type DefaultKeyIssue = 'missing' | 'mismatch' | null;
 export type SecurityPanel = 'recovery' | 'backups';
 export type InboxComposeMode = 'direct' | 'group';
 type InboxComposeModeInput = InboxComposeMode | 'add';
-export type WorkspaceTab = 'inbox' | 'approvals';
+export type WorkspaceTab = 'inbox' | 'approvals' | 'settings';
 export type AppShellSection = 'inbox' | 'discover' | 'agents' | 'security' | 'channels';
 
 type ChannelPermissionTag = { tag: string };
@@ -254,7 +254,7 @@ export function parseSecurityPanel(value: unknown): SecurityPanel | undefined {
 export function parseWorkspaceTab(
   value: unknown
 ): Exclude<WorkspaceTab, 'inbox'> | undefined {
-  return value === 'approvals' ? value : undefined;
+  return value === 'approvals' || value === 'settings' ? value : undefined;
 }
 
 export function findSessionOwnedInbox<Inbox extends SessionOwnedInboxLike>(params: {

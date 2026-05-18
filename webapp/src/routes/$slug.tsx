@@ -17,6 +17,7 @@ import {
   Checks,
   CircleDashed,
   Clock,
+  GearSix,
   Lock,
   MagnifyingGlass,
   PaperPlaneTilt,
@@ -141,9 +142,11 @@ import {
   normalizeMessageCipherAlgorithm,
   prepareEncryptedMessage,
   randomSenderMessageId,
+  unwrapSecretEnvelope,
   toHex,
   type ActorPublicKeys,
   type AgentKeyPair,
+  type SenderSecretState,
 } from '@/lib/crypto';
 import { DbConnection, reducers, tables } from '@/module_bindings';
 import type {
@@ -3634,6 +3637,7 @@ function AuthenticatedInboxPage() {
       setPublicKeyLookupPending(false);
       setThreadHistoryExhausted(false);
       setThreadHistoryLoading(false);
+      setRotateSecret(false);
     });
   }, [selectedThread?.id]);
   useEffect(() => {
@@ -4129,6 +4133,63 @@ function AuthenticatedInboxPage() {
       secretVersion: lastSentSecretVersion,
     };
   }, [activeParticipant, selectedThread]);
+
+  const latestSenderEnvelopeCount = useMemo(() => {
+    if (!latestSelectedThreadSenderState || !activeActor) {
+      return 0;
+    }
+    return loadedThreadSecretEnvelopes.filter(envelope => {
+      return (
+        envelope.threadId === latestSelectedThreadSenderState.threadId &&
+        envelope.membershipVersion === latestSelectedThreadSenderState.membershipVersion &&
+        envelope.senderAgentDbId === activeActor.id &&
+        envelope.secretVersion === latestSelectedThreadSenderState.secretVersion
+      );
+    }).length;
+  }, [activeActor, latestSelectedThreadSenderState, loadedThreadSecretEnvelopes]);
+  useEffect(() => {
+    if (
+      !liveConnection ||
+      !activeActor ||
+      !latestSelectedThreadSenderState ||
+      selectedThreadParticipants.length === 0 ||
+      latestSenderEnvelopeCount >= selectedThreadParticipants.length
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    void liveConnection.procedures
+      .listThreadSecretEnvelopes({
+        agentDbId: activeActor.id,
+        threadId: latestSelectedThreadSenderState.threadId,
+        membershipVersion: latestSelectedThreadSenderState.membershipVersion,
+        senderAgentDbId: activeActor.id,
+        recipientAgentDbId: undefined,
+        secretVersion: latestSelectedThreadSenderState.secretVersion,
+        afterId: undefined,
+        limit: undefined,
+      })
+      .then(rows => {
+        if (cancelled || rows.length === 0) {
+          return;
+        }
+        setPagedThreadSecretEnvelopes(current => mergeRowsById(current, rows));
+      })
+      .catch(() => {
+        // Best-effort hydration. Send actions perform the same lookup and surface errors.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeActor,
+    latestSelectedThreadSenderState,
+    latestSenderEnvelopeCount,
+    liveConnection,
+    selectedThreadParticipants.length,
+  ]);
 
   const requiresSecretRotation = useMemo(
     () =>
@@ -4984,6 +5045,122 @@ function AuthenticatedInboxPage() {
     });
   }
 
+  async function lookupActorPublicKeysForEnvelope(params: {
+    actor: Agent;
+    encryptionKeyVersion: number;
+    signingKeyVersion: number;
+  }): Promise<{ encryptionPublicKey: string; signingPublicKey: string } | null> {
+    if (!liveConnection) {
+      return null;
+    }
+
+    const rows = await liveConnection.procedures.lookupAgentPublicKeys({
+      requests: [
+        {
+          agentDbId: params.actor.id,
+          keyKind: { tag: 'Encryption' },
+          keyVersion: params.encryptionKeyVersion,
+        },
+        {
+          agentDbId: params.actor.id,
+          keyKind: { tag: 'Signing' },
+          keyVersion: params.signingKeyVersion,
+        },
+      ],
+    });
+    setAgentPublicKeys(current => mergePublicKeyRows(current, rows));
+
+    const encryptionPublicKey = findVersionedKey(
+      params.actor,
+      rows,
+      'encryption',
+      params.encryptionKeyVersion
+    );
+    const signingPublicKey = findVersionedKey(
+      params.actor,
+      rows,
+      'signing',
+      params.signingKeyVersion
+    );
+    if (!encryptionPublicKey || !signingPublicKey) {
+      return null;
+    }
+    return { encryptionPublicKey, signingPublicKey };
+  }
+
+  async function resolveExistingSenderSecret(params: {
+    threadId: bigint;
+    ownActor: Agent;
+    keyPair: AgentKeyPair;
+    latestSenderState: SenderSecretVersionState | undefined;
+    envelopes: VisibleThreadSecretEnvelopeRow[];
+    requiresSecretRotation: boolean;
+  }): Promise<SenderSecretState | null> {
+    if (!params.latestSenderState || params.requiresSecretRotation) {
+      return null;
+    }
+    const latestSenderState = params.latestSenderState;
+
+    const cached = getCachedSenderSecret(
+      params.threadId,
+      params.ownActor.publicIdentity,
+      latestSenderState.secretVersion
+    );
+    if (cached) {
+      return cached;
+    }
+
+    const ownEnvelope = params.envelopes.find(envelope => {
+      return (
+        envelope.threadId === params.threadId &&
+        envelope.membershipVersion === latestSenderState.membershipVersion &&
+        envelope.senderAgentDbId === params.ownActor.id &&
+        envelope.recipientAgentDbId === params.ownActor.id &&
+        envelope.secretVersion === latestSenderState.secretVersion
+      );
+    });
+    if (!ownEnvelope) {
+      return null;
+    }
+    if (ownEnvelope.recipientEncryptionKeyVersion !== params.keyPair.encryption.keyVersion) {
+      return null;
+    }
+
+    const keys = await lookupActorPublicKeysForEnvelope({
+      actor: params.ownActor,
+      encryptionKeyVersion: ownEnvelope.senderEncryptionKeyVersion,
+      signingKeyVersion: ownEnvelope.signingKeyVersion,
+    });
+    if (!keys) {
+      return null;
+    }
+
+    return await unwrapSecretEnvelope({
+      threadId: params.threadId,
+      senderPublicIdentity: params.ownActor.publicIdentity,
+      recipientPublicIdentity: params.ownActor.publicIdentity,
+      recipientKeyPair: params.keyPair,
+      envelope: {
+        id: ownEnvelope.id,
+        threadId: ownEnvelope.threadId,
+        secretVersion: ownEnvelope.secretVersion,
+        senderActorId: ownEnvelope.senderAgentDbId,
+        senderPublicIdentity: params.ownActor.publicIdentity,
+        recipientActorId: ownEnvelope.recipientAgentDbId,
+        recipientPublicIdentity: params.ownActor.publicIdentity,
+        recipientEncryptionKeyVersion: ownEnvelope.recipientEncryptionKeyVersion,
+        senderEncryptionKeyVersion: ownEnvelope.senderEncryptionKeyVersion,
+        signingKeyVersion: ownEnvelope.signingKeyVersion,
+        wrappedSecretCiphertext: toHex(ownEnvelope.wrappedSecretCiphertext),
+        wrappedSecretIv: toHex(ownEnvelope.wrappedSecretIv),
+        wrapAlgorithm: normalizeEnvelopeWrapAlgorithm(ownEnvelope.wrapAlgorithm),
+        signature: toHex(ownEnvelope.signature),
+      },
+      senderEncryptionPublicKey: keys.encryptionPublicKey,
+      envelopeSigningPublicKey: keys.signingPublicKey,
+    });
+  }
+
   async function handleResolveAddParticipant() {
     setActorActionError(null);
     setActorFeedback(null);
@@ -5311,13 +5488,6 @@ function AuthenticatedInboxPage() {
                 secretVersion: senderLastSentSecretVersion,
               }
             : undefined;
-        const existingSecret = latestThreadSenderState
-          ? getCachedSenderSecret(
-              directThread.id,
-              activeActor.publicIdentity,
-              latestThreadSenderState.secretVersion
-            )
-          : null;
         const currentActorById = new Map<bigint, Agent>(
           currentState.actors.map(actor => [actor.id, actor])
         );
@@ -5326,18 +5496,15 @@ function AuthenticatedInboxPage() {
         }
         currentActorById.set(activeActor.id, activeActor);
         const directThreadSecretEnvelopes =
-          selectedThread?.id === directThread.id
-            ? loadedThreadSecretEnvelopes
-            : await liveConnection.procedures.listThreadSecretEnvelopes({
-                agentDbId: activeActor.id,
-                threadId: directThread.id,
-                membershipVersion: latestThreadSenderState?.membershipVersion,
-                senderAgentDbId: latestThreadSenderState ? activeActor.id : undefined,
-                recipientAgentDbId: undefined,
-                secretVersion: latestThreadSenderState?.secretVersion,
-                afterId: undefined,
-                limit: undefined,
-              });
+          latestThreadSenderState
+            ? mergeRowsById(
+                selectedThread?.id === directThread.id ? loadedThreadSecretEnvelopes : [],
+                await loadSenderSecretEnvelopesForRotation(
+                  latestThreadSenderState,
+                  activeActor.id
+                )
+              )
+            : [];
         const composeRequiresSecretRotation = secretRotationRequired({
           senderActor: activeActor,
           latestSenderState: latestThreadSenderState,
@@ -5345,6 +5512,14 @@ function AuthenticatedInboxPage() {
           participants: currentThreadParticipants,
           actorById: currentActorById,
           envelopes: directThreadSecretEnvelopes,
+        });
+        const existingSecret = await resolveExistingSenderSecret({
+          threadId: directThread.id,
+          ownActor: activeActor,
+          keyPair: actorKeyPair,
+          latestSenderState: latestThreadSenderState,
+          envelopes: directThreadSecretEnvelopes,
+          requiresSecretRotation: composeRequiresSecretRotation,
         });
 
         const senderMessageId = randomSenderMessageId();
@@ -5432,6 +5607,30 @@ function AuthenticatedInboxPage() {
       return;
     }
     event.currentTarget.form?.requestSubmit();
+  }
+
+  async function loadSenderSecretEnvelopesForRotation(
+    state: SenderSecretVersionState,
+    senderAgentDbId: bigint
+  ): Promise<VisibleThreadSecretEnvelopeRow[]> {
+    if (!liveConnection || !activeActor) {
+      throw new Error('Connection is not ready.');
+    }
+
+    const rows = await liveConnection.procedures.listThreadSecretEnvelopes({
+      agentDbId: activeActor.id,
+      threadId: state.threadId,
+      membershipVersion: state.membershipVersion,
+      senderAgentDbId,
+      recipientAgentDbId: undefined,
+      secretVersion: state.secretVersion,
+      afterId: undefined,
+      limit: undefined,
+    });
+    if (rows.length > 0) {
+      setPagedThreadSecretEnvelopes(current => mergeRowsById(current, rows));
+    }
+    return rows;
   }
 
   async function handleAddParticipant() {
@@ -5535,15 +5734,24 @@ function AuthenticatedInboxPage() {
 
   async function handleSendMessage(event: React.FormEvent) {
     event.preventDefault();
-    if (!activeActor || !actorKeyPair || !selectedThread || !activeParticipant || !connected) return;
+    if (
+      !activeActor ||
+      !actorKeyPair ||
+      !selectedThread ||
+      !activeParticipant ||
+      !liveConnection ||
+      !connected
+    ) {
+      return;
+    }
     if (!ensureAuthorizedWriteAccess()) return;
     if (!vaultUnlocked) {
-        setActorActionError(
-          describeLocalVaultRequirement({
-            initialized: vaultInitialized,
-            phrase: 'before sending messages',
-          })
-        );
+      setActorActionError(
+        describeLocalVaultRequirement({
+          initialized: vaultInitialized,
+          phrase: 'before sending messages',
+        })
+      );
       return;
     }
 
@@ -5648,20 +5856,27 @@ function AuthenticatedInboxPage() {
         });
       }
 
-      const existingSecret = latestSenderState
-        ? getCachedSenderSecret(
-            selectedThread.id,
-            activeActor.publicIdentity,
-            latestSenderState.secretVersion
+      const envelopesForRotation = latestSenderState
+        ? mergeRowsById(
+            loadedThreadSecretEnvelopes,
+            await loadSenderSecretEnvelopesForRotation(latestSenderState, activeActor.id)
           )
-        : null;
+        : [];
       const sendRequiresSecretRotation = secretRotationRequired({
         senderActor: activeActor,
         latestSenderState,
         currentMembershipVersion: selectedThread.membershipVersion,
         participants: fullSelectedThreadParticipants,
         actorById: fullActorById,
-        envelopes: loadedThreadSecretEnvelopes,
+        envelopes: envelopesForRotation,
+      });
+      const existingSecret = await resolveExistingSenderSecret({
+        threadId: selectedThread.id,
+        ownActor: activeActor,
+        keyPair: actorKeyPair,
+        latestSenderState,
+        envelopes: envelopesForRotation,
+        requiresSecretRotation: rotateSecret || sendRequiresSecretRotation,
       });
 
       const senderMessageId = randomSenderMessageId();
@@ -5846,6 +6061,18 @@ function AuthenticatedInboxPage() {
             ? 'Current inbox is not an active participant in this thread.'
             : null;
   const importedRotationKeyPending = importedRotationKeyConfirmation.status === 'pending';
+  const manualSecretRotationChecked = Boolean(
+    selectedThread && (rotateSecret || requiresSecretRotation)
+  );
+  const manualSecretRotationDisabled =
+    !selectedThread || Boolean(composerDisabledReason) || requiresSecretRotation;
+  const manualSecretRotationStatus = !selectedThread
+    ? 'No thread selected'
+    : requiresSecretRotation
+      ? 'Required'
+      : rotateSecret
+        ? 'Queued'
+        : 'Off';
   const showVaultLockedThreadGuard =
     sessionOwnsActiveInbox && !vaultLoading && !vaultUnlocked && !showVaultDialog;
 
@@ -6249,7 +6476,7 @@ function AuthenticatedInboxPage() {
         <Tabs
           value={activeWorkspaceTab}
           onValueChange={value => {
-            if (value !== 'inbox' && value !== 'approvals') {
+            if (value !== 'inbox' && value !== 'approvals' && value !== 'settings') {
               return;
             }
 
@@ -6286,6 +6513,13 @@ function AuthenticatedInboxPage() {
                   {pendingIncomingCount}
                 </Badge>
               ) : null}
+            </TabsTrigger>
+            <TabsTrigger
+              value="settings"
+              className="rounded-md px-3.5 py-1.5 text-xs"
+            >
+              <GearSix className="h-3.5 w-3.5" />
+              Settings
             </TabsTrigger>
           </TabsList>
 
@@ -7003,6 +7237,62 @@ function AuthenticatedInboxPage() {
                       </div>
                     ))}
                   </div>
+                ) : null}
+              </section>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="settings" className="mt-0">
+            <div className="max-w-3xl space-y-4">
+              <section className="rounded-lg border border-border/40 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 space-y-1">
+                    <h2 className="text-sm font-medium">Thread sender secret</h2>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {selectedThread ? selectedThreadTitle : 'No thread selected'}
+                    </p>
+                  </div>
+                  <Badge
+                    variant={
+                      requiresSecretRotation
+                        ? 'soft-warning'
+                        : rotateSecret
+                          ? 'soft'
+                          : 'outline'
+                    }
+                  >
+                    {manualSecretRotationStatus}
+                  </Badge>
+                </div>
+
+                <label
+                  className={`mt-4 flex items-start gap-3 rounded-md border border-border/50 bg-muted/20 px-3 py-3 ${
+                    manualSecretRotationDisabled ? 'opacity-70' : 'cursor-pointer'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 accent-primary"
+                    checked={manualSecretRotationChecked}
+                    disabled={manualSecretRotationDisabled}
+                    onChange={event => setRotateSecret(event.target.checked)}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-medium">
+                      Rotate sender secret on next message
+                    </span>
+                    <span className="mt-0.5 block text-xs text-muted-foreground">
+                      {requiresSecretRotation
+                        ? 'Required by the current thread state.'
+                        : selectedThread
+                          ? 'Queued only for the selected thread.'
+                          : 'Select a thread in Messages.'}
+                    </span>
+                  </span>
+                </label>
+
+                {composerDisabledReason && selectedThread && !requiresSecretRotation ? (
+                  <p className="mt-2 text-xs text-muted-foreground">{composerDisabledReason}</p>
                 ) : null}
               </section>
             </div>

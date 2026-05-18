@@ -68,11 +68,6 @@ export function buildPreferredDefaultInboxSlug(
   throw new Error('Unable to generate an available default inbox slug');
 }
 
-export function inboxSlugContainsEmailToken(slug: string, email: string): boolean {
-  const emailToken = emailSlugBase(normalizeEmail(email));
-  return emailToken.length > 0 && normalizeInboxSlug(slug).includes(emailToken);
-}
-
 export function isReservedInboxSlug(slug: string): boolean {
   const normalizedSlug = normalizeInboxSlug(slug);
   return RESERVED_INBOX_SLUGS.includes(

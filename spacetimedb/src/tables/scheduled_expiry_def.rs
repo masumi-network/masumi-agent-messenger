@@ -37,7 +37,7 @@ pub struct ScheduledExpiry {
     /// - `ThreadDeletionCleanup` / `ThreadDeletionCleanupPreserveContactRequests` → `thread.id`
     ///   (per-batch resume token; cleanup runs in bounded batches against this thread)
     /// - `MessageExpiry` → `thread.id` (sweep messages past the thread's retention window)
-    /// - `ThreadSecretEnvelopeGc` → `thread.id` (drop envelopes for vacated participants)
+    /// - `ThreadSecretEnvelopeGc` → legacy no-op; envelope retention follows message retention
     /// - `AgentKeyBundleArchive` → `agent.id` (prune superseded `agent_key_bundle` history)
     /// - `ResolvedRequestTombstone` → composite request id (see `cleanup_resolved_request_tombstone`)
     /// - `ChannelRecencyFanout` → `channel.id` (resume token for batched member fanout)

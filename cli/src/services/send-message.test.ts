@@ -1,7 +1,15 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Timestamp } from 'spacetimedb';
+import {
+  generateAgentKeyPair,
+  prepareEncryptedMessage,
+} from '../../../shared/agent-crypto';
+import { fromHex } from '../../../shared/crypto-utils';
+import type { DbConnection } from '../../../webapp/src/module_bindings';
+import type { Agent, ThreadSecretEnvelope } from '../../../webapp/src/module_bindings/types';
 import {
   isDeregisteringOrDeregisteredInboxAgentState,
   isFailedRegistrationInboxAgentState,
@@ -9,7 +17,7 @@ import {
 import type { PeerKeyTrustStore, PeerKeyTuple } from '../../../shared/peer-key-trust';
 import { isCliError } from './errors';
 import { pinFirstObservation } from './peer-key-trust';
-import { requirePeerKeyTrust } from './send-message';
+import { requirePeerKeyTrust, resolveExistingSenderSecret } from './send-message';
 
 const tupleA: PeerKeyTuple = {
   encryptionPublicKey: 'p256-ecdh-public:v1:alice:1',
@@ -24,6 +32,36 @@ const tupleARotated: PeerKeyTuple = {
   signingPublicKey: 'p256-ecdsa-public:v1:alice:2',
   signingKeyVersion: 2,
 };
+
+function timestamp(microsSinceUnixEpoch: bigint) {
+  return new Timestamp(microsSinceUnixEpoch);
+}
+
+function makeAgent(overrides: Partial<Agent>): Agent {
+  return {
+    id: 1n,
+    accountId: 1n,
+    email: 'agent@example.com',
+    slug: 'agent',
+    isDefault: true,
+    publicIdentity: 'agent-public',
+    displayName: 'Agent',
+    currentKeyBundleVersion: 1,
+    publicDescription: undefined,
+    publicLinkedEmailEnabled: false,
+    allowAllMessageContentTypes: true,
+    allowAllMessageHeaders: true,
+    supportedMessageContentTypes: [],
+    supportedMessageHeaderNames: [],
+    masumiRegistrationNetwork: undefined,
+    masumiInboxAgentId: undefined,
+    masumiAgentIdentifier: undefined,
+    masumiRegistrationState: undefined,
+    createdAt: timestamp(1n),
+    updatedAt: timestamp(1n),
+    ...overrides,
+  };
+}
 
 async function readPersistedTrustStore(configDir: string): Promise<PeerKeyTrustStore> {
   const raw = await readFile(path.join(configDir, 'masumi-agent-messenger', 'cli', 'peer-key-trust.json'), 'utf8');
@@ -167,6 +205,124 @@ describe('send-message', () => {
 
       const store = await readPersistedTrustStore(tempDir);
       expect(store.peers['alice-id']?.current).toEqual(tupleARotated);
+    });
+  });
+
+  describe('sender secret reuse', () => {
+    it('rehydrates the current sender secret from the sender own envelope after process restart', async () => {
+      const keyPair = await generateAgentKeyPair({
+        encryptionKeyVersion: 1,
+        signingKeyVersion: 1,
+      });
+      const ownActor = makeAgent({
+        id: 10n,
+        accountId: 5n,
+        email: 'sender@example.com',
+        slug: 'sender',
+        publicIdentity: 'sender-public',
+      });
+      const threadId = 500n;
+      const recipient = {
+        actorId: ownActor.id,
+        email: ownActor.email,
+        slug: ownActor.slug,
+        publicIdentity: ownActor.publicIdentity,
+        encryptionPublicKey: keyPair.encryption.publicKey,
+        encryptionKeyVersion: keyPair.encryption.keyVersion,
+        signingPublicKey: keyPair.signing.publicKey,
+        signingKeyVersion: keyPair.signing.keyVersion,
+      };
+
+      const first = await prepareEncryptedMessage({
+        threadId,
+        senderActorId: ownActor.id,
+        senderPublicIdentity: ownActor.publicIdentity,
+        senderMessageId: 100n,
+        payload: {
+          contentType: 'text/plain',
+          body: 'first',
+        },
+        keyPair,
+        recipients: [recipient],
+        existingSecret: null,
+        latestKnownSecretVersion: null,
+        rotateSecret: false,
+      });
+      const ownEnvelopePayload = first.attachedSecretEnvelopes[0];
+      if (!ownEnvelopePayload) {
+        throw new Error('Expected first message to attach an own envelope');
+      }
+
+      const ownEnvelope = {
+        id: 1n,
+        threadId,
+        membershipVersion: 1n,
+        secretVersion: first.secretVersion,
+        senderAgentDbId: ownActor.id,
+        recipientAgentDbId: ownActor.id,
+        senderAccountId: ownActor.accountId,
+        recipientAccountId: ownActor.accountId,
+        senderEncryptionKeyVersion: ownEnvelopePayload.senderEncryptionKeyVersion,
+        recipientEncryptionKeyVersion: ownEnvelopePayload.recipientEncryptionKeyVersion,
+        signingKeyVersion: ownEnvelopePayload.signingKeyVersion,
+        wrappedSecretCiphertext: fromHex(ownEnvelopePayload.wrappedSecretCiphertext),
+        wrappedSecretIv: fromHex(ownEnvelopePayload.wrappedSecretIv),
+        signature: fromHex(ownEnvelopePayload.signature),
+        wrapAlgorithm: { tag: 'EcdhP256AesGcm256V1' as const },
+        createdAt: timestamp(2n),
+        updatedAt: timestamp(2n),
+      } satisfies ThreadSecretEnvelope;
+      const conn = {
+        procedures: {
+          lookupAgentPublicKeys: vi.fn(async () => [
+            {
+              agentDbId: ownActor.id,
+              keyKind: { tag: 'Encryption' as const },
+              keyVersion: keyPair.encryption.keyVersion,
+              publicKey: keyPair.encryption.publicKey,
+            },
+            {
+              agentDbId: ownActor.id,
+              keyKind: { tag: 'Signing' as const },
+              keyVersion: keyPair.signing.keyVersion,
+              publicKey: keyPair.signing.publicKey,
+            },
+          ]),
+        },
+      } as unknown as DbConnection;
+
+      const rehydrated = await resolveExistingSenderSecret({
+        conn,
+        threadId,
+        ownActor,
+        keyPair,
+        latestSenderState: {
+          membershipVersion: ownEnvelope.membershipVersion,
+          secretVersion: first.secretVersion,
+        },
+        envelopes: [ownEnvelope],
+        requiresSecretRotation: false,
+      });
+
+      expect(rehydrated).toEqual(first.senderSecret);
+      const second = await prepareEncryptedMessage({
+        threadId,
+        senderActorId: ownActor.id,
+        senderPublicIdentity: ownActor.publicIdentity,
+        senderMessageId: 101n,
+        payload: {
+          contentType: 'text/plain',
+          body: 'second',
+        },
+        keyPair,
+        recipients: [recipient],
+        existingSecret: rehydrated,
+        latestKnownSecretVersion: first.secretVersion,
+        rotateSecret: false,
+      });
+      expect(second.didRotateSecret).toBe(false);
+      expect(second.secretVersion).toBe(first.secretVersion);
+      expect(second.attachedSecretEnvelopes).toHaveLength(0);
     });
   });
 

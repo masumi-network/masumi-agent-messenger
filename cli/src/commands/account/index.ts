@@ -1105,7 +1105,7 @@ export function registerAccountCommands(program: Command): void {
       const options = commandInstance.optsWithGlobals() as AccountFlowOptions;
       if (!isInteractiveAccountFlow(options)) {
         throw userError(
-          'Run `masumi-agent-messenger account recover` in an interactive terminal, or use `masumi-agent-messenger account device`, `masumi-agent-messenger account backup import`, or `masumi-agent-messenger agent key rotate <slug>` directly.',
+          'Run `masumi-agent-messenger account recover` in an interactive terminal, or use `masumi-agent-messenger account device`, `masumi-agent-messenger account backup import`, or `masumi-agent-messenger agent key reset <slug>` directly.',
           {
             code: 'AUTH_RECOVER_INTERACTIVE_REQUIRED',
           }

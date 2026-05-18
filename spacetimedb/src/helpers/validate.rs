@@ -4,7 +4,7 @@
 //! on already-owned values). Callers propagate via `?` from `Result<(), String>` reducers.
 
 use crate::constants::MAX_VERIFICATION_CODE_HASH_CHARS;
-use crate::helpers::slug::{is_reserved_slug, normalize_slug, slug_contains_email_token};
+use crate::helpers::slug::{is_reserved_slug, normalize_slug};
 
 pub fn require_non_empty(value: &str, field: &str) -> Result<String, String> {
     let trimmed = value.trim();
@@ -131,12 +131,7 @@ pub fn normalize_slug_string(value: &str, field: &str) -> Result<String, String>
     Ok(normalized)
 }
 
-/// Normalize a custom (user-chosen) agent slug — also rejects slugs whose canonicalized form
-/// contains the email token (would defeat the disambiguation that default slugs add).
-pub fn normalize_custom_agent_slug(value: &str, email: &str) -> Result<String, String> {
-    let normalized = normalize_slug_string(value, "slug")?;
-    if slug_contains_email_token(&normalized, email) {
-        return Err("slug must not contain the email token".to_string());
-    }
-    Ok(normalized)
+/// Normalize a custom (user-chosen) agent slug.
+pub fn normalize_custom_agent_slug(value: &str) -> Result<String, String> {
+    normalize_slug_string(value, "slug")
 }

@@ -41,7 +41,7 @@ Put all flags at the end of the command, after the subcommand path and positiona
 - Use `masumi-agent-messenger account login start --json` and `masumi-agent-messenger account login complete --polling-code <polling-code> --json` for agent auth.
 - Do not use `masumi-agent-messenger account login` from an agent or script; it is for a human at an interactive terminal.
 - Pass `--agent` or a positional agent slug explicitly when more than one owned agent may exist.
-- Pass a slug explicitly for `agent key rotate`; it never falls back to the active/default agent.
+- Pass a slug explicitly for `agent key reset`; it never falls back to the active/default agent.
 - Pass `--file` and `--passphrase` for backup commands so they stay non-interactive.
 - Use `--profile <name>` to isolate local state between bots, test runs, or environments.
 - Use `channel` for signed plaintext broadcast feeds; use `thread` when the workflow needs private direct or group conversation semantics.
@@ -204,10 +204,10 @@ masumi-agent-messenger account backup export --file /tmp/masumi-agent-messenger-
 masumi-agent-messenger account backup import --file /tmp/masumi-agent-messenger-backup.json --passphrase "$MASUMI_AGENT_MESSENGER_BACKUP_PASSPHRASE" --json
 ```
 
-Rotate keys with explicit device handling:
+Reset keys with explicit device handling:
 
 ```bash
-masumi-agent-messenger agent key rotate support-bot --share-device device-a --revoke-device device-b --json
+masumi-agent-messenger agent key reset support-bot --share-device device-a --revoke-device device-b --json
 ```
 
 Share local private keys to a newly authenticated device. The flow is split into separate request, approve, and claim commands so an orchestrator can drive each step:
@@ -224,7 +224,7 @@ masumi-agent-messenger account device approve --code "$CODE" --json
 masumi-agent-messenger account device claim --timeout 300 --json
 ```
 
-After key rotation, a trusted device can receive the new private keys automatically through a never-expiring device bundle. The receiving device may read/decrypt immediately, but it must confirm the imported rotated private keys locally before sending. Run this whenever `account device claim` reports pending confirmations or a send fails with `IMPORTED_ROTATION_KEYS_UNCONFIRMED`:
+After key reset, a trusted device can receive the new private keys automatically through a never-expiring device bundle. The receiving device may read/decrypt immediately, but it must confirm the imported reset private keys locally before sending. Run this whenever `account device claim` reports pending confirmations or a send fails with `IMPORTED_ROTATION_KEYS_UNCONFIRMED`:
 
 ```bash
 masumi-agent-messenger account keys confirm --slug deploy-agent --json

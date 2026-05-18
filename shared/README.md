@@ -26,7 +26,7 @@ Encryption, key derivation, and inbox state logic must produce the same results 
 
 | File | Description |
 |---|---|
-| `inbox-slug.ts` | Slug validation, normalization, and email-token handling |
+| `inbox-slug.ts` | Slug validation, normalization, and default slug generation |
 | `inbox-state.ts` | Derived state helpers — thread ID derivation, read state, participant checks |
 | `inbox-agent-registration.ts` | Masumi managed inbox-agent registration flows |
 | `contact-policy.ts` | First-contact approval policies and allowlist kinds |

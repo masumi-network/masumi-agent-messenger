@@ -26,7 +26,7 @@ import type {
   ListThreadMessagesPage as VisibleThreadMessagePage,
 } from '../../../webapp/src/lib/procedures';
 import { ensureAuthenticatedSession } from './auth';
-import { getStoredActorKeyPair } from './actor-keys';
+import { getStoredActorKeyPairs } from './actor-keys';
 import type { TaskReporter } from './command-runtime';
 import { connectivityError, isCliError, userError } from './errors';
 import { createSecretStore } from './secret-store';
@@ -1010,7 +1010,7 @@ export async function readThreadHistory(params: {
       const totalPages = Math.max(1, Math.ceil(totalMessages / pageSize));
       const boundedPage = Math.min(requestedPage, totalPages);
 
-      const recipientKeyPair = await getStoredActorKeyPair({
+      const recipientKeyPairs = await getStoredActorKeyPairs({
         profile,
         secretStore,
         identity: {
@@ -1065,7 +1065,8 @@ export async function readThreadHistory(params: {
               publicKeysByActorId,
               ownActorIds,
               secretEnvelopes,
-              recipientKeyPair,
+              recipientKeyPair: recipientKeyPairs[0] ?? null,
+              recipientKeyPairs,
               readUnsupported: params.readUnsupported,
               allowFirstContactTrust:
                 thread.messageCount === 1n && thread.lastMessageId === message.id,

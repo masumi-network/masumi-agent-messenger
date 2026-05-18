@@ -88,8 +88,3 @@ pub fn build_default_slug(email: &str) -> String {
     let suffix: String = hash.chars().take(8).collect();
     format!("{base}-{suffix}")
 }
-
-pub fn slug_contains_email_token(slug: &str, email: &str) -> bool {
-    let token = email_slug_base(email);
-    !token.is_empty() && normalize_slug(slug).contains(&token)
-}

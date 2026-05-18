@@ -25,12 +25,25 @@ function buildDefaultActorIdentity(profile: ResolvedProfile): ActorIdentity | nu
   };
 }
 
+function keyPairIdentity(pair: AgentKeyPair): string {
+  return [
+    pair.encryption.publicKey,
+    pair.encryption.keyVersion,
+    pair.signing.publicKey,
+    pair.signing.keyVersion,
+  ].join(':');
+}
+
+function sameKeyPair(left: AgentKeyPair, right: AgentKeyPair): boolean {
+  return keyPairIdentity(left) === keyPairIdentity(right);
+}
+
 function dedupeArchivedKeyPairs(pairs: AgentKeyPair[]): AgentKeyPair[] {
   const seen = new Set<string>();
   const next: AgentKeyPair[] = [];
 
   for (const pair of pairs) {
-    const key = `${pair.encryption.keyVersion}:${pair.signing.keyVersion}`;
+    const key = keyPairIdentity(pair);
     if (seen.has(key)) {
       continue;
     }
@@ -59,6 +72,51 @@ function cloneSharedActorKeyMaterial(actor: SharedActorKeyMaterial): SharedActor
       signing: { ...pair.signing },
     })),
   };
+}
+
+function mergeSharedActorMaterial(
+  existing: SharedActorKeyMaterial | null,
+  imported: SharedActorKeyMaterial
+): SharedActorKeyMaterial {
+  const current = imported.current ?? existing?.current ?? null;
+  const archiveExistingCurrent =
+    existing?.current && (!current || !sameKeyPair(existing.current, current))
+      ? [existing.current]
+      : [];
+  const archived = dedupeArchivedKeyPairs([
+    ...(existing?.archived ?? []),
+    ...imported.archived,
+    ...archiveExistingCurrent,
+  ]).filter(pair => !current || !sameKeyPair(pair, current));
+
+  return cloneSharedActorKeyMaterial({
+    identity: imported.identity,
+    current,
+    archived,
+  });
+}
+
+function mergeImportedActors(params: {
+  existingActors: SharedActorKeyMaterial[];
+  importedActors: SharedActorKeyMaterial[];
+}): SharedActorKeyMaterial[] {
+  const actorsBySlug = new Map(
+    params.existingActors.map(actor => [
+      actor.identity.slug,
+      cloneSharedActorKeyMaterial(actor),
+    ] as const)
+  );
+
+  for (const imported of params.importedActors) {
+    actorsBySlug.set(
+      imported.identity.slug,
+      mergeSharedActorMaterial(actorsBySlug.get(imported.identity.slug) ?? null, imported)
+    );
+  }
+
+  return Array.from(actorsBySlug.values()).filter(
+    actor => Boolean(actor.current) || actor.archived.length > 0
+  );
 }
 
 function buildSnapshot(email: string, actors: SharedActorKeyMaterial[]): DeviceKeyShareSnapshot {
@@ -142,13 +200,16 @@ export async function ensureNamespaceVaultContainsDefaultActor(params: {
   const existingVault = await params.secretStore.getNamespaceKeyVault(params.profile.name);
   const actors = existingVault?.actors ?? [];
   const existingActorIndex = actors.findIndex(actor => actor.identity.slug === identity.slug);
+  const existingActor = existingActorIndex >= 0 ? actors[existingActorIndex] : null;
   const nextActor = {
     identity,
     current: params.keyPair,
-    archived:
-      existingActorIndex >= 0
-        ? dedupeArchivedKeyPairs(actors[existingActorIndex]?.archived ?? [])
-        : [],
+    archived: dedupeArchivedKeyPairs([
+      ...(existingActor?.archived ?? []),
+      ...(existingActor?.current && !sameKeyPair(existingActor.current, params.keyPair)
+        ? [existingActor.current]
+        : []),
+    ]).filter(pair => !sameKeyPair(pair, params.keyPair)),
   };
   const nextActors =
     existingActorIndex >= 0
@@ -218,10 +279,15 @@ export async function importNamespaceKeyShareSnapshot(params: {
   secretStore: SecretStore;
   snapshot: DeviceKeyShareSnapshot;
 }): Promise<void> {
+  const existingVault = await params.secretStore.getNamespaceKeyVault(params.profile.name);
   const nextVault: NamespaceKeyVault = {
     version: 1,
     email: params.snapshot.email,
-    actors: params.snapshot.actors,
+    actors: mergeImportedActors({
+      existingActors:
+        existingVault?.email === params.snapshot.email ? existingVault.actors : [],
+      importedActors: params.snapshot.actors,
+    }),
   };
   await params.secretStore.setNamespaceKeyVault(params.profile.name, nextVault);
 

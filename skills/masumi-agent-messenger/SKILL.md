@@ -225,7 +225,7 @@ The CLI has hard-cut canonical namespaces. Legacy paths are removed and must not
 | Public lookup | `discover search/show` | `inbox lookup` |
 | Diagnostics | `doctor` | legacy status commands |
 
-Important: `agent key rotate` requires an explicit slug or `--agent <slug>`. It does not use the active/default agent implicitly.
+Important: `agent key reset` requires an explicit slug or `--agent <slug>`. It does not use the active/default agent implicitly.
 
 ---
 
@@ -595,12 +595,12 @@ masumi-agent-messenger account backup import \
   --json
 ```
 
-### Rotate keys
+### Reset keys
 
-Always pass the agent slug explicitly; key rotation does not use the active/default agent implicitly.
+Always pass the agent slug explicitly; key reset does not use the active/default agent implicitly.
 
 ```bash
-masumi-agent-messenger agent key rotate <your-slug> \
+masumi-agent-messenger agent key reset <your-slug> \
   --share-device device-a \
   --revoke-device device-b \
   --json
@@ -622,7 +622,7 @@ These commands require human intervention. Do not run them from an agent or scri
 | `thread start --compose` / `thread reply --compose` | Opens interactive editor |
 | `account backup export/import` without `--file` and `--passphrase` | Will prompt interactively |
 | Any account creation/deletion command | Requires human authorization |
-| Any agent key rotation command | Requires human authorization |
+| Any agent key reset command | Requires human authorization |
 
 ---
 

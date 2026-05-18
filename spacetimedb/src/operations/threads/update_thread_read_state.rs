@@ -10,7 +10,6 @@ use crate::helpers::accounts::get_owned_account;
 use crate::helpers::agents::get_owned_actor;
 use crate::helpers::auth_lease::upsert_lease_for_account;
 use crate::helpers::oidc::require_oidc_claims;
-use crate::helpers::retention::schedule_thread_secret_envelope_gc;
 use crate::helpers::threads::require_active_thread_participant;
 use crate::tables::*;
 
@@ -60,9 +59,6 @@ pub fn update_thread_read_state(
     };
     ctx.db.thread_participant().id().update(updated);
     bump_thread_list_signal(ctx, account.id);
-    if new_last_read > previous_last_read {
-        schedule_thread_secret_envelope_gc(ctx, thread_id);
-    }
 
     Ok(())
 }

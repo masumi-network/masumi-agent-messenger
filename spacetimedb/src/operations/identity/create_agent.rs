@@ -33,7 +33,7 @@ pub fn create_agent(
     let claims = require_oidc_claims(ctx)?;
     upsert_lease_for_account(ctx, &account, &claims)?;
 
-    let normalized_slug = normalize_custom_agent_slug(&slug, &account.email)?;
+    let normalized_slug = normalize_custom_agent_slug(&slug)?;
     require_available_slug(ctx, &normalized_slug, None)?;
 
     let normalized_display_name = normalize_optional(

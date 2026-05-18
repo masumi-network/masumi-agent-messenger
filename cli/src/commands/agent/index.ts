@@ -1282,7 +1282,6 @@ export function registerAgentCommands(program: Command): void {
 
   key
     .command('reset')
-    .alias('rotate')
     .description('Reset agent encryption and signing keys')
     .argument('[slug]', 'Owned agent slug to reset (required unless --agent is set)')
     .option('--agent <slug>', 'Owned agent slug whose keys should reset')
@@ -1305,7 +1304,7 @@ export function registerAgentCommands(program: Command): void {
         throw userError(
           'Agent slug is required for key reset. Pass `masumi-agent-messenger agent key reset <slug>` or `--agent <slug>`.',
           {
-            code: 'AGENT_KEY_ROTATE_SLUG_REQUIRED',
+            code: 'AGENT_KEY_RESET_SLUG_REQUIRED',
           }
         );
       }

@@ -100,7 +100,7 @@ import {
   listCandidateBackends,
   type SecretKind,
 } from '../services/secret-store';
-import { getStoredActorKeyPair } from '../services/actor-keys';
+import { getStoredActorKeyPair, getStoredActorKeyPairs } from '../services/actor-keys';
 import {
   buildPublicKeysByActorId,
   decryptVisibleMessage,
@@ -148,6 +148,9 @@ const SHELL_LEASE_REFRESH_MIN_DELAY_MS = 5_000;
 const SHELL_LEASE_REFRESH_FALLBACK_DELAY_MS = 10_000;
 const SHELL_LEASE_LOST_DEBOUNCE_MS = 1500;
 const SHELL_SESSION_BORROW_REFRESH_WINDOW_MS = 2 * 60_000;
+const OIDC_RECONNECT_NOTICE = 'Sign-in token expired; reconnecting.';
+const OIDC_BACKGROUND_REFRESH_NOTICE =
+  'Sign-in token expired; refreshing in the background.';
 
 function enumTag(value: { tag: string } | string | null | undefined): string {
   if (typeof value === 'string') return value;
@@ -178,7 +181,8 @@ function isOidcTokenExpiredError(error: unknown): boolean {
     }
     seen.add(current);
 
-    if (errorMessageForMatch(current)?.includes('OIDC token is expired')) {
+    const message = errorMessageForMatch(current)?.toLowerCase();
+    if (message?.includes('oidc token is expired') || message?.includes('oidc token expired')) {
       return true;
     }
 
@@ -1509,7 +1513,7 @@ function useRootShellConnection(profileName: string, activeInboxSlug?: string | 
             return {
               ...current,
               connection: 'reconnecting',
-              error: 'Sign-in token expired; reconnecting.',
+              error: OIDC_RECONNECT_NOTICE,
             };
           });
           scheduleReconnect(SHELL_LEASE_LOST_RECONNECT_DELAY_MS);
@@ -1599,9 +1603,24 @@ function useRootShellConnection(profileName: string, activeInboxSlug?: string | 
             if (cancelled) {
               return;
             }
-            const message = error?.message?.trim() || 'SpacetimeDB connection closed.';
             hasFailedConnectionAttemptRef.current = true;
             clearLeaseRefreshTimer();
+            if (isOidcTokenExpiredError(error)) {
+              setState(current => {
+                if (current.mode !== 'ready') {
+                  return current;
+                }
+                return {
+                  ...current,
+                  connection: 'reconnecting',
+                  error: OIDC_RECONNECT_NOTICE,
+                };
+              });
+              scheduleReconnect(SHELL_LEASE_LOST_RECONNECT_DELAY_MS);
+              return;
+            }
+
+            const message = error?.message?.trim() || 'SpacetimeDB connection closed.';
             setState(current => {
               if (current.mode !== 'ready') {
                 return current;
@@ -1692,6 +1711,23 @@ function useRootShellConnection(profileName: string, activeInboxSlug?: string | 
             }
 
             hasFailedConnectionAttemptRef.current = true;
+            if (isOidcTokenExpiredError(errorMessage)) {
+              setState(current => {
+                if (current.mode !== 'ready') {
+                  return current;
+                }
+
+                return {
+                  ...current,
+                  connection: 'reconnecting',
+                  error: OIDC_RECONNECT_NOTICE,
+                };
+              });
+
+              scheduleReconnect(SHELL_LEASE_LOST_RECONNECT_DELAY_MS);
+              return;
+            }
+
             setState(current => {
               if (current.mode !== 'ready') {
                 return current;
@@ -1713,6 +1749,26 @@ function useRootShellConnection(profileName: string, activeInboxSlug?: string | 
         publishRows();
       } catch (error) {
         if (cancelled) {
+          return;
+        }
+
+        if (isOidcTokenExpiredError(error)) {
+          hasFailedConnectionAttemptRef.current = true;
+          setState(current => {
+            if (current.mode === 'ready') {
+              return {
+                ...current,
+                connection: 'reconnecting',
+                error: OIDC_RECONNECT_NOTICE,
+              };
+            }
+            return {
+              mode: 'loading',
+              connection: 'reconnecting',
+              error: OIDC_RECONNECT_NOTICE,
+            };
+          });
+          scheduleReconnect(SHELL_LEASE_LOST_RECONNECT_DELAY_MS);
           return;
         }
 
@@ -2361,7 +2417,7 @@ async function buildLiveThreadMessages(params: {
 
   const requestedThreadId = BigInt(params.threadId);
   const secretStore = createSecretStore();
-  const recipientKeyPair = await getStoredActorKeyPair({
+  const recipientKeyPairs = await getStoredActorKeyPairs({
     profile: params.auth.profile,
     secretStore,
     identity: {
@@ -2412,7 +2468,8 @@ async function buildLiveThreadMessages(params: {
         publicKeysByActorId,
         ownActorIds,
         secretEnvelopes,
-        recipientKeyPair,
+        recipientKeyPair: recipientKeyPairs[0] ?? null,
+        recipientKeyPairs,
         allowFirstContactTrust: thread?.messageCount === 1n && thread.lastMessageId === message.id,
       });
 
@@ -2886,6 +2943,7 @@ function renderDiscoveryResultList(params: {
   selectedIndex: number;
   empty: string;
   width: number;
+  maxRows?: number;
 }) {
   const width = Math.max(1, params.width);
   if (params.results.length === 0) {
@@ -2896,13 +2954,24 @@ function renderDiscoveryResultList(params: {
     );
   }
 
+  const selectedIndex = clampIndex(params.selectedIndex, params.results.length);
+  const maxRows = params.maxRows ? Math.max(1, params.maxRows) : params.results.length;
+  const startIndex = nextListWindowStart({
+    currentStart: 0,
+    itemCount: params.results.length,
+    maxItems: maxRows,
+    selectedIndex,
+  });
+  const visibleResults = params.results.slice(startIndex, startIndex + maxRows);
+
   return (
     <Box flexDirection="column" width={width}>
-      {params.results.map((result, index) => {
-        const selected = index === params.selectedIndex;
+      {visibleResults.map((result, index) => {
+        const itemIndex = startIndex + index;
+        const selected = itemIndex === selectedIndex;
         return (
           <Text
-            key={`${index}:${result.slug}:${result.registrationState}`}
+            key={`${itemIndex}:${result.slug}:${result.registrationState}`}
             color={selected ? 'cyan' : undefined}
             bold={selected}
             wrap="truncate"
@@ -3407,6 +3476,10 @@ export function RootShell({
   const terminalSize = useTerminalSize();
   const contentListWidth = Math.max(1, terminalSize.columns - SIDEBAR_WIDTH - 3);
   const contentListMaxRows = Math.max(3, terminalSize.rows - 12);
+  const selectionListMaxRows = Math.max(
+    1,
+    Math.min(contentListMaxRows, Math.max(1, terminalSize.rows - 16))
+  );
   const inboxListMaxRows = Math.max(1, terminalSize.rows - 17);
   const threadMessageMaxRows = Math.max(3, terminalSize.rows - 15);
   const [route, setRoute] = useState<ShellRoute>(initialSnapshot?.route ?? { type: 'auth' });
@@ -3489,6 +3562,11 @@ export function RootShell({
         reporter: silentReporter(),
       })
         .then(() => {
+          setTask(current =>
+            current.notice === OIDC_BACKGROUND_REFRESH_NOTICE
+              ? { ...current, notice: null }
+              : current
+          );
           reconnect();
         })
         .catch(error => {
@@ -3947,6 +4025,13 @@ export function RootShell({
     discoverDetail.slug === selectedDiscoveryResult.slug
       ? discoverDetail.detail
       : null;
+  const discoveryResultListMaxRows = Math.max(
+    1,
+    Math.min(
+      selectionListMaxRows,
+      Math.max(1, terminalSize.rows - (selectedDiscoveryDetail ? 21 : 12))
+    )
+  );
   const currentTaskField = taskPanel?.fields[taskPanel.stepIndex] ?? null;
   useEffect(() => {
     if (!currentTaskField) {
@@ -4939,6 +5024,7 @@ export function RootShell({
     const auth = connectionState.auth;
     if (shouldRefreshShellAuthenticatedConnection(auth)) {
       refreshShellOidcSessionInBackground();
+      return await run();
     }
 
     return await withExistingAuthenticatedSpacetimeRuntime(
@@ -5048,6 +5134,30 @@ export function RootShell({
         return;
       }
 
+      if (isOidcTokenExpiredError(error)) {
+        refreshShellOidcSessionInBackground();
+        setAgentDiscovery(current => ({
+          ...current,
+          query,
+          mode: query ? 'search' : 'browse',
+          page,
+          hasNextPage: false,
+          loaded: false,
+          loading: false,
+          error: null,
+        }));
+
+        if (params?.announce) {
+          setTask(current => ({
+            ...current,
+            error: null,
+            notice: OIDC_BACKGROUND_REFRESH_NOTICE,
+            logs: pushLog(current.logs, OIDC_BACKGROUND_REFRESH_NOTICE),
+          }));
+        }
+        return;
+      }
+
       const message = toCliError(error).message;
       setAgentDiscovery(current => ({
         ...current,
@@ -5147,6 +5257,20 @@ export function RootShell({
         if (ownedAgentsRouteSyncKeyRef.current === syncKey) {
           ownedAgentsRouteSyncKeyRef.current = null;
         }
+        if (isOidcTokenExpiredError(error)) {
+          refreshShellOidcSessionInBackground();
+          setTask(current =>
+            current.busy || current.banner || current.active
+              ? current
+              : {
+                  ...current,
+                  error: null,
+                  notice: OIDC_BACKGROUND_REFRESH_NOTICE,
+                  logs: pushLog(current.logs, OIDC_BACKGROUND_REFRESH_NOTICE),
+                }
+          );
+          return;
+        }
         setTask(current =>
           current.busy || current.banner || current.active
             ? current
@@ -5196,15 +5320,15 @@ export function RootShell({
       finishSuccess(result);
     } catch (error) {
       if (isOidcTokenExpiredError(error)) {
-        refreshShellOidcSessionInBackground();
         setTask(current => ({
           ...current,
           busy: false,
           active: null,
           error: null,
-          notice: 'Sign-in token expired; refreshing in the background.',
-          logs: pushLog(current.logs, 'Sign-in token expired; refreshing in the background.'),
+          notice: OIDC_BACKGROUND_REFRESH_NOTICE,
+          logs: pushLog(current.logs, OIDC_BACKGROUND_REFRESH_NOTICE),
         }));
+        refreshShellOidcSessionInBackground();
         return;
       }
       const cliError = toCliError(error);
@@ -6483,6 +6607,23 @@ export function RootShell({
         error: null,
       });
     } catch (error) {
+      if (isOidcTokenExpiredError(error)) {
+        refreshShellOidcSessionInBackground();
+        setDiscoverDetail({
+          status: 'idle',
+          slug,
+          detail: null,
+          error: null,
+        });
+        setTask(current => ({
+          ...current,
+          error: null,
+          notice: OIDC_BACKGROUND_REFRESH_NOTICE,
+          logs: pushLog(current.logs, OIDC_BACKGROUND_REFRESH_NOTICE),
+        }));
+        return;
+      }
+
       setDiscoverDetail({
         status: 'error',
         slug,
@@ -9344,7 +9485,7 @@ export function RootShell({
                     selectedIndex: clampIndex(selectedChannelIndex, model.channels.channels.length),
                     empty: 'No channels for the active agent yet. Press N or + to add one.',
                     maxWidth: contentListWidth,
-                    maxRows: contentListMaxRows,
+                    maxRows: selectionListMaxRows,
                   })}
                 {selectedChannel ? (
                   <Box marginTop={1} flexDirection="column">
@@ -9508,7 +9649,7 @@ export function RootShell({
                           ),
                           empty: 'No visible channel members yet.',
                           maxWidth: contentListWidth,
-                          maxRows: contentListMaxRows,
+                          maxRows: selectionListMaxRows,
                         })}
                         {selectedChannelMember ? (
                           <Box marginTop={1} flexDirection="column">
@@ -9548,7 +9689,7 @@ export function RootShell({
                       ),
                       empty: `No pending join approvals for #${selectedChannel.slug}.`,
                       maxWidth: contentListWidth,
-                      maxRows: contentListMaxRows,
+                      maxRows: selectionListMaxRows,
                     })}
                     {selectedChannelApproval ? (
                       <Box marginTop={1} flexDirection="column">
@@ -9599,7 +9740,7 @@ export function RootShell({
                 selectedIndex: clampIndex(selectedAgentIndex, model.agents.agentSummaries.length),
                 empty: 'No owned agents found.',
                 maxWidth: contentListWidth,
-                maxRows: contentListMaxRows,
+                maxRows: selectionListMaxRows,
               })}
               {selectedAgent ? (
                 <Box marginTop={1} flexDirection="column">
@@ -9655,6 +9796,7 @@ export function RootShell({
                       ? 'No registered SaaS agents on this page.'
                       : 'Loading discovery results…',
                 width: contentListWidth,
+                maxRows: discoveryResultListMaxRows,
               })}
               {selectedDiscoveryResult ? (
                 <Box marginTop={1} flexDirection="column">
@@ -9860,7 +10002,7 @@ export function RootShell({
                   selectedIndex: clampIndex(securityActionIndex, securityActions.length),
                   empty: 'No account actions available.',
                   maxWidth: contentListWidth,
-                  maxRows: contentListMaxRows,
+                  maxRows: selectionListMaxRows,
                 })}
               </Box>
             ) : (
@@ -9884,7 +10026,7 @@ export function RootShell({
                   selectedIndex: clampIndex(deviceSelection, model.account.devices.length),
                   empty: 'No trusted devices found.',
                   maxWidth: contentListWidth,
-                  maxRows: contentListMaxRows,
+                  maxRows: selectionListMaxRows,
                 })}
               </Box>
             )}

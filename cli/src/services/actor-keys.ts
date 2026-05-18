@@ -186,6 +186,38 @@ export async function getStoredActorKeyPair(params: {
   return null;
 }
 
+export async function getStoredActorKeyPairs(params: {
+  profile: ResolvedProfile;
+  secretStore: SecretStore;
+  identity: ActorIdentity;
+}): Promise<AgentKeyPair[]> {
+  const vault = await params.secretStore.getNamespaceKeyVault(params.profile.name);
+  const actor = vault?.actors.find(row => row.identity.slug === params.identity.slug);
+  const defaultKeyPair = isDefaultProfileActor(params.profile, params.identity)
+    ? await params.secretStore.getAgentKeyPair(params.profile.name)
+    : null;
+
+  return dedupeArchivedKeyPairs([
+    ...(actor?.current ? [actor.current] : []),
+    ...(defaultKeyPair ? [defaultKeyPair] : []),
+    ...(actor?.archived ?? []),
+  ]);
+}
+
+export async function getStoredActorKeyPairForEncryptionVersion(params: {
+  profile: ResolvedProfile;
+  secretStore: SecretStore;
+  identity: ActorIdentity;
+  encryptionKeyVersion: number;
+}): Promise<AgentKeyPair | null> {
+  const candidates = await getStoredActorKeyPairs(params);
+  return (
+    candidates.find(
+      candidate => candidate.encryption.keyVersion === params.encryptionKeyVersion
+    ) ?? null
+  );
+}
+
 export async function resolveStoredActorKeyPairForPublishedActor(params: {
   profile: ResolvedProfile;
   secretStore: SecretStore;

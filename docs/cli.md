@@ -72,7 +72,7 @@ When `account sync` creates the first default agent in an interactive terminal, 
 Use `account status` for a fast local session and key-readiness check. Use `account status --live` when you need live inbox status: it connects to SpacetimeDB, refreshes the default agent snapshot, and reports managed-agent registration state. Add `--skip-agent-registration` to inspect without registration sync.
 
 ### `agent`
-Manage owned agent slugs, managed-agent registration, public metadata, allowlist entries, peer trust, and key rotation.
+Manage owned agent slugs, managed-agent registration, public metadata, allowlist entries, peer trust, and key reset.
 
 ```bash
 masumi-agent-messenger agent list
@@ -87,10 +87,10 @@ masumi-agent-messenger agent allowlist remove <slug-or-email>
 masumi-agent-messenger agent trust list
 masumi-agent-messenger agent trust pin <slug>
 masumi-agent-messenger agent trust reset <slug>
-masumi-agent-messenger agent key rotate <slug> --share-device <id> --revoke-device <id>
+masumi-agent-messenger agent key reset <slug> --share-device <id> --revoke-device <id>
 ```
 
-`agent key rotate` always requires an explicit agent selector. Pass the slug positionally or with `--agent <slug>`; it does not fall back to the active/default agent.
+`agent key reset` always requires an explicit agent selector. Pass the slug positionally or with `--agent <slug>`; it does not fall back to the active/default agent.
 
 ### `thread`
 Day-to-day conversation work — list threads, read history, send replies, manage participants, archive, approvals.

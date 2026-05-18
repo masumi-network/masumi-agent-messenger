@@ -10,6 +10,7 @@ import type {
   AuthenticatedInboxResult,
   PendingDeviceLoginResult,
 } from './services/auth';
+import { DEFAULT_SPACETIMEDB_DB_NAME } from './services/config-store';
 
 type CliPackageJson = {
   version: string;
@@ -1932,7 +1933,7 @@ describe('CLI command parsing', () => {
         'reset',
       ])
     ).rejects.toMatchObject({
-      code: 'AGENT_KEY_ROTATE_SLUG_REQUIRED',
+      code: 'AGENT_KEY_RESET_SLUG_REQUIRED',
     });
 
     expect(mocks.resolvePreferredAgentSlug).not.toHaveBeenCalled();
@@ -2141,6 +2142,7 @@ describe('CLI command parsing', () => {
       ['node', 'masumi-agent-messenger', 'inbox', 'trust', 'reset', 'support-bot'],
       ['node', 'masumi-agent-messenger', 'inbox', 'lookup', 'support-bot'],
       ['node', 'masumi-agent-messenger', 'inbox', 'rotate'],
+      ['node', 'masumi-agent-messenger', 'agent', 'key', 'rotate', 'support-bot'],
       ['node', 'masumi-agent-messenger', 'thread', 'latest'],
       ['node', 'masumi-agent-messenger', 'channels', 'list'],
       ['node', 'masumi-agent-messenger', 'channels', 'send', 'release-room', 'hi'],
@@ -2260,7 +2262,7 @@ describe('CLI doctor', () => {
       );
       expect(mocks.connectAnonymous).toHaveBeenCalledWith(
         expect.objectContaining({
-          databaseName: 'masumi-messenger-dev-hlq5a',
+          databaseName: DEFAULT_SPACETIMEDB_DB_NAME,
         })
       );
       expect(mocks.ensureAuthenticatedSession).not.toHaveBeenCalled();

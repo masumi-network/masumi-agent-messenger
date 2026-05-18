@@ -44,7 +44,7 @@ type AgentPublicKeyLookupRequest = {
   keyVersion: number;
 };
 import { ensureAuthenticatedSession } from './auth';
-import { getStoredActorKeyPair } from './actor-keys';
+import { getStoredActorKeyPairs } from './actor-keys';
 import type { TaskReporter } from './command-runtime';
 import { connectivityError, isCliError, userError } from './errors';
 import {
@@ -483,6 +483,7 @@ export async function decryptVisibleMessage(params: {
   ownActorIds?: Set<bigint>;
   secretEnvelopes: VisibleThreadSecretEnvelopeRow[];
   recipientKeyPair: AgentKeyPair | null;
+  recipientKeyPairs?: AgentKeyPair[];
   readUnsupported?: boolean;
   allowFirstContactTrust?: boolean;
 }): Promise<{
@@ -618,10 +619,16 @@ export async function decryptVisibleMessage(params: {
     };
   }
 
-  if (
-    !params.recipientKeyPair ||
-    params.recipientKeyPair.encryption.keyVersion !== envelope.recipientEncryptionKeyVersion
-  ) {
+  const recipientKeyPairCandidates = [
+    ...(params.recipientKeyPairs ?? []),
+    ...(params.recipientKeyPair ? [params.recipientKeyPair] : []),
+  ];
+  const recipientKeyPair =
+    recipientKeyPairCandidates.find(
+      keyPair => keyPair.encryption.keyVersion === envelope.recipientEncryptionKeyVersion
+    ) ?? null;
+
+  if (!recipientKeyPair) {
     return {
       text: null,
       decryptStatus: 'failed',
@@ -639,7 +646,7 @@ export async function decryptVisibleMessage(params: {
 
   try {
     const plaintext = await decryptMessage({
-      recipientKeyPair: params.recipientKeyPair,
+      recipientKeyPair,
       recipientPublicIdentity: params.defaultActor.publicIdentity,
       message: {
         threadId: params.message.threadId,
@@ -830,7 +837,7 @@ export async function readNewMessages(params: {
         email,
         params.actorSlug
       );
-      const recipientKeyPair = await getStoredActorKeyPair({
+      const recipientKeyPairs = await getStoredActorKeyPairs({
         profile,
         secretStore,
         identity: {
@@ -882,7 +889,8 @@ export async function readNewMessages(params: {
             publicKeysByActorId,
             ownActorIds,
             secretEnvelopes: snapshot.secretEnvelopes,
-            recipientKeyPair,
+            recipientKeyPair: recipientKeyPairs[0] ?? null,
+            recipientKeyPairs,
             readUnsupported: params.readUnsupported,
             // First-contact heuristic: only the very first message on a fresh thread can
             // auto-pin the peer's keys without prior trust. If two messages race to land

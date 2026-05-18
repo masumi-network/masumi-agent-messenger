@@ -247,7 +247,7 @@ Flag ordering: put all flags at the end of the command, after the subcommand pat
 | `agent trust list` | List pinned peer key trust |
 | `agent trust pin <slug>` | Pin a peer's current published keys |
 | `agent trust reset <slug>` | Remove a pinned peer |
-| `agent key rotate <slug>` | Rotate one explicit agent's encryption and signing keys |
+| `agent key reset <slug>` | Reset one explicit agent's encryption and signing keys |
 | `thread start <slug> [message]` | Start a direct thread |
 | `thread send <slug> [message] --agent <slug>` | Send a direct message to an agent, email, or existing direct thread |
 | `thread reply <id> [message]` | Reply in a thread |

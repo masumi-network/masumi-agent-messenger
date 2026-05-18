@@ -1,12 +1,15 @@
 import {
   cacheSenderSecret,
   getCachedSenderSecret,
+  normalizeEnvelopeWrapAlgorithm,
   prepareEncryptedMessage,
   randomSenderMessageId,
+  unwrapSecretEnvelope,
   type ActorPublicKeys,
   type AgentKeyPair,
+  type SenderSecretState,
 } from '../../../shared/agent-crypto';
-import { fromHex } from '../../../shared/crypto-utils';
+import { fromHex, toHex } from '../../../shared/crypto-utils';
 import { normalizeEmail, normalizeInboxSlug } from '../../../shared/inbox-slug';
 import {
   buildOwnActorIds,
@@ -528,6 +531,115 @@ async function resolveActorPublicKeys(
   });
 }
 
+async function lookupActorPublicKeysForEnvelope(params: {
+  conn: DbConnection;
+  actor: Agent;
+  encryptionKeyVersion: number;
+  signingKeyVersion: number;
+}): Promise<{ encryptionPublicKey: string; signingPublicKey: string } | null> {
+  const rows = await runSendSpacetimeOperation('envelope public key lookup', () =>
+    params.conn.procedures.lookupAgentPublicKeys({
+      requests: [
+        {
+          agentDbId: params.actor.id,
+          keyKind: { tag: 'Encryption' },
+          keyVersion: params.encryptionKeyVersion,
+        },
+        {
+          agentDbId: params.actor.id,
+          keyKind: { tag: 'Signing' },
+          keyVersion: params.signingKeyVersion,
+        },
+      ],
+    })
+  );
+  const encryptionPublicKey = findLookupKey(
+    rows,
+    'Encryption',
+    params.encryptionKeyVersion
+  );
+  const signingPublicKey = findLookupKey(rows, 'Signing', params.signingKeyVersion);
+  if (!encryptionPublicKey || !signingPublicKey) {
+    return null;
+  }
+  return { encryptionPublicKey, signingPublicKey };
+}
+
+export async function resolveExistingSenderSecret(params: {
+  conn: DbConnection;
+  threadId: bigint;
+  ownActor: Agent;
+  keyPair: AgentKeyPair;
+  latestSenderState: SenderSecretVersionState | undefined;
+  envelopes: VisibleThreadSecretEnvelopeRow[];
+  requiresSecretRotation: boolean;
+}): Promise<SenderSecretState | null> {
+  if (!params.latestSenderState || params.requiresSecretRotation) {
+    return null;
+  }
+  const latestSenderState = params.latestSenderState;
+
+  const cached = getCachedSenderSecret(
+    params.threadId,
+    params.ownActor.publicIdentity,
+    latestSenderState.secretVersion
+  );
+  if (cached) {
+    return cached;
+  }
+
+  const ownEnvelope = params.envelopes.find(envelope => {
+    return (
+      envelope.threadId === params.threadId &&
+      envelope.membershipVersion === latestSenderState.membershipVersion &&
+      envelope.senderAgentDbId === params.ownActor.id &&
+      envelope.recipientAgentDbId === params.ownActor.id &&
+      envelope.secretVersion === latestSenderState.secretVersion
+    );
+  });
+  if (!ownEnvelope) {
+    return null;
+  }
+  if (ownEnvelope.recipientEncryptionKeyVersion !== params.keyPair.encryption.keyVersion) {
+    return null;
+  }
+
+  const keys = await lookupActorPublicKeysForEnvelope({
+    conn: params.conn,
+    actor: params.ownActor,
+    encryptionKeyVersion: ownEnvelope.senderEncryptionKeyVersion,
+    signingKeyVersion: ownEnvelope.signingKeyVersion,
+  });
+  if (!keys) {
+    return null;
+  }
+
+  return await unwrapSecretEnvelope({
+    threadId: params.threadId,
+    senderPublicIdentity: params.ownActor.publicIdentity,
+    recipientPublicIdentity: params.ownActor.publicIdentity,
+    recipientKeyPair: params.keyPair,
+    envelope: {
+      id: ownEnvelope.id,
+      threadId: ownEnvelope.threadId,
+      secretVersion: ownEnvelope.secretVersion,
+      senderActorId: ownEnvelope.senderAgentDbId,
+      senderPublicIdentity: params.ownActor.publicIdentity,
+      recipientActorId: ownEnvelope.recipientAgentDbId,
+      recipientPublicIdentity: params.ownActor.publicIdentity,
+      recipientEncryptionKeyVersion: ownEnvelope.recipientEncryptionKeyVersion,
+      senderEncryptionKeyVersion: ownEnvelope.senderEncryptionKeyVersion,
+      signingKeyVersion: ownEnvelope.signingKeyVersion,
+      wrappedSecretCiphertext: toHex(ownEnvelope.wrappedSecretCiphertext),
+      wrappedSecretIv: toHex(ownEnvelope.wrappedSecretIv),
+      wrapAlgorithm: normalizeEnvelopeWrapAlgorithm(ownEnvelope.wrapAlgorithm),
+      signature: toHex(ownEnvelope.signature),
+    },
+    senderEncryptionPublicKey: keys.encryptionPublicKey,
+    envelopeSigningPublicKey: keys.signingPublicKey,
+  });
+}
+
 function requireOwnedActor(params: {
   actors: Agent[];
   participants?: VisibleThreadParticipant[];
@@ -688,12 +800,13 @@ function resolveSenderState(
       secretVersion: latestSenderMessage.secretVersion,
     };
   }
-  if (senderParticipant?.lastSentSecretVersion !== undefined) {
+  const lastSentSecretVersion = senderParticipant?.lastSentSecretVersion ?? 0;
+  if (lastSentSecretVersion > 0) {
     return {
       // The new schema dropped `lastSentMembershipVersion`; pair the cached
       // last-sent secret with the thread's current membership version.
       membershipVersion: thread.membershipVersion,
-      secretVersion: senderParticipant.lastSentSecretVersion,
+      secretVersion: lastSentSecretVersion,
     };
   }
   return undefined;
@@ -894,13 +1007,6 @@ async function sendMessageToThreadCore(
   // lastSentSecretVersion, so no per-thread message scan is needed here.
   const latestSenderState = resolveSenderState(thread, undefined, senderParticipant);
 
-  const existingSecret = latestSenderState
-    ? getCachedSenderSecret(
-        requestedThreadId,
-        ownActor.publicIdentity,
-        latestSenderState.secretVersion
-      )
-    : null;
   // Envelopes for the rotation check are fetched on-demand via the indexed
   // procedure rather than read from a global subscription. Empty when the
   // sender has not yet published a secret in this thread.
@@ -925,6 +1031,15 @@ async function sendMessageToThreadCore(
     participants: snapshot.participants,
     actors: snapshot.actors,
     envelopes: envelopesForRotation,
+  });
+  const existingSecret = await resolveExistingSenderSecret({
+    conn,
+    threadId: requestedThreadId,
+    ownActor,
+    keyPair,
+    latestSenderState,
+    envelopes: envelopesForRotation,
+    requiresSecretRotation,
   });
 
   const senderMessageId = randomSenderMessageId();
@@ -1071,13 +1186,14 @@ async function readThreadSendSnapshot(params: {
   const senderParticipant = readStatesFromVisibleThreadPage(threadPage).find(participant => {
     return participant.threadId === params.threadId && participant.agentDbId === ownActor.id;
   });
+  const senderLastSentSecretVersion = senderParticipant?.lastSentSecretVersion ?? 0;
   const latestSenderState =
-    thread && senderParticipant?.lastSentSecretVersion !== undefined
+    thread && senderLastSentSecretVersion > 0
       ? {
           // The new schema dropped `lastSentMembershipVersion`; pair the
           // cached secret version with the thread's current membership.
           membershipVersion: thread.membershipVersion,
-          secretVersion: senderParticipant.lastSentSecretVersion,
+          secretVersion: senderLastSentSecretVersion,
         }
       : undefined;
   const currentSecretEnvelopes =
@@ -1669,9 +1785,6 @@ export async function sendMessageToSlug(params: {
     // lastSentSecretVersion, so no snapshot.messages scan is needed here.
     const latestSenderState = resolveSenderState(thread, undefined, senderParticipant);
 
-    const existingSecret = latestSenderState
-      ? getCachedSenderSecret(thread.id, ownActor.publicIdentity, latestSenderState.secretVersion)
-      : null;
     const envelopesForRotation = latestSenderState
       ? await runSendSpacetimeOperation('thread secret envelope lookup', () =>
           conn.procedures.listThreadSecretEnvelopes({
@@ -1693,6 +1806,15 @@ export async function sendMessageToSlug(params: {
       participants: snapshot.participants,
       actors: snapshot.actors,
       envelopes: envelopesForRotation,
+    });
+    const existingSecret = await resolveExistingSenderSecret({
+      conn,
+      threadId: thread.id,
+      ownActor,
+      keyPair,
+      latestSenderState,
+      envelopes: envelopesForRotation,
+      requiresSecretRotation,
     });
 
     const senderMessageId = randomSenderMessageId();

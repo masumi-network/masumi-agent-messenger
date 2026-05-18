@@ -11,7 +11,6 @@ use crate::helpers::accounts::get_owned_account;
 use crate::helpers::agents::get_owned_actor;
 use crate::helpers::auth_lease::upsert_lease_for_account;
 use crate::helpers::oidc::require_oidc_claims;
-use crate::helpers::retention::schedule_thread_secret_envelope_gc;
 use crate::helpers::thread_fanout::bump_active_participants;
 use crate::helpers::threads::{
     decrement_active_participant_count, get_thread_participant, promote_replacement_admin,
@@ -78,6 +77,5 @@ pub fn remove_thread_participant(
 
     promote_replacement_admin(ctx, thread_id);
     bump_active_participants(ctx, thread_id);
-    schedule_thread_secret_envelope_gc(ctx, thread_id);
     Ok(())
 }

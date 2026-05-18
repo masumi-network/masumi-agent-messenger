@@ -3,20 +3,23 @@ import type { AgentKeyPair } from '../../../shared/agent-crypto';
 import type { ResolvedProfile } from './config-store';
 import type { KeychainBackend } from './secret-store';
 import { createSecretStore } from './secret-store';
-import { resolveStoredActorKeyPairForPublishedActor } from './actor-keys';
+import {
+  getStoredActorKeyPairForEncryptionVersion,
+  resolveStoredActorKeyPairForPublishedActor,
+} from './actor-keys';
 
-function createKeyPair(suffix: string): AgentKeyPair {
+function createKeyPair(suffix: string, version = 1): AgentKeyPair {
   return {
     encryption: {
       publicKey: `enc-pub-${suffix}`,
       privateKey: `enc-priv-${suffix}`,
-      keyVersion: 1,
+      keyVersion: version,
       algorithm: 'ecdh-p256-v1',
     },
     signing: {
       publicKey: `sig-pub-${suffix}`,
       privateKey: `sig-priv-${suffix}`,
-      keyVersion: 1,
+      keyVersion: version,
       algorithm: 'ecdsa-p256-sha256-v1',
     },
   };
@@ -70,6 +73,40 @@ function createStore() {
 }
 
 describe('resolveStoredActorKeyPairForPublishedActor', () => {
+  it('can resolve archived private keys by recipient encryption version', async () => {
+    const profile = createProfile();
+    const store = createStore();
+    const archived = createKeyPair('old', 1);
+    const current = createKeyPair('current', 2);
+
+    await store.setNamespaceKeyVault(profile.name, {
+      version: 1,
+      email: 'agent@example.com',
+      actors: [
+        {
+          identity: {
+            email: 'agent@example.com',
+            slug: 'agent',
+          },
+          current,
+          archived: [archived],
+        },
+      ],
+    });
+
+    await expect(
+      getStoredActorKeyPairForEncryptionVersion({
+        profile,
+        secretStore: store,
+        identity: {
+          email: 'agent@example.com',
+          slug: 'agent',
+        },
+        encryptionKeyVersion: 1,
+      })
+    ).resolves.toEqual(archived);
+  });
+
   it('promotes a matching archived key pair back to current storage', async () => {
     const profile = createProfile();
     const store = createStore();
