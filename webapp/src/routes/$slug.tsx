@@ -927,20 +927,16 @@ function isApprovalRequiredForFirstContactError(error: unknown): boolean {
 }
 
 async function ensurePeerTrust(params: {
-  slug: string;
   publicIdentity: string;
   observed: PeerKeyTuple;
-  allowFirstContactTrust: boolean;
 }): Promise<void> {
   // Sender-gated trust model (see CLAUDE.md "Peer Key Trust Rules"): we never refuse a send
   // because the recipient is unpinned. A fresh device of the sender's account legitimately
   // ships without the receiver's trust pin until an inbound message arrives, so blocking on
   // `unpinned` for an existing thread used to break post-device-share sends. Auto-pin the
-  // first observation regardless of `allowFirstContactTrust`; rotations get auto-confirmed.
-  // The actual sender-side block is `requireImportedRotationKeyConfirmed`, applied separately
-  // at the local-key-import layer, not here.
-  void params.allowFirstContactTrust;
-  void params.slug;
+  // first observation; rotations get auto-confirmed. The actual sender-side block is
+  // `requireImportedRotationKeyConfirmed`, applied separately at the local-key-import layer,
+  // not here.
   const comparison = autoPinPeerIfUnknown(params.publicIdentity, params.observed);
   if (comparison.status === 'matches' || comparison.status === 'unpinned') {
     return;
@@ -5373,7 +5369,6 @@ function AuthenticatedInboxPage() {
         }
 
         await ensurePeerTrust({
-          slug: recipientKeys.slug,
           publicIdentity: recipientKeys.publicIdentity,
           observed: {
             encryptionPublicKey: recipientKeys.encryptionPublicKey,
@@ -5381,7 +5376,6 @@ function AuthenticatedInboxPage() {
             signingPublicKey: recipientKeys.signingPublicKey,
             signingKeyVersion: recipientKeys.signingKeyVersion,
           },
-          allowFirstContactTrust: !thread,
         });
         const activeActorKeys = await resolveActorPublicKeys(activeActor);
         assertActorKeyPairMatchesPublicKeys(activeActorKeys, actorKeyPair);
@@ -5849,10 +5843,8 @@ function AuthenticatedInboxPage() {
           throw new Error(`Public keys for ${recipientActor.slug} are unavailable.`);
         }
         await ensurePeerTrust({
-          slug: recipientActor.slug,
           publicIdentity: recipientActor.publicIdentity,
           observed: tupleFromActorPublicKeys(recipientKeys),
-          allowFirstContactTrust: false,
         });
       }
 

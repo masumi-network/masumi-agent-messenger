@@ -158,15 +158,15 @@ When writing a reducer, view, or helper that touches tables, import via `use cra
 ## Build / Publish
 
 - Build is `cargo build --target wasm32-unknown-unknown --release` (driven by `spacetime publish`).
-- The `pnpm run spacetime:publish:local` script needs updating to drive the Rust build/publish flow rather than the dropped TS one.
-- `pnpm run spacetime:generate` continues to work for regenerating TS bindings against the published Rust schema.
+- `pnpm run spacetime:publish:dev` drives the Rust build/publish flow against the dev DB.
+- `pnpm run spacetime:generate` regenerates TS bindings against the published Rust schema.
 
 ## Contract Change Workflow
 
 After changing exported tables, reducers, or row shapes:
 
 1. `cargo check --target wasm32-unknown-unknown` — module compiles cleanly
-2. `pnpm run spacetime:publish:local` — module publishes
+2. `pnpm run spacetime:publish:dev` — module publishes
 3. `pnpm run spacetime:generate` — TS bindings regen
 4. update the frontend / CLI to consume the new generated bindings
 
@@ -176,6 +176,6 @@ Never hand-edit generated bindings to compensate for stale backend contracts.
 
 ```bash
 cargo check --target wasm32-unknown-unknown
-pnpm run spacetime:publish:local
+pnpm run spacetime:publish:dev
 pnpm run spacetime:generate
 ```

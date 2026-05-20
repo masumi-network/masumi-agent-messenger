@@ -256,15 +256,13 @@ export function canonicalJsonStringify(value: unknown): string {
   return JSON.stringify(stableJsonValue(value));
 }
 
-async function exportPublicKey(key: CryptoKey): Promise<string> {
+async function exportJwkAsString(key: CryptoKey): Promise<string> {
   const jwk = await crypto.subtle.exportKey('jwk', key);
   return stableStringify(jwk);
 }
 
-async function exportPrivateKey(key: CryptoKey): Promise<string> {
-  const jwk = await crypto.subtle.exportKey('jwk', key);
-  return stableStringify(jwk);
-}
+const exportPublicKey = exportJwkAsString;
+const exportPrivateKey = exportJwkAsString;
 
 async function deriveEnvelopeKey(
   ownPrivateKey: string,

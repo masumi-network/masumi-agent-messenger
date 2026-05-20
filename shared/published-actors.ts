@@ -49,7 +49,7 @@ export async function lookupPublishedAgentBySlug<Actor extends PublishedActorLoo
 
   const actor = (await params.lookup({ slug: normalizedSlug }))[0];
   if (!actor) {
-    throw new Error(`No published inbox actor found for slug \`${normalizedSlug}\`.`);
+    throw new Error(`No published agent found for slug \`${normalizedSlug}\`.`);
   }
 
   return actor;

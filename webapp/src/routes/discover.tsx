@@ -157,7 +157,7 @@ function DiscoverPage() {
           lookupError instanceof Error
             ? lookupError.message
             : 'Unable to search registered agents right now.';
-        if (message === 'No published inbox actor found for that slug or email.') {
+        if (message === 'No published agent found for that slug or email.') {
           setDiscoveryState({
             requestKey: discoveryRequestKey,
             agents: [],

@@ -11,7 +11,11 @@ export default tseslint.config(
       '**/module_bindings/**',
       '**/routeTree.gen.ts',
       '**/*.gen.*',
-      'scripts/**',
+      // Build / orchestration scripts run under Node and are intentionally not part of the
+      // shared lint pass. `.ts` scripts are scoped to the project tsconfig for type-checking.
+      'scripts/**/*.mjs',
+      'scripts/**/*.cjs',
+      'scripts/**/*.js',
     ],
   },
   eslint.configs.recommended,
@@ -94,21 +98,6 @@ export default tseslint.config(
         },
       ],
       'react-hooks/set-state-in-effect': 'warn',
-    },
-  },
-  // Spacetimedb — relaxed (mostly generated)
-  {
-    files: ['spacetimedb/**/*.ts'],
-    rules: {
-      '@typescript-eslint/no-unused-vars': [
-        'warn',
-        {
-          argsIgnorePattern: '^_',
-          varsIgnorePattern: '^_',
-          caughtErrorsIgnorePattern: '^_',
-        },
-      ],
-      '@typescript-eslint/no-explicit-any': 'off',
     },
   },
 );

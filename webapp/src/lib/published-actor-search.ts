@@ -358,5 +358,5 @@ export async function resolvePublishedActorsForIdentifier(params: {
     }
   }
 
-  throw new Error('No published inbox actor found for that slug or email.');
+  throw new Error('No published agent found for that slug or email.');
 }

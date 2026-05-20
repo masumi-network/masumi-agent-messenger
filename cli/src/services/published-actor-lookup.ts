@@ -138,8 +138,8 @@ export async function resolvePublishedActorLookup<Actor extends PublishedActorLo
 
     throw new Error(
       inputKind === 'email'
-        ? `No published inbox agents found for email \`${normalizedIdentifier}\`.`
-        : `No published inbox actor found for slug \`${normalizedIdentifier}\`.`
+        ? `No published agents found for email \`${normalizedIdentifier}\`.`
+        : `No published agent found for slug \`${normalizedIdentifier}\`.`
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : null;

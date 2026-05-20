@@ -6,12 +6,11 @@ import {
   resolveSpacetimeServerAlias,
 } from './env-profiles.mjs';
 
-// Keep in sync with shared/masumi-default-oidc-issuer.ts (MASUMI_DEFAULT_OIDC_ISSUER).
 const DEFAULT_OIDC_ISSUER = 'https://masumi-saas-dev-exyyd.ondigitalocean.app';
 const DEFAULT_OIDC_CLIENT_ID = 'masumi-spacetime-web';
 const DEFAULT_OIDC_AUDIENCES = ['masumi-spacetime-web', 'masumi-spacetime-cli'];
 const DEFAULT_SPACETIMEDB_HOST = 'wss://maincloud.spacetimedb.com';
-const DEFAULT_SPACETIMEDB_DB_NAME = 'masumi-agent-messenger-3rx0g';
+const DEFAULT_SPACETIMEDB_DB_NAME = 'masumi-messenger-dev-hlq5a';
 const GENERATED_TS_FILE = path.resolve(
   process.cwd(),
   'shared/generated-oidc-config.ts'

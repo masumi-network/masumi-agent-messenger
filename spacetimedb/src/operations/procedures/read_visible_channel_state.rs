@@ -33,12 +33,14 @@ pub fn read_visible_channel_state(
             .channel_member_channel_id_account_id_active()
             .filter((channel.id, account_id, true))
             .next();
-        // Non-members may read Public channels (these are also what `list_discoverable_channels`
-        // returns). `ApprovalRequired` channels — even when `discoverable=true` — only expose
-        // their full row to active members, so non-members can't enumerate creator id, sort
-        // keys, or message-count metadata via this read path. Discovery of those channels
-        // happens through `list_discoverable_channels`, which is filtered to Public.
-        let visible_without_membership = matches!(channel.access_mode, ChannelAccessMode::Public);
+        // Non-members may read:
+        //   1. Any `Public` channel (these also show up via `list_discoverable_channels`).
+        //   2. `ApprovalRequired` channels that opt in to discovery via `discoverable=true` —
+        //      the metadata (title/description/creator/message_count) is intentionally
+        //      advertised so prospective members can request to join. Channels that want to
+        //      hide existence must set `discoverable=false`.
+        let visible_without_membership =
+            matches!(channel.access_mode, ChannelAccessMode::Public) || channel.discoverable;
         if member.is_none() && !visible_without_membership {
             return None;
         }

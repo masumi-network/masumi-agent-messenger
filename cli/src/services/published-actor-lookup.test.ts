@@ -94,7 +94,7 @@ describe('resolvePublishedActorLookup', () => {
       })
     ).rejects.toMatchObject({
       code: 'ACTOR_NOT_FOUND',
-      message: 'No published inbox actor found for slug `owner`.',
+      message: 'No published agent found for slug `owner`.',
     });
 
     expect(lookupBySlug).toHaveBeenCalledWith({ slug: 'owner' });

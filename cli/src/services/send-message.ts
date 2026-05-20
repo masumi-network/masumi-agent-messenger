@@ -1410,7 +1410,7 @@ export async function sendMessageToSlug(params: {
       invalidMessage: 'Recipient slug or email is invalid.',
       invalidCode: 'INVALID_AGENT_IDENTIFIER',
       notFoundCode: 'ACTOR_NOT_FOUND',
-      fallbackMessage: 'No published inbox actor found for that slug or email.',
+      fallbackMessage: 'No published agent found for that slug or email.',
     });
     const target = targetLookup.selected;
     let networkTarget: Awaited<ReturnType<typeof lookupMasumiInboxAgentBySlug>> = null;
