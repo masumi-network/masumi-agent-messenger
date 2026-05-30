@@ -22,6 +22,14 @@ pub struct EnforceParams<'a> {
 /// Increments the bucket, returning `true` if the call is allowed and `false` if rate limited.
 /// Inserts a new bucket on first hit; resets the bucket on window expiry; bumps `count` or
 /// `limited_count` otherwise.
+/// Returns `true` when the call is allowed within the current window, `false` when the bucket
+/// is exhausted.
+///
+/// Semantics: a fresh bucket starts at `count = 1` (the first allowed call inserts the row).
+/// Subsequent calls bump `count`. When `count >= max_count` BEFORE the next bump, the bucket
+/// is exhausted and the call is rejected — so the effective allowance is exactly `max_count`
+/// successful calls per window. The `limited_count` counter is incremented on every rejected
+/// call inside the same window for observability.
 pub fn enforce(ctx: &ReducerContext, params: EnforceParams<'_>) -> bool {
     let now = ctx.timestamp;
     let expires_at = timestamp_plus_ms(now, params.window_ms);

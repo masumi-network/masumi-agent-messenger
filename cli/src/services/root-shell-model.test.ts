@@ -205,7 +205,7 @@ function makeChannelJoinRequest(
 
 function makeRows(overrides: Partial<ShellRows> = {}): ShellRows {
   return {
-    inboxes: [],
+    accounts: [],
     actors: [],
     participants: [],
     readStates: [],

@@ -11,7 +11,7 @@ import {
 
 export type { EncryptedNamespaceKeyBackupFile };
 
-export async function createEncryptedNamespaceKeyBackupForInbox(
+export async function createEncryptedNamespaceKeyBackupForAccount(
   email: string,
   passphrase: string
 ): Promise<{ fileName: string; json: string }> {
@@ -22,14 +22,14 @@ export async function createEncryptedNamespaceKeyBackupForInbox(
   };
 }
 
-export async function importEncryptedNamespaceKeyBackupForInbox(
+export async function importEncryptedNamespaceKeyBackupForAccount(
   json: string,
   passphrase: string,
   expectedNormalizedEmail: string
 ): Promise<void> {
   const snapshot = await decryptEncryptedNamespaceKeyBackup(json, passphrase);
   if (snapshot.email !== expectedNormalizedEmail) {
-    throw new Error('This backup belongs to a different inbox email namespace.');
+    throw new Error('This backup belongs to a different account email namespace.');
   }
 
   await importInboxKeyShareSnapshot(snapshot);

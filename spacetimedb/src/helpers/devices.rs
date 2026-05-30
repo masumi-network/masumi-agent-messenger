@@ -31,11 +31,10 @@ pub fn find_approved_device_by_public_key_tuple(
 ) -> Option<Device> {
     ctx.db
         .device()
-        .device_account_id_id()
-        .filter((account_id, 0u64..))
+        .device_account_id_encryption_public_key()
+        .filter((account_id, public_key))
         .filter(|device| {
             matches!(device.status, DeviceStatus::Approved)
-                && device.device_encryption_public_key == public_key
                 && device.device_encryption_key_version == key_version
                 && device.device_encryption_algorithm == algorithm
         })

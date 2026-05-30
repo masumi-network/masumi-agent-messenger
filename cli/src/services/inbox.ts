@@ -98,13 +98,13 @@ function toBootstrapSnapshot(params: {
 
 function resolveDefaultInboxState(params: {
   email: string;
-  inboxes: Account[];
+  accounts: Account[];
   actors: Agent[];
 }): {
   inbox: Account;
   actor: Agent;
 } | null {
-  const inbox = params.inboxes.find(row => row.email === params.email);
+  const inbox = params.accounts.find(row => row.email === params.email);
   const actor = params.actors.find(row => {
     return row.email === params.email && row.isDefault;
   });
@@ -168,10 +168,10 @@ export async function loadCurrentBootstrapSnapshot(params: {
   try {
     const subscription = await subscribeInboxTables(conn);
     try {
-      const { inboxes, actors } = await readAccounts(conn);
+      const { accounts, actors } = await readAccounts(conn);
       const liveState = resolveDefaultInboxState({
         email,
-        inboxes,
+        accounts,
         actors,
       });
       if (!liveState) {
@@ -231,10 +231,10 @@ export async function inboxStatus(params: {
     try {
       const subscription = await subscribeInboxTables(conn);
       try {
-        const { inboxes, actors } = await readAccounts(conn);
+        const { accounts, actors } = await readAccounts(conn);
         const liveState = resolveDefaultInboxState({
           email,
-          inboxes,
+          accounts,
           actors,
         });
 

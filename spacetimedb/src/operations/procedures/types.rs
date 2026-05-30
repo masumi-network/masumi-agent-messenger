@@ -73,7 +73,10 @@ pub struct ThreadParticipantPreview {
     pub id: u64,
     pub thread_id: u64,
     pub agent_db_id: u64,
-    pub account_id: u64,
+    /// `Some(account_id)` only when the previewed participant is the caller's own row.
+    /// `None` for cross-account participant previews — non-owners must not learn which OIDC
+    /// account a peer belongs to from this surface.
+    pub account_id: Option<u64>,
     pub membership_version: Option<u64>,
     pub last_sent_seq: Option<u64>,
     pub last_sent_secret_version: Option<u32>,
@@ -92,11 +95,7 @@ pub fn thread_participant_preview(
         id: participant.id,
         thread_id: participant.thread_id,
         agent_db_id: participant.agent_db_id,
-        account_id: if include_private_state {
-            participant.account_id
-        } else {
-            0
-        },
+        account_id: include_private_state.then_some(participant.account_id),
         membership_version: include_private_state.then_some(participant.membership_version),
         last_sent_seq: include_private_state.then_some(participant.last_sent_seq),
         last_sent_secret_version: include_private_state

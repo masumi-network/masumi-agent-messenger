@@ -64,6 +64,7 @@ export interface paths {
                                     type: "payment" | "purchase";
                                     agentId: string | null;
                                     agentName: string | null;
+                                    agentIdentifier: string | null;
                                     amount: string;
                                     status: string;
                                     txHash: string | null;
@@ -293,6 +294,137 @@ export interface paths {
                 };
                 /** @description Payment node is not configured or the active payment source is unavailable for the requested network. */
                 503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List agents for admin review
+         * @description Returns a paginated list of agents across users. Requires an authenticated admin user.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    limit?: number;
+                    search?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Admin agents list */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: true;
+                            data: {
+                                agents: {
+                                    id: string;
+                                    name: string;
+                                    apiUrl: string;
+                                    registrationState: string;
+                                    verificationStatus: string | null;
+                                    agentIdentifier: string | null;
+                                    createdAt: string;
+                                    ownerName: string;
+                                    ownerEmail: string;
+                                }[];
+                                pagination: {
+                                    currentPage: number;
+                                    totalPages: number;
+                                    total: number;
+                                    limit: number;
+                                };
+                                search: string;
+                            };
+                        };
+                    };
+                };
+                /** @description Validation or bad request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Unauthorized — valid session or API key required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Forbidden — insufficient role or feature not enabled */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Resource not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Server error */
+                500: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -1252,10 +1384,12 @@ export interface paths {
                         "application/json": {
                             /** @enum {boolean} */
                             success: true;
-                            /** @description Also includes `secret` (string) for one-time HMAC configuration. It is intentionally omitted from this public schema—do not log, share, or paste into docs. */
+                            /** @description Challenge UUID and when it was issued. Responses may include additional authenticated-only fields not listed here. */
                             data: {
                                 challenge: string;
                                 generatedAt: string | null;
+                            } & {
+                                [key: string]: unknown;
                             };
                         };
                     };
@@ -1376,10 +1510,12 @@ export interface paths {
                         "application/json": {
                             /** @enum {boolean} */
                             success: true;
-                            /** @description Also includes `secret` (string) for one-time HMAC configuration. It is intentionally omitted from this public schema—do not log, share, or paste into docs. */
+                            /** @description Challenge UUID and when it was issued. Responses may include additional authenticated-only fields not listed here. */
                             data: {
                                 challenge: string;
                                 generatedAt: string | null;
+                            } & {
+                                [key: string]: unknown;
                             };
                         };
                     };
@@ -1470,6 +1606,145 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agents/{agentId}/verification-credential": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get agent verification credential summary
+         * @description Returns non-sensitive metadata for the Veridian credential linked to this agent (when credential-based verification applies). Omit `data` (`null`) when there is nothing to show.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Agent ID (CUID) */
+                    agentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Credential summary */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: true;
+                            data: {
+                                localCredentialRecordId: string;
+                                credentialId: string;
+                                schemaSaid: string;
+                                aid: string;
+                                /** @enum {string} */
+                                credentialStatus: "PENDING" | "ISSUED" | "REVOKED" | "EXPIRED";
+                                issuedAt: string;
+                                expiresAt: string | null;
+                                revokedAt: string | null;
+                                lastUpdatedAt: string;
+                                claimedRegistryAgentIdentifier: string | null;
+                                credentialAgentDisplayName: string | null;
+                                credentialAgentApiUrl: string | null;
+                                registryAgentIdentifier: string | null;
+                            } | null;
+                        };
+                    };
+                };
+                /** @description Validation or bad request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Unauthorized — valid session or API key required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Forbidden — insufficient role or feature not enabled */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Resource not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Server error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Agent verification flows are temporarily disabled in this environment. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agents/{agentId}/verify": {
         parameters: {
             query?: never;
@@ -1490,7 +1765,7 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: {
+            requestBody: {
                 content: {
                     "application/json": {
                         aid: string;
@@ -1887,7 +2162,7 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: {
+            requestBody: {
                 content: {
                     "application/json": {
                         name: string;
@@ -1903,11 +2178,17 @@ export interface paths {
                         icon?: string;
                         pricing?: {
                             /** @enum {string} */
-                            pricingType: "Free" | "Fixed";
-                            prices?: {
+                            pricingType: "Free";
+                        } | {
+                            /** @enum {string} */
+                            pricingType: "Fixed";
+                            prices: {
                                 amount: string;
                                 currency?: string;
                             }[];
+                        } | {
+                            /** @enum {string} */
+                            pricingType: "Dynamic";
                         };
                         termsOfUseUrl?: "" | string;
                         privacyPolicyUrl?: "" | string;
@@ -2334,7 +2615,7 @@ export interface paths {
         put?: never;
         /**
          * Issue verification credential
-         * @description Requests a Veridian credential for an owned, registered agent after validating KYC, challenge signature, and optional organization membership.
+         * @description Requests a Veridian credential for an owned, registered agent after validating KYC, agent endpoint HMAC verification, and optional organization membership.
          */
         post: {
             parameters: {
@@ -2358,8 +2639,6 @@ export interface paths {
                          * @example 2026-12-31T23:59:59.000Z
                          */
                         expiresAt?: string;
-                        signature: string;
-                        signedMessage: string;
                     };
                 };
             };
@@ -3792,7 +4071,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/masumi/inbox-agent/register": {
+    "/api/register/email": {
         parameters: {
             query?: never;
             header?: never;
@@ -3802,8 +4081,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Register inbox agent
-         * @description Compatibility alias for `POST /pay/api/v1/inbox-agents`. Registers a new inbox agent with the same server-side executing-wallet flow as the canonical route. Returns HTTP 409 when the slug is already in use on the selected network, or when the finalized registration resolves to another user's existing ownership record.
+         * Register with email
+         * @description Creates a new account if needed, then sends a magic sign-in link to the provided email address. The client must confirm terms acceptance before calling this route.
          */
         post: {
             parameters: {
@@ -3812,7 +4091,564 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: {
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @example Ada Lovelace */
+                        name: string;
+                        /**
+                         * Format: email
+                         * @example ada@example.com
+                         */
+                        email: string;
+                        termsAccepted: boolean;
+                        /**
+                         * @description Optional same-origin path to open after the magic link is used.
+                         * @example /
+                         */
+                        callbackUrl?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Magic link accepted for delivery */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: true;
+                            /** @enum {string} */
+                            resultKey: "MagicLinkSent";
+                            /** Format: email */
+                            email: string;
+                        };
+                    };
+                };
+                /** @description Invalid request body */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Too many registration requests from this client */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Registration email could not be queued or sent */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inbox-agents/{inboxAgentId}/deregister": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Deregister inbox agent
+         * @description Requests deregistration for a confirmed inbox agent after SaaS verifies ownership and resolves the matching payment source smart contract. The slug remains unavailable until the registry confirms deregistration.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Inbox agent request ID (CUID) */
+                    inboxAgentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deregistration requested */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: true;
+                            data: {
+                                error: string | null;
+                                id: string;
+                                name: string;
+                                description: string | null;
+                                agentSlug: string;
+                                /** @enum {string} */
+                                state: "RegistrationRequested" | "RegistrationInitiated" | "RegistrationConfirmed" | "RegistrationFailed" | "DeregistrationRequested" | "DeregistrationInitiated" | "DeregistrationConfirmed" | "DeregistrationFailed";
+                                createdAt: string;
+                                updatedAt: string;
+                                lastCheckedAt: string | null;
+                                agentIdentifier: string | null;
+                                metadataVersion: number;
+                                sendFundingLovelace: string | null;
+                                SmartContractWallet: {
+                                    walletVkey: string;
+                                    walletAddress: string;
+                                };
+                                RecipientWallet: {
+                                    walletVkey: string;
+                                    walletAddress: string;
+                                } | null;
+                                CurrentTransaction: {
+                                    txHash: string | null;
+                                    /** @enum {string} */
+                                    status: "Pending" | "Confirmed" | "FailedViaTimeout" | "FailedViaManualReset" | "RolledBack";
+                                    confirmations: number | null;
+                                    fees: string | null;
+                                    blockHeight: number | null;
+                                    blockTime: number | null;
+                                } | null;
+                            };
+                        };
+                    };
+                };
+                /** @description Validation or bad request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Unauthorized — valid session or API key required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Forbidden — insufficient role or feature not enabled */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Resource not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Server error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Payment service unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inbox-agents/{inboxAgentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete inbox agent
+         * @description Deletes an inbox-agent registration after SaaS verifies it belongs to the caller and is in a user-safe terminal state.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Inbox agent request ID (CUID) */
+                    inboxAgentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deleted */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: true;
+                            data: {
+                                error: string | null;
+                                id: string;
+                                name: string;
+                                description: string | null;
+                                agentSlug: string;
+                                /** @enum {string} */
+                                state: "RegistrationRequested" | "RegistrationInitiated" | "RegistrationConfirmed" | "RegistrationFailed" | "DeregistrationRequested" | "DeregistrationInitiated" | "DeregistrationConfirmed" | "DeregistrationFailed";
+                                createdAt: string;
+                                updatedAt: string;
+                                lastCheckedAt: string | null;
+                                agentIdentifier: string | null;
+                                metadataVersion: number;
+                                sendFundingLovelace: string | null;
+                                SmartContractWallet: {
+                                    walletVkey: string;
+                                    walletAddress: string;
+                                };
+                                RecipientWallet: {
+                                    walletVkey: string;
+                                    walletAddress: string;
+                                } | null;
+                                CurrentTransaction: {
+                                    txHash: string | null;
+                                    /** @enum {string} */
+                                    status: "Pending" | "Confirmed" | "FailedViaTimeout" | "FailedViaManualReset" | "RolledBack";
+                                    confirmations: number | null;
+                                    fees: string | null;
+                                    blockHeight: number | null;
+                                    blockTime: number | null;
+                                } | null;
+                            };
+                        };
+                    };
+                };
+                /** @description Validation or bad request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Unauthorized — valid session or API key required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Forbidden — insufficient role or feature not enabled */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Resource not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Server error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Payment service unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/inbox-agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List inbox agents
+         * @description Paginated list of the authenticated user’s inbox-agent registrations. Effective `network` comes from the query param or the `payment_network` cookie. Continue pagination only with the same `network`, `filterStatus`, and `search`; changing any of them requires restarting without `cursor`, otherwise the endpoint may return HTTP 410.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Cursor from the previous response (`nextCursor`). A cursor is valid only when reusing the same `network`, `filterStatus`, and `search` values; changing any of them invalidates pagination and may return HTTP 410. */
+                    cursor?: string;
+                    take?: number;
+                    search?: string;
+                    filterStatus?: "Registered" | "Deregistered" | "Pending" | "Failed";
+                    network?: string | null;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Inbox-agent list */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: true;
+                            data: {
+                                error: string | null;
+                                id: string;
+                                name: string;
+                                description: string | null;
+                                agentSlug: string;
+                                /** @enum {string} */
+                                state: "RegistrationRequested" | "RegistrationInitiated" | "RegistrationConfirmed" | "RegistrationFailed" | "DeregistrationRequested" | "DeregistrationInitiated" | "DeregistrationConfirmed" | "DeregistrationFailed";
+                                createdAt: string;
+                                updatedAt: string;
+                                lastCheckedAt: string | null;
+                                agentIdentifier: string | null;
+                                metadataVersion: number;
+                                sendFundingLovelace: string | null;
+                                SmartContractWallet: {
+                                    walletVkey: string;
+                                    walletAddress: string;
+                                };
+                                RecipientWallet: {
+                                    walletVkey: string;
+                                    walletAddress: string;
+                                } | null;
+                                CurrentTransaction: {
+                                    txHash: string | null;
+                                    /** @enum {string} */
+                                    status: "Pending" | "Confirmed" | "FailedViaTimeout" | "FailedViaManualReset" | "RolledBack";
+                                    confirmations: number | null;
+                                    fees: string | null;
+                                    blockHeight: number | null;
+                                    blockTime: number | null;
+                                } | null;
+                            }[];
+                            nextCursor: string | null;
+                        };
+                    };
+                };
+                /** @description Validation or bad request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Unauthorized — valid session or API key required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Forbidden — insufficient role or feature not enabled */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Resource not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Stale cursor */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Server error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Register inbox agent
+         * @description Registers a new inbox agent after normalizing the slug. A configured server-side executing wallet pays for the registration and receives the registration asset; ownership is tracked locally for the authenticated user. Returns HTTP 409 when the slug is already in use on the selected network, or when the finalized registration resolves to another user's existing ownership record.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
                 content: {
                     "application/json": {
                         name: string;
@@ -3962,98 +4798,8 @@ export interface paths {
                         };
                     };
                 };
-            };
-        };
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/register/email": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Register with email
-         * @description Creates a new account if needed, then sends a magic sign-in link to the provided email address. The client must confirm terms acceptance before calling this route.
-         */
-        post: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody: {
-                content: {
-                    "application/json": {
-                        /** @example Ada Lovelace */
-                        name: string;
-                        /**
-                         * Format: email
-                         * @example ada@example.com
-                         */
-                        email: string;
-                        termsAccepted: boolean;
-                        /**
-                         * @description Optional same-origin path to open after the magic link is used.
-                         * @example /
-                         */
-                        callbackUrl?: string;
-                    };
-                };
-            };
-            responses: {
-                /** @description Magic link accepted for delivery */
-                202: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: true;
-                            /** @enum {string} */
-                            resultKey: "MagicLinkSent";
-                            /** Format: email */
-                            email: string;
-                        };
-                    };
-                };
-                /** @description Invalid request body */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: false;
-                            error: string;
-                        };
-                    };
-                };
-                /** @description Too many registration requests from this client */
-                429: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: false;
-                            error: string;
-                        };
-                    };
-                };
-                /** @description Registration email could not be queued or sent */
-                500: {
+                /** @description Payment node unavailable */
+                503: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -4082,7 +4828,7 @@ export interface paths {
         };
         /**
          * Get remaining credits
-         * @description Compatibility alias for `/api/credits`. Returns the authenticated user’s remaining write credits. New users start with 1 credit; existing users stay at 0 until credits are granted outside this v1 flow.
+         * @description Canonical credits endpoint for the authenticated SaaS API. Returns the authenticated user’s remaining write credits.
          */
         get: {
             parameters: {
@@ -4184,7 +4930,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/pay/api/v1/inbox-agents/{inboxAgentId}/deregister": {
+    "/api/masumi/inbox-agent/register": {
         parameters: {
             query?: never;
             header?: never;
@@ -4194,22 +4940,27 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Deregister inbox agent
-         * @description Requests deregistration for a confirmed inbox agent after SaaS verifies ownership and resolves the matching payment source smart contract. The slug remains unavailable until the registry confirms deregistration.
+         * Register inbox agent
+         * @description Registers a new inbox agent after normalizing the slug. A configured server-side executing wallet pays for the registration and receives the registration asset; ownership is tracked locally for the authenticated user. Returns HTTP 409 when the slug is already in use on the selected network, or when the finalized registration resolves to another user's existing ownership record.
          */
         post: {
             parameters: {
                 query?: never;
                 header?: never;
-                path: {
-                    /** @description Inbox agent request ID (CUID) */
-                    inboxAgentId: string;
-                };
+                path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        description?: string | "";
+                        agentSlug: string;
+                    };
+                };
+            };
             responses: {
-                /** @description Deregistration requested */
+                /** @description Inbox-agent registration created */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -4279,6 +5030,23 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Insufficient credits */
+                402: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            /** @enum {string} */
+                            error: "Insufficient credits";
+                            creditsRemaining: number;
+                            /** @enum {number} */
+                            requiredCredits: 1;
+                        };
+                    };
+                };
                 /** @description Forbidden — insufficient role or feature not enabled */
                 403: {
                     headers: {
@@ -4305,6 +5073,20 @@ export interface paths {
                         };
                     };
                 };
+                /** @description Inbox registration conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            /** @enum {string} */
+                            error: "Inbox slug is already in use on this network" | "Inbox agent is already owned by another account";
+                        };
+                    };
+                };
                 /** @description Server error */
                 500: {
                     headers: {
@@ -4318,7 +5100,342 @@ export interface paths {
                         };
                     };
                 };
-                /** @description Payment service unavailable */
+                /** @description Payment node unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/pay/api/v1/inbox-agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List inbox agents
+         * @description Paginated list of the authenticated user’s inbox-agent registrations. Effective `network` comes from the query param or the `payment_network` cookie. Continue pagination only with the same `network`, `filterStatus`, and `search`; changing any of them requires restarting without `cursor`, otherwise the endpoint may return HTTP 410.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Cursor from the previous response (`nextCursor`). A cursor is valid only when reusing the same `network`, `filterStatus`, and `search` values; changing any of them invalidates pagination and may return HTTP 410. */
+                    cursor?: string;
+                    take?: number;
+                    search?: string;
+                    filterStatus?: "Registered" | "Deregistered" | "Pending" | "Failed";
+                    network?: string | null;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Inbox-agent list */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: true;
+                            data: {
+                                error: string | null;
+                                id: string;
+                                name: string;
+                                description: string | null;
+                                agentSlug: string;
+                                /** @enum {string} */
+                                state: "RegistrationRequested" | "RegistrationInitiated" | "RegistrationConfirmed" | "RegistrationFailed" | "DeregistrationRequested" | "DeregistrationInitiated" | "DeregistrationConfirmed" | "DeregistrationFailed";
+                                createdAt: string;
+                                updatedAt: string;
+                                lastCheckedAt: string | null;
+                                agentIdentifier: string | null;
+                                metadataVersion: number;
+                                sendFundingLovelace: string | null;
+                                SmartContractWallet: {
+                                    walletVkey: string;
+                                    walletAddress: string;
+                                };
+                                RecipientWallet: {
+                                    walletVkey: string;
+                                    walletAddress: string;
+                                } | null;
+                                CurrentTransaction: {
+                                    txHash: string | null;
+                                    /** @enum {string} */
+                                    status: "Pending" | "Confirmed" | "FailedViaTimeout" | "FailedViaManualReset" | "RolledBack";
+                                    confirmations: number | null;
+                                    fees: string | null;
+                                    blockHeight: number | null;
+                                    blockTime: number | null;
+                                } | null;
+                            }[];
+                            nextCursor: string | null;
+                        };
+                    };
+                };
+                /** @description Validation or bad request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Unauthorized — valid session or API key required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Forbidden — insufficient role or feature not enabled */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Resource not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Stale cursor */
+                410: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Server error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Register inbox agent
+         * @description Registers a new inbox agent after normalizing the slug. A configured server-side executing wallet pays for the registration and receives the registration asset; ownership is tracked locally for the authenticated user. Returns HTTP 409 when the slug is already in use on the selected network, or when the finalized registration resolves to another user's existing ownership record.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        description?: string | "";
+                        agentSlug: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Inbox-agent registration created */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: true;
+                            data: {
+                                error: string | null;
+                                id: string;
+                                name: string;
+                                description: string | null;
+                                agentSlug: string;
+                                /** @enum {string} */
+                                state: "RegistrationRequested" | "RegistrationInitiated" | "RegistrationConfirmed" | "RegistrationFailed" | "DeregistrationRequested" | "DeregistrationInitiated" | "DeregistrationConfirmed" | "DeregistrationFailed";
+                                createdAt: string;
+                                updatedAt: string;
+                                lastCheckedAt: string | null;
+                                agentIdentifier: string | null;
+                                metadataVersion: number;
+                                sendFundingLovelace: string | null;
+                                SmartContractWallet: {
+                                    walletVkey: string;
+                                    walletAddress: string;
+                                };
+                                RecipientWallet: {
+                                    walletVkey: string;
+                                    walletAddress: string;
+                                } | null;
+                                CurrentTransaction: {
+                                    txHash: string | null;
+                                    /** @enum {string} */
+                                    status: "Pending" | "Confirmed" | "FailedViaTimeout" | "FailedViaManualReset" | "RolledBack";
+                                    confirmations: number | null;
+                                    fees: string | null;
+                                    blockHeight: number | null;
+                                    blockTime: number | null;
+                                } | null;
+                            };
+                        };
+                    };
+                };
+                /** @description Validation or bad request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Unauthorized — valid session or API key required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Insufficient credits */
+                402: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            /** @enum {string} */
+                            error: "Insufficient credits";
+                            creditsRemaining: number;
+                            /** @enum {number} */
+                            requiredCredits: 1;
+                        };
+                    };
+                };
+                /** @description Forbidden — insufficient role or feature not enabled */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Resource not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Inbox registration conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            /** @enum {string} */
+                            error: "Inbox slug is already in use on this network" | "Inbox agent is already owned by another account";
+                        };
+                    };
+                };
+                /** @description Server error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            success: false;
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Payment node unavailable */
                 503: {
                     headers: {
                         [name: string]: unknown;
@@ -4494,181 +5611,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/pay/api/v1/inbox-agents": {
+    "/pay/api/v1/inbox-agents/{inboxAgentId}/deregister": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /**
-         * List inbox agents
-         * @description Paginated list of the authenticated user’s inbox-agent registrations. Effective `network` comes from the query param or the `payment_network` cookie. Continue pagination only with the same `network`, `filterStatus`, and `search`; changing any of them requires restarting without `cursor`, otherwise the endpoint may return HTTP 410.
-         */
-        get: {
-            parameters: {
-                query?: {
-                    /** @description Cursor from the previous response (`nextCursor`). A cursor is valid only when reusing the same `network`, `filterStatus`, and `search` values; changing any of them invalidates pagination and may return HTTP 410. */
-                    cursor?: string;
-                    take?: number;
-                    search?: string;
-                    filterStatus?: "Registered" | "Deregistered" | "Pending" | "Failed";
-                    network?: string | null;
-                };
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description Inbox-agent list */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: true;
-                            data: {
-                                error: string | null;
-                                id: string;
-                                name: string;
-                                description: string | null;
-                                agentSlug: string;
-                                /** @enum {string} */
-                                state: "RegistrationRequested" | "RegistrationInitiated" | "RegistrationConfirmed" | "RegistrationFailed" | "DeregistrationRequested" | "DeregistrationInitiated" | "DeregistrationConfirmed" | "DeregistrationFailed";
-                                createdAt: string;
-                                updatedAt: string;
-                                lastCheckedAt: string | null;
-                                agentIdentifier: string | null;
-                                metadataVersion: number;
-                                sendFundingLovelace: string | null;
-                                SmartContractWallet: {
-                                    walletVkey: string;
-                                    walletAddress: string;
-                                };
-                                RecipientWallet: {
-                                    walletVkey: string;
-                                    walletAddress: string;
-                                } | null;
-                                CurrentTransaction: {
-                                    txHash: string | null;
-                                    /** @enum {string} */
-                                    status: "Pending" | "Confirmed" | "FailedViaTimeout" | "FailedViaManualReset" | "RolledBack";
-                                    confirmations: number | null;
-                                    fees: string | null;
-                                    blockHeight: number | null;
-                                    blockTime: number | null;
-                                } | null;
-                            }[];
-                            nextCursor: string | null;
-                        };
-                    };
-                };
-                /** @description Validation or bad request */
-                400: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: false;
-                            error: string;
-                        };
-                    };
-                };
-                /** @description Unauthorized — valid session or API key required */
-                401: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: false;
-                            error: string;
-                        };
-                    };
-                };
-                /** @description Forbidden — insufficient role or feature not enabled */
-                403: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: false;
-                            error: string;
-                        };
-                    };
-                };
-                /** @description Resource not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: false;
-                            error: string;
-                        };
-                    };
-                };
-                /** @description Stale cursor */
-                410: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: false;
-                            error: string;
-                        };
-                    };
-                };
-                /** @description Server error */
-                500: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: false;
-                            error: string;
-                        };
-                    };
-                };
-            };
-        };
+        get?: never;
         put?: never;
         /**
-         * Register inbox agent
-         * @description Registers a new inbox agent after normalizing the slug. A configured server-side executing wallet pays for the registration and receives the registration asset; ownership is tracked locally for the authenticated user. Returns HTTP 409 when the slug is already in use on the selected network, or when the finalized registration resolves to another user's existing ownership record.
+         * Deregister inbox agent
+         * @description Requests deregistration for a confirmed inbox agent after SaaS verifies ownership and resolves the matching payment source smart contract. The slug remains unavailable until the registry confirms deregistration.
          */
         post: {
             parameters: {
                 query?: never;
                 header?: never;
-                path?: never;
+                path: {
+                    /** @description Inbox agent request ID (CUID) */
+                    inboxAgentId: string;
+                };
                 cookie?: never;
             };
-            requestBody?: {
-                content: {
-                    "application/json": {
-                        name: string;
-                        description?: string | "";
-                        agentSlug: string;
-                    };
-                };
-            };
+            requestBody?: never;
             responses: {
-                /** @description Inbox-agent registration created */
+                /** @description Deregistration requested */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -4738,23 +5706,6 @@ export interface paths {
                         };
                     };
                 };
-                /** @description Insufficient credits */
-                402: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: false;
-                            /** @enum {string} */
-                            error: "Insufficient credits";
-                            creditsRemaining: number;
-                            /** @enum {number} */
-                            requiredCredits: 1;
-                        };
-                    };
-                };
                 /** @description Forbidden — insufficient role or feature not enabled */
                 403: {
                     headers: {
@@ -4781,20 +5732,6 @@ export interface paths {
                         };
                     };
                 };
-                /** @description Inbox registration conflict */
-                409: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @enum {boolean} */
-                            success: false;
-                            /** @enum {string} */
-                            error: "Inbox slug is already in use on this network" | "Inbox agent is already owned by another account";
-                        };
-                    };
-                };
                 /** @description Server error */
                 500: {
                     headers: {
@@ -4808,7 +5745,7 @@ export interface paths {
                         };
                     };
                 };
-                /** @description Payment node unavailable */
+                /** @description Payment service unavailable */
                 503: {
                     headers: {
                         [name: string]: unknown;

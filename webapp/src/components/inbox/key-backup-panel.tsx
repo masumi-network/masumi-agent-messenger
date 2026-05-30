@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { DownloadSimple, Shield, UploadSimple } from '@phosphor-icons/react';
-import { createEncryptedNamespaceKeyBackupForInbox, importEncryptedNamespaceKeyBackupForInbox } from '@/lib/key-export';
+import { createEncryptedNamespaceKeyBackupForAccount, importEncryptedNamespaceKeyBackupForAccount } from '@/lib/key-export';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -66,7 +66,7 @@ export function KeyBackupPanel({
     setLocalSuccess(null);
 
     try {
-      const backup = await createEncryptedNamespaceKeyBackupForInbox(
+      const backup = await createEncryptedNamespaceKeyBackupForAccount(
         email,
         exportPassphrase
       );
@@ -100,7 +100,7 @@ export function KeyBackupPanel({
 
     try {
       const json = await importFile.text();
-      await importEncryptedNamespaceKeyBackupForInbox(
+      await importEncryptedNamespaceKeyBackupForAccount(
         json,
         importPassphrase,
         email

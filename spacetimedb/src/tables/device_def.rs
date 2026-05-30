@@ -10,6 +10,9 @@ use crate::constants::{DeviceEncryptionAlgorithm, DeviceStatus};
 #[spacetimedb::table(accessor = device,
     index(accessor = device_account_id, btree(columns = [account_id])),
     index(accessor = device_account_id_id, btree(columns = [account_id, id])),
+    // Backs `find_approved_device_by_public_key_tuple` lookups; avoids scanning every device
+    // row for an account when the helper resolves a peer's encryption-key tuple to a device.
+    index(accessor = device_account_id_encryption_public_key, btree(columns = [account_id, device_encryption_public_key])),
 )]
 #[derive(Debug, Clone)]
 pub struct Device {

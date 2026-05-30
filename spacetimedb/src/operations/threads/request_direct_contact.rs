@@ -100,6 +100,16 @@ pub fn request_direct_contact(
         return Err("Contact request rate limit exceeded; try again later".to_string());
     }
 
+    if actor.account_id == other.account_id {
+        // Same-account direct threads are auto-allowed for trust purposes but should never
+        // route through the contact-request flow (no approval needed). Force callers to use
+        // `create_thread` so the surface that drives multi-agent group threads is the same one
+        // for self-thread creation.
+        return Err(
+            "Both agents belong to the same account; create a thread directly with `create_thread` instead of `request_direct_contact`."
+                .to_string(),
+        );
+    }
     if is_direct_contact_allowed(ctx, &actor, &other) {
         return Err("Direct contact is already allowed for this actor pair".to_string());
     }

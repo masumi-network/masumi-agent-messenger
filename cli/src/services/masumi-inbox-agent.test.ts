@@ -363,8 +363,8 @@ describe('importOwnedSaasInboxAgents', () => {
       updatedAt: timestamp(2n),
     });
     vi.mocked(readAccounts)
-      .mockResolvedValueOnce({ inboxes: [], actors: [defaultActor] })
-      .mockResolvedValueOnce({ inboxes: [], actors: [defaultActor, createdActor] });
+      .mockResolvedValueOnce({ accounts: [], actors: [defaultActor] })
+      .mockResolvedValueOnce({ accounts: [], actors: [defaultActor, createdActor] });
     vi.mocked(getOrCreateStoredActorKeyPair).mockResolvedValue({
       encryption: {
         publicKey: 'enc-public',
@@ -442,7 +442,7 @@ describe('importOwnedSaasInboxAgents', () => {
       updatedAt: timestamp(1n),
     });
     vi.mocked(readAccounts).mockResolvedValue({
-      inboxes: [],
+      accounts: [],
       actors: [defaultActor],
     });
     mockOwnedAgentImportFetch([ownedPayAgentRecord()]);
@@ -480,7 +480,7 @@ describe('importOwnedSaasInboxAgents', () => {
       updatedAt: timestamp(1n),
     });
     vi.mocked(readAccounts).mockResolvedValue({
-      inboxes: [],
+      accounts: [],
       actors: [defaultActor],
     });
     vi.mocked(getOrCreateStoredActorKeyPair).mockResolvedValue({

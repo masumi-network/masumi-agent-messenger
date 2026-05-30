@@ -815,6 +815,9 @@ describe('decryptVisibleMessage trust handling', () => {
       await pinFirstObservation(
         rotatedSender.publicIdentity,
         {
+          // These string literals are arbitrary fixture-only identifiers for the public-key
+          // bytes — they are NOT the deleted prefix-string key-version scheme. Real key
+          // versions are numeric `u32` (`encryptionKeyVersion: 1` below).
           encryptionPublicKey: 'other-enc-v1',
           encryptionKeyVersion: 1,
           signingPublicKey: 'other-sig-v1',

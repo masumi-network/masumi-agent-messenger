@@ -19,6 +19,9 @@ import { isCliError } from './errors';
 import { pinFirstObservation } from './peer-key-trust';
 import { requirePeerKeyTrust, resolveExistingSenderSecret } from './send-message';
 
+// These `p256-ecdh-public:v1:alice:N` strings are arbitrary fixture-only public-key bytes.
+// They are NOT instances of the deleted prefix-string key-version scheme — real key
+// versions are numeric `u32` (`encryptionKeyVersion`/`signingKeyVersion` below).
 const tupleA: PeerKeyTuple = {
   encryptionPublicKey: 'p256-ecdh-public:v1:alice:1',
   encryptionKeyVersion: 1,

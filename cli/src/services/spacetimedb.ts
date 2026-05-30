@@ -63,7 +63,7 @@ const borrowedAuthenticatedConnection =
   new AsyncLocalStorage<BorrowedAuthenticatedConnection>();
 
 export type ShellRows = {
-  inboxes: Account[];
+  accounts: Account[];
   actors: Agent[];
   participants: VisibleThreadParticipantRow[];
   readStates: VisibleThreadReadStateRow[];
@@ -941,12 +941,12 @@ async function readShellProcedureSlices(
 }
 
 export async function readAccounts(conn: DbConnection): Promise<{
-  inboxes: Account[];
+  accounts: Account[];
   actors: Agent[];
 }> {
   const actors = await readAllOwnedAgents(conn);
   return {
-    inboxes: Array.from(conn.db.visible_accounts.iter()) as Account[],
+    accounts: Array.from(conn.db.visible_accounts.iter()) as Account[],
     actors,
   };
 }
@@ -1241,10 +1241,10 @@ export async function readShellRows(
   params?: { actorSlug?: string | null; changedAccessor?: ShellTableAccessor }
 ): Promise<ShellRows> {
   const slices = await readShellProcedureSlices(conn, params);
-  const inboxes = Array.from(conn.db.visible_accounts.iter()) as Account[];
+  const accounts = Array.from(conn.db.visible_accounts.iter()) as Account[];
 
   return {
-    inboxes,
+    accounts,
     actors: mergeRowsById(slices.threadSnapshot.actors, slices.actors),
     participants: slices.threadSnapshot.participants,
     readStates: slices.threadSnapshot.readStates,
@@ -1298,9 +1298,9 @@ export async function waitForBootstrapRows(params: {
   };
 
   while (Date.now() < timeoutAt) {
-    const { inboxes, actors } = await readAccounts(params.conn);
+    const { accounts, actors } = await readAccounts(params.conn);
     const { devices } = await readDeviceRows(params.conn);
-    const inbox = inboxes.find(row => row.email === params.email);
+    const inbox = accounts.find(row => row.email === params.email);
     const actor = actors.find(row => {
       return row.email === params.email && row.isDefault;
     });

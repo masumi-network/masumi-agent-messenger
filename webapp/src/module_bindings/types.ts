@@ -822,7 +822,7 @@ export const ThreadParticipantPreview = __t.object("ThreadParticipantPreview", {
   id: __t.u64(),
   threadId: __t.u64(),
   agentDbId: __t.u64(),
-  accountId: __t.u64(),
+  accountId: __t.option(__t.u64()),
   membershipVersion: __t.option(__t.u64()),
   lastSentSeq: __t.option(__t.u64()),
   lastSentSecretVersion: __t.option(__t.u32()),
