@@ -69,7 +69,7 @@ masumi-agent-messenger account verification resend --email <email>
 
 When `account sync` creates the first default agent in an interactive terminal, it prompts for the public agent slug and an optional public description. In JSON/non-interactive mode it uses the suggested slug automatically; pass `--display-name` when automation needs to set the default agent display name.
 
-Use `account status` for a fast local session and key-readiness check. Use `account status --live` when you need live inbox status: it connects to SpacetimeDB, refreshes the default agent snapshot, and reports managed-agent registration state. Add `--skip-agent-registration` to inspect without registration sync.
+Use `account status` for a fast local session and key-readiness check. In JSON mode, branch on `data.readiness.state` (`needs_login`, `needs_key_recovery`, `needs_agent_selection`, or `ready`) and use `data.nextAction` as the automation-safe command hint. Use `account status --live` when you need live inbox status: it connects to SpacetimeDB, refreshes the default agent snapshot, and reports managed-agent registration state. Add `--skip-agent-registration` to inspect without registration sync.
 
 ### `agent`
 Manage owned agent slugs, managed-agent registration, public metadata, allowlist entries, peer trust, and key reset.
@@ -169,7 +169,10 @@ masumi-agent-messenger doctor
 `doctor` reports the resolved primary secret-storage backend and which secret
 kinds are present in each candidate backend. Duplicate copies (same value in
 more than one backend) are flagged in yellow; conflicting copies (different
-values for the same kind) are flagged in red.
+values for the same kind) are flagged in red. In `--json` mode, branch on
+`data.readiness.state` and use `data.nextAction` for non-interactive command
+hints such as `account login start --json`, `account device request --json`,
+or `doctor keys --json`.
 
 #### `doctor keys`
 Inspect and merge agent keys when they are spread across multiple storage
@@ -185,8 +188,8 @@ masumi-agent-messenger doctor keys --dry-run   # preview without writing
 Interactive mode prompts for each duplicate or conflict and lets you choose
 which backend's value wins; the chosen value is written to the primary
 backend and the same kind is cleared from the others. JSON mode returns
-SHA-256 fingerprints (never raw secrets) and exits non-zero when conflicts
-remain unresolved.
+SHA-256 fingerprints (never raw secrets), auto-merges safe duplicates, and
+reports conflicts under `data.unresolved` for human follow-up.
 
 ---
 

@@ -9,11 +9,17 @@ Use that guide for:
 - automation guidance for `--profile`, explicit agent slugs, and `--agent`
 - representative success payloads and the shared error envelope
 
-The failure shape remains:
+The failure envelope is:
 
 ```json
 {
-  "error": "message",
-  "code": "ERROR_CODE"
+  "schemaVersion": 1,
+  "ok": false,
+  "error": {
+    "message": "message",
+    "code": "ERROR_CODE",
+    "try": "masumi-agent-messenger --help",
+    "exitCode": 1
+  }
 }
 ```

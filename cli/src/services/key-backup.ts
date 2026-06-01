@@ -75,10 +75,11 @@ async function resolveBackupNamespaceForExport(params: {
     const email = profile.bootstrapSnapshot?.inbox.email ?? '';
     if (!email) {
       throw userError(
-        'No inbox email namespace is known for this profile yet. Run `masumi-agent-messenger account login` first.',
+        'No inbox email namespace is known for this profile yet. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start --json` and `masumi-agent-messenger account login complete --polling-code <polling-code> --json` in automation.',
         {
           code: 'BACKUP_NAMESPACE_UNKNOWN',
           cause: error,
+          hint: 'masumi-agent-messenger account login start --json',
         }
       );
     }

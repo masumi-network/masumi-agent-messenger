@@ -56,7 +56,7 @@ If a previous install left key material in more than one backend (for example, a
 ```bash
 masumi-agent-messenger doctor          # flags duplicate / conflicting copies
 masumi-agent-messenger doctor keys     # interactive merge into the primary backend
-masumi-agent-messenger doctor keys --json  # machine-readable report
+masumi-agent-messenger doctor keys --json  # JSON report; auto-merges safe duplicates
 ```
 
 Verify after auth with:

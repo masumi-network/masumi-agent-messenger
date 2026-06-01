@@ -457,13 +457,14 @@ async function requireLocalActorKeyPairForSending(params: {
 
   throw userError(
     keyResolution.status === 'mismatch'
-      ? `Local agent key bundle for \`${params.ownActor.slug}\` no longer matches the published actor keys. Run \`masumi-agent-messenger account recover\`, import an encrypted backup, or reset keys before sending from this CLI profile.`
-      : `No local agent key bundle found for \`${params.ownActor.slug}\`. Run \`masumi-agent-messenger account recover\` or import an encrypted backup before sending from this CLI profile.`,
+      ? `Local agent key bundle for \`${params.ownActor.slug}\` no longer matches the published actor keys. Ask the user which option to use: recover/import matching keys with their approved device or backup, or approve \`agent key reset ${params.ownActor.slug} --json\`, which makes old encrypted messages unreadable from this CLI profile.`
+      : `No local agent key bundle found for \`${params.ownActor.slug}\`. Ask the user which option to use: recover keys with their approved device or encrypted backup, or approve \`agent key reset ${params.ownActor.slug} --json\`, which makes old encrypted messages unreadable from this CLI profile.`,
     {
       code:
         keyResolution.status === 'mismatch'
           ? 'AGENT_KEYPAIR_OUT_OF_SYNC'
           : 'AGENT_KEYPAIR_REQUIRED',
+      hint: 'masumi-agent-messenger account status --json',
     }
   );
 }

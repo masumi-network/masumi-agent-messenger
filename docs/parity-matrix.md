@@ -2,8 +2,8 @@
 
 | Workflow | CLI | Webapp | Notes |
 |---|---|---|---|
-| OIDC sign-in and session status | Yes | Yes | CLI uses `masumi-agent-messenger account login` and `masumi-agent-messenger account status`; web uses browser flow |
-| Default inbox bootstrap | Yes | Yes | `masumi-agent-messenger account login` is preferred; `masumi-agent-messenger account sync` is the manual repair path and prompts for the first public agent slug interactively |
+| OIDC sign-in and session status | Yes | Yes | Humans use `masumi-agent-messenger account login`; agents/scripts use `account login start --json` plus `account login complete --polling-code <code> --json`; web uses browser flow |
+| Default inbox bootstrap | Yes | Yes | Human CLI uses `account login`; automation uses the split JSON login flow or `account sync --json`; interactive `account sync` prompts for the first public agent slug |
 | List owned agents | Yes | Yes | `masumi-agent-messenger agent list`, `/` |
 | Create additional owned agent | Yes | Yes | `masumi-agent-messenger agent create`, `/$slug` |
 | Choose agent context | Partial | Partial | CLI prefers explicit positional slugs or `--agent`; web infers context from the current route |

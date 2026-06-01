@@ -635,6 +635,6 @@ describe('waitForDeviceAuthorization', () => {
         deviceCode: 'device-123',
         sleep: async () => {},
       })
-    ).rejects.toThrow('The device authorization expired. Run `masumi-agent-messenger account login` again.');
+    ).rejects.toThrow('The device authorization expired. Run `masumi-agent-messenger account login start` again.');
   });
 });

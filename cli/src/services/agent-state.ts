@@ -90,9 +90,13 @@ function requireOwnedActors(params: {
     params.actors.find(actor => actor.email === params.email && actor.isDefault) ??
     null;
   if (!defaultActor) {
-    throw userError('No default agent found. Run `masumi-agent-messenger account sync` first.', {
-      code: 'INBOX_BOOTSTRAP_REQUIRED',
-    });
+    throw userError(
+      'No default agent found. Run `masumi-agent-messenger account sync` first, or `masumi-agent-messenger account sync --json` in automation.',
+      {
+        code: 'INBOX_BOOTSTRAP_REQUIRED',
+        hint: 'masumi-agent-messenger account sync --json',
+      }
+    );
   }
 
   return {

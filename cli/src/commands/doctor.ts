@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import process from 'node:process';
 import type { Command } from 'commander';
 import { authStatus, ensureAuthenticatedSession } from '../services/auth';
 import { listOwnedAgents } from '../services/agent-state';
@@ -59,8 +60,148 @@ type DoctorResult = {
   discoveryReachable: boolean | null;
   managedImport: SyncOwnedSaasInboxAgentsResult['import'] | null;
   keyStorage: KeyStorageSummary;
+  readiness: DoctorReadiness;
   nextAction: string;
 };
+
+type DoctorReadinessState =
+  | 'needs_key_storage_repair'
+  | 'needs_login'
+  | 'needs_key_recovery'
+  | 'needs_account_sync'
+  | 'needs_agent_selection'
+  | 'ready';
+
+type DoctorReadiness = {
+  state: DoctorReadinessState;
+  readyForMessaging: boolean;
+  missing: string[];
+  keyRecovery?: {
+    preferred: ['device_share', 'backup_import'];
+    destructiveFallback: 'key_reset';
+    resetLosesOldMessages: true;
+  };
+};
+
+function isAutomationDoctorFlow(options: GlobalOptions): boolean {
+  return !options.json && process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY
+    ? false
+    : true;
+}
+
+function appendDoctorAutomationFlags(
+  command: string,
+  options: GlobalOptions,
+  forceJson = isAutomationDoctorFlow(options)
+): string {
+  const flags = [
+    ...(options.profile === 'default' ? [] : [`--profile ${options.profile}`]),
+    ...(forceJson ? ['--json'] : []),
+  ];
+
+  return flags.length > 0 ? `${command} ${flags.join(' ')}` : command;
+}
+
+function buildDoctorNextAction(params: {
+  options: GlobalOptions;
+  keyStorage: KeyStorageSummary;
+  authenticated: boolean;
+  localKeysReady: boolean;
+  managedImport: SyncOwnedSaasInboxAgentsResult['import'] | null;
+  activeAgent: string | null;
+}): string {
+  const automation = isAutomationDoctorFlow(params.options);
+
+  if (
+    params.keyStorage.duplicateKinds.length > 0 ||
+    params.keyStorage.conflictKinds.length > 0
+  ) {
+    return appendDoctorAutomationFlags('masumi-agent-messenger doctor keys', params.options);
+  }
+
+  if (!params.authenticated) {
+    return appendDoctorAutomationFlags(
+      automation
+        ? 'masumi-agent-messenger account login start'
+        : 'masumi-agent-messenger account login',
+      params.options
+    );
+  }
+
+  if (!params.localKeysReady) {
+    return appendDoctorAutomationFlags(
+      automation
+        ? 'masumi-agent-messenger account device request'
+        : 'masumi-agent-messenger account recover',
+      params.options
+    );
+  }
+
+  if (params.managedImport && params.managedImport.missing > 0) {
+    return appendDoctorAutomationFlags('masumi-agent-messenger account sync', params.options);
+  }
+
+  if (!params.activeAgent) {
+    return appendDoctorAutomationFlags('masumi-agent-messenger agent list', params.options);
+  }
+
+  return appendDoctorAutomationFlags(
+    `masumi-agent-messenger thread list --agent ${params.activeAgent}`,
+    params.options
+  );
+}
+
+function buildDoctorReadiness(params: {
+  keyStorage: KeyStorageSummary;
+  authenticated: boolean;
+  localKeys: {
+    agentKeyPair: boolean;
+    namespaceVault: boolean;
+    deviceKeyMaterial: boolean;
+  };
+  managedImport: SyncOwnedSaasInboxAgentsResult['import'] | null;
+  activeAgent: string | null;
+}): DoctorReadiness {
+  const missing: string[] = [];
+  let state: DoctorReadinessState = 'ready';
+
+  if (
+    params.keyStorage.duplicateKinds.length > 0 ||
+    params.keyStorage.conflictKinds.length > 0
+  ) {
+    state = 'needs_key_storage_repair';
+    missing.push(...params.keyStorage.duplicateKinds.map(kind => `duplicate_${kind}`));
+    missing.push(...params.keyStorage.conflictKinds.map(kind => `conflict_${kind}`));
+  } else if (!params.authenticated) {
+    state = 'needs_login';
+    missing.push('session');
+  } else if (!params.localKeys.agentKeyPair || !params.localKeys.namespaceVault) {
+    state = 'needs_key_recovery';
+    if (!params.localKeys.agentKeyPair) missing.push('agent_key_pair');
+    if (!params.localKeys.namespaceVault) missing.push('namespace_vault');
+  } else if (params.managedImport && params.managedImport.missing > 0) {
+    state = 'needs_account_sync';
+    missing.push('managed_agent_import');
+  } else if (!params.activeAgent) {
+    state = 'needs_agent_selection';
+    missing.push('active_agent');
+  }
+
+  return {
+    state,
+    readyForMessaging: state === 'ready',
+    missing,
+    ...(state === 'needs_key_recovery'
+      ? {
+          keyRecovery: {
+            preferred: ['device_share', 'backup_import'],
+            destructiveFallback: 'key_reset',
+            resetLosesOldMessages: true,
+          },
+        }
+      : {}),
+  };
+}
 
 function yesNo(value: boolean): string {
   return value ? green('yes') : yellow('no');
@@ -243,18 +384,26 @@ export function registerDoctorCommand(program: Command): void {
 
         const keyStorage = summarizeKeyStorage(sourcesReport.sources, sourcesReport.primary);
         const localKeysReady = Boolean(agentKeyPair && namespaceVault);
-        const nextAction =
-          keyStorage.conflictKinds.length > 0
-            ? 'masumi-agent-messenger doctor keys'
-            : !status.authenticated
-              ? 'masumi-agent-messenger account login'
-              : !localKeysReady
-                ? 'masumi-agent-messenger account recover'
-                : managedImport && managedImport.missing > 0
-                  ? 'masumi-agent-messenger discover'
-                : !activeAgent
-                  ? 'masumi-agent-messenger agent list'
-                  : 'masumi-agent-messenger thread list';
+        const localKeys = {
+          agentKeyPair: Boolean(agentKeyPair),
+          namespaceVault: Boolean(namespaceVault),
+          deviceKeyMaterial: Boolean(deviceKeyMaterial),
+        };
+        const nextAction = buildDoctorNextAction({
+          options,
+          keyStorage,
+          authenticated: status.authenticated,
+          localKeysReady,
+          managedImport,
+          activeAgent,
+        });
+        const readiness = buildDoctorReadiness({
+          keyStorage,
+          authenticated: status.authenticated,
+          localKeys,
+          managedImport,
+          activeAgent,
+        });
 
         return {
           profile: profile.name,
@@ -262,11 +411,7 @@ export function registerDoctorCommand(program: Command): void {
           spacetimeDbName: profile.spacetimeDbName,
           authenticated: status.authenticated,
           activeAgent,
-          localKeys: {
-            agentKeyPair: Boolean(agentKeyPair),
-            namespaceVault: Boolean(namespaceVault),
-            deviceKeyMaterial: Boolean(deviceKeyMaterial),
-          },
+          localKeys,
           devices: {
             total: totalDevices,
             pendingRequests,
@@ -276,6 +421,7 @@ export function registerDoctorCommand(program: Command): void {
           discoveryReachable,
           managedImport,
           keyStorage,
+          readiness,
           nextAction,
         };
       },

@@ -154,5 +154,5 @@ the available secret-storage backends (libsecret/keychain + file).
 each duplicate or conflict, and merges the result into the resolved primary
 backend (clearing the same kind from the others). `--yes` auto-resolves safe
 duplicates and skips conflicts; `--dry-run` previews without writing; `--json`
-returns SHA-256 fingerprints (never raw secrets) and exits non-zero when
-conflicts remain unresolved.
+returns SHA-256 fingerprints (never raw secrets), auto-merges safe duplicates,
+and reports unresolved conflicts under `data.unresolved`.

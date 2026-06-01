@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AgentKeyPair } from '../../../shared/agent-crypto';
 import { DEFAULT_OIDC_ISSUER as MASUMI_DEFAULT_OIDC_ISSUER } from './env';
 
 vi.mock('./inbox-bootstrap', () => ({
@@ -61,7 +62,9 @@ import {
   startLogin,
   waitForLogin,
 } from './auth';
-import type { SecretStore } from './secret-store';
+import { saveBootstrapSnapshot, type BootstrapSnapshot } from './config-store';
+import { bootstrapAuthenticatedInbox } from './inbox-bootstrap';
+import type { DeviceKeyMaterial, NamespaceKeyVault, SecretStore } from './secret-store';
 
 let testSigningKeyPair: CryptoKeyPair;
 let testPublicJwk: JsonWebKey & { alg: 'RS256'; kid: 'test-key'; use: 'sig' };
@@ -162,6 +165,87 @@ function createSecretStoreStub(): SecretStore {
   };
 }
 
+function createBootstrapSnapshot(email: string): BootstrapSnapshot {
+  return {
+    email,
+    spacetimeIdentity: 'old-spacetime-identity',
+    inbox: {
+      id: '1',
+      email,
+    },
+    actor: {
+      id: '2',
+      slug: 'old-agent',
+      publicIdentity: 'old-agent',
+      displayName: 'Old Agent',
+    },
+    keyVersions: {
+      encryption: 1,
+      signing: 1,
+    },
+    actorKeys: {
+      encryption: {
+        publicKey: 'old-encryption-public-key',
+        keyVersion: 1,
+      },
+      signing: {
+        publicKey: 'old-signing-public-key',
+        keyVersion: 1,
+      },
+    },
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+function createAgentKeyPairFixture(label: string): AgentKeyPair {
+  return {
+    encryption: {
+      publicKey: `${label}-encryption-public`,
+      privateKey: `${label}-encryption-private`,
+      keyVersion: 1,
+      algorithm: 'test',
+    },
+    signing: {
+      publicKey: `${label}-signing-public`,
+      privateKey: `${label}-signing-private`,
+      keyVersion: 1,
+      algorithm: 'test',
+    },
+  };
+}
+
+function createDeviceMaterialFixture(label: string): DeviceKeyMaterial {
+  return {
+    deviceId: `${label}-device`,
+    keyPair: {
+      publicKey: `${label}-device-public`,
+      privateKey: `${label}-device-private`,
+      keyVersion: 1,
+      algorithm: 'test',
+    },
+  };
+}
+
+function createNamespaceVaultFixture(
+  email: string,
+  keyPair: AgentKeyPair
+): NamespaceKeyVault {
+  return {
+    version: 1,
+    email,
+    actors: [
+      {
+        identity: {
+          email,
+          slug: 'old-agent',
+        },
+        current: keyPair,
+        archived: [],
+      },
+    ],
+  };
+}
+
 beforeAll(async () => {
   testSigningKeyPair = await webcrypto.subtle.generateKey(
     {
@@ -196,6 +280,7 @@ describe('auth service', () => {
     process.env.XDG_CONFIG_HOME = tempDir;
     process.env.MASUMI_OIDC_ISSUER = MASUMI_DEFAULT_OIDC_ISSUER;
     process.env.MASUMI_OIDC_CLIENT_ID = 'masumi-spacetime-cli';
+    vi.mocked(bootstrapAuthenticatedInbox).mockClear();
   });
 
   afterEach(async () => {
@@ -501,6 +586,249 @@ describe('auth service', () => {
     expect(secretStore.setOidcSession).toHaveBeenCalledTimes(1);
   });
 
+  it('archives profile-local keys before bootstrapping a different account after login', async () => {
+    await saveBootstrapSnapshot('default', createBootstrapSnapshot('old@example.com'));
+    const oldAgentKeyPair = createAgentKeyPairFixture('old');
+    const oldDeviceMaterial = createDeviceMaterialFixture('old');
+    const oldNamespaceVault = createNamespaceVaultFixture('old@example.com', oldAgentKeyPair);
+
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          issuer: MASUMI_DEFAULT_OIDC_ISSUER,
+          authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
+          token_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
+          jwks_uri: `${MASUMI_DEFAULT_OIDC_ISSUER}/.well-known/jwks.json`,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          access_token: 'access-token',
+          refresh_token: 'refresh-token',
+          scope: 'openid profile email offline_access inbox-agents:write:mainnet',
+          id_token: await createSignedTestIdToken({
+            iss: MASUMI_DEFAULT_OIDC_ISSUER,
+            sub: 'new-user-123',
+            aud: ['masumi-spacetime-cli'],
+            email: 'new@example.com',
+            email_verified: true,
+            exp: Math.floor(Date.now() / 1000) + 3600,
+          }),
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { keys: [testPublicJwk] })) as typeof fetch;
+
+    const reporter = createReporter();
+    const secretStore = createSecretStoreStub();
+    vi.mocked(secretStore.getAgentKeyPair).mockResolvedValue(oldAgentKeyPair);
+    vi.mocked(secretStore.getDeviceKeyMaterial).mockResolvedValue(oldDeviceMaterial);
+    vi.mocked(secretStore.getNamespaceKeyVault).mockResolvedValue(oldNamespaceVault);
+    const result = await waitForLogin({
+      profileName: 'default',
+      pollingCode: 'device-123',
+      reporter,
+      secretStore,
+      sleep: async () => {},
+    });
+
+    const bootstrapMock = vi.mocked(bootstrapAuthenticatedInbox);
+    const bootstrapCall = bootstrapMock.mock.calls[bootstrapMock.mock.calls.length - 1]?.[0];
+
+    expect(result.email).toBe('new@example.com');
+    expect(result.archivedProfile).toBe('default.account.old-example-com');
+    expect(result.restoredProfile).toBeUndefined();
+    expect(secretStore.setAgentKeyPair).toHaveBeenCalledWith(
+      'default.account.old-example-com',
+      oldAgentKeyPair
+    );
+    expect(secretStore.setDeviceKeyMaterial).toHaveBeenCalledWith(
+      'default.account.old-example-com',
+      oldDeviceMaterial
+    );
+    expect(secretStore.setNamespaceKeyVault).toHaveBeenCalledWith(
+      'default.account.old-example-com',
+      oldNamespaceVault
+    );
+    expect(secretStore.deleteAgentKeyPair).toHaveBeenCalledWith('default');
+    expect(secretStore.deleteDeviceKeyMaterial).toHaveBeenCalledWith('default');
+    expect(secretStore.deleteNamespaceKeyVault).toHaveBeenCalledWith('default');
+    expect(bootstrapCall?.profile.bootstrapSnapshot).toBeUndefined();
+    expect(reporter.info).toHaveBeenCalledWith(
+      'Authenticated account changed from old@example.com to new@example.com; archiving the previous local account state in profile default.account.old-example-com.'
+    );
+    expect(
+      vi.mocked(secretStore.setDeviceKeyMaterial).mock.invocationCallOrder[0]
+    ).toBeLessThan(
+      vi.mocked(secretStore.deleteDeviceKeyMaterial).mock.invocationCallOrder[0] ?? 0
+    );
+    expect(
+      vi.mocked(secretStore.deleteDeviceKeyMaterial).mock.invocationCallOrder[0]
+    ).toBeLessThan(vi.mocked(secretStore.setOidcSession).mock.invocationCallOrder[0] ?? 0);
+  });
+
+  it('archives stale profile-local keys when an already stored session switched accounts', async () => {
+    await saveBootstrapSnapshot('default', createBootstrapSnapshot('old@example.com'));
+    const oldAgentKeyPair = createAgentKeyPairFixture('old');
+    const oldDeviceMaterial = createDeviceMaterialFixture('old');
+    const oldNamespaceVault = createNamespaceVaultFixture('old@example.com', oldAgentKeyPair);
+
+    const storedSession = {
+      idToken: await createSignedTestIdToken({
+        iss: MASUMI_DEFAULT_OIDC_ISSUER,
+        sub: 'new-user-123',
+        aud: ['masumi-spacetime-cli'],
+        email: 'new@example.com',
+        email_verified: true,
+        exp: Math.floor((Date.now() + 3_600_000) / 1000),
+      }),
+      refreshToken: 'refresh-token',
+      accessToken: 'access-token',
+      grantedScopes: ['openid', 'profile', 'email', 'offline_access'],
+      expiresAt: Date.now() + 3_600_000,
+      createdAt: Date.now() - 60_000,
+    };
+
+    mockAuthIssuerFetch();
+
+    const reporter = createReporter();
+    const secretStore = createSecretStoreStub();
+    vi.mocked(secretStore.getOidcSession).mockResolvedValue(storedSession);
+    vi.mocked(secretStore.getAgentKeyPair).mockResolvedValue(oldAgentKeyPair);
+    vi.mocked(secretStore.getDeviceKeyMaterial).mockResolvedValue(oldDeviceMaterial);
+    vi.mocked(secretStore.getNamespaceKeyVault).mockResolvedValue(oldNamespaceVault);
+
+    const result = await ensureAuthenticatedSession({
+      profileName: 'default',
+      reporter,
+      secretStore,
+    });
+
+    expect(result.claims.email).toBe('new@example.com');
+    expect(result.profile.bootstrapSnapshot).toBeUndefined();
+    expect(secretStore.setAgentKeyPair).toHaveBeenCalledWith(
+      'default.account.old-example-com',
+      oldAgentKeyPair
+    );
+    expect(secretStore.setDeviceKeyMaterial).toHaveBeenCalledWith(
+      'default.account.old-example-com',
+      oldDeviceMaterial
+    );
+    expect(secretStore.setNamespaceKeyVault).toHaveBeenCalledWith(
+      'default.account.old-example-com',
+      oldNamespaceVault
+    );
+    expect(secretStore.deleteAgentKeyPair).toHaveBeenCalledWith('default');
+    expect(secretStore.deleteDeviceKeyMaterial).toHaveBeenCalledWith('default');
+    expect(secretStore.deleteNamespaceKeyVault).toHaveBeenCalledWith('default');
+    expect(reporter.info).toHaveBeenCalledWith(
+      'Authenticated account changed from old@example.com to new@example.com; archiving the previous local account state in profile default.account.old-example-com.'
+    );
+  });
+
+  it('restores archived profile-local keys when switching back to an old account', async () => {
+    await saveBootstrapSnapshot(
+      'default.account.old-example-com',
+      createBootstrapSnapshot('old@example.com')
+    );
+    await saveBootstrapSnapshot('default', createBootstrapSnapshot('new@example.com'));
+
+    const oldAgentKeyPair = createAgentKeyPairFixture('old');
+    const oldDeviceMaterial = createDeviceMaterialFixture('old');
+    const oldNamespaceVault = createNamespaceVaultFixture('old@example.com', oldAgentKeyPair);
+    const newAgentKeyPair = createAgentKeyPairFixture('new');
+    const newDeviceMaterial = createDeviceMaterialFixture('new');
+    const newNamespaceVault = createNamespaceVaultFixture('new@example.com', newAgentKeyPair);
+
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          issuer: MASUMI_DEFAULT_OIDC_ISSUER,
+          authorization_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/authorize`,
+          token_endpoint: `${MASUMI_DEFAULT_OIDC_ISSUER}/api/auth/oauth2/token`,
+          jwks_uri: `${MASUMI_DEFAULT_OIDC_ISSUER}/.well-known/jwks.json`,
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          access_token: 'access-token',
+          refresh_token: 'refresh-token',
+          scope: 'openid profile email offline_access inbox-agents:write:mainnet',
+          id_token: await createSignedTestIdToken({
+            iss: MASUMI_DEFAULT_OIDC_ISSUER,
+            sub: 'old-user-123',
+            aud: ['masumi-spacetime-cli'],
+            email: 'old@example.com',
+            email_verified: true,
+            exp: Math.floor(Date.now() / 1000) + 3600,
+          }),
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { keys: [testPublicJwk] })) as typeof fetch;
+
+    const reporter = createReporter();
+    const secretStore = createSecretStoreStub();
+    vi.mocked(secretStore.getAgentKeyPair).mockImplementation(async profileName => {
+      if (profileName === 'default') return newAgentKeyPair;
+      if (profileName === 'default.account.old-example-com') return oldAgentKeyPair;
+      return null;
+    });
+    vi.mocked(secretStore.getDeviceKeyMaterial).mockImplementation(async profileName => {
+      if (profileName === 'default') return newDeviceMaterial;
+      if (profileName === 'default.account.old-example-com') return oldDeviceMaterial;
+      return null;
+    });
+    vi.mocked(secretStore.getNamespaceKeyVault).mockImplementation(async profileName => {
+      if (profileName === 'default') return newNamespaceVault;
+      if (profileName === 'default.account.old-example-com') return oldNamespaceVault;
+      return null;
+    });
+
+    const result = await waitForLogin({
+      profileName: 'default',
+      pollingCode: 'device-123',
+      reporter,
+      secretStore,
+      sleep: async () => {},
+    });
+
+    const bootstrapMock = vi.mocked(bootstrapAuthenticatedInbox);
+    const bootstrapCall = bootstrapMock.mock.calls[bootstrapMock.mock.calls.length - 1]?.[0];
+
+    expect(result.email).toBe('old@example.com');
+    expect(result.archivedProfile).toBe('default.account.new-example-com');
+    expect(result.restoredProfile).toBe('default.account.old-example-com');
+    expect(secretStore.setAgentKeyPair).toHaveBeenCalledWith(
+      'default.account.new-example-com',
+      newAgentKeyPair
+    );
+    expect(secretStore.setAgentKeyPair).toHaveBeenCalledWith('default', oldAgentKeyPair);
+    expect(secretStore.setDeviceKeyMaterial).toHaveBeenCalledWith(
+      'default.account.new-example-com',
+      newDeviceMaterial
+    );
+    expect(secretStore.setDeviceKeyMaterial).toHaveBeenCalledWith(
+      'default',
+      oldDeviceMaterial
+    );
+    expect(secretStore.setNamespaceKeyVault).toHaveBeenCalledWith(
+      'default.account.new-example-com',
+      newNamespaceVault
+    );
+    expect(secretStore.setNamespaceKeyVault).toHaveBeenCalledWith(
+      'default',
+      oldNamespaceVault
+    );
+    expect(secretStore.deleteAgentKeyPair).not.toHaveBeenCalledWith('default');
+    expect(secretStore.deleteDeviceKeyMaterial).not.toHaveBeenCalledWith('default');
+    expect(secretStore.deleteNamespaceKeyVault).not.toHaveBeenCalledWith('default');
+    expect(bootstrapCall?.profile.bootstrapSnapshot?.inbox.email).toBe('old@example.com');
+    expect(reporter.info).toHaveBeenCalledWith(
+      'Restoring archived local account state from profile default.account.old-example-com.'
+    );
+  });
+
   it('clears the local session and requests re-login when the refresh token is invalid', async () => {
     const expiringSession = {
       idToken: await createSignedTestIdToken({
@@ -537,7 +865,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Your sign-in session expired or was revoked. Run `masumi-agent-messenger account login` again.',
+      message: 'Your sign-in session expired or was revoked. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
@@ -574,7 +902,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` again.',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
@@ -599,7 +927,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` again.',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
@@ -618,7 +946,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` again.',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');

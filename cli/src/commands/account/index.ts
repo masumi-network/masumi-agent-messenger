@@ -105,6 +105,23 @@ type AccountStatusOptions = AccountFlowOptions & {
   live?: boolean;
 };
 
+type AccountStatusReadinessState =
+  | 'needs_login'
+  | 'needs_key_recovery'
+  | 'needs_agent_selection'
+  | 'ready';
+
+type AccountStatusReadiness = {
+  state: AccountStatusReadinessState;
+  readyForMessaging: boolean;
+  missing: string[];
+  keyRecovery?: {
+    preferred: ['device_share', 'backup_import'];
+    destructiveFallback: 'key_reset';
+    resetLosesOldMessages: true;
+  };
+};
+
 function snapshotKeysRequireRecovery(
   snapshot: BootstrapSnapshot | undefined,
   keyPair: AgentKeyPair | null
@@ -130,6 +147,102 @@ function snapshotKeysRequireRecovery(
     snapshot.actorKeys.signing.publicKey !== keyPair.signing.publicKey ||
     snapshot.actorKeys.signing.keyVersion !== keyPair.signing.keyVersion
   );
+}
+
+function isAutomationAccountFlow(options: GlobalOptions): boolean {
+  return options.json || !isInteractiveAccountFlow(options);
+}
+
+function appendAutomationFlags(
+  command: string,
+  options: GlobalOptions,
+  forceJson = isAutomationAccountFlow(options)
+): string {
+  const flags = [
+    ...(options.profile === 'default' ? [] : [`--profile ${options.profile}`]),
+    ...(forceJson ? ['--json'] : []),
+  ];
+
+  return flags.length > 0 ? `${command} ${flags.join(' ')}` : command;
+}
+
+function buildAccountStatusNextAction(params: {
+  options: GlobalOptions;
+  authenticated: boolean;
+  recoveryRequired: boolean;
+  activeAgentSlug?: string;
+}): string {
+  if (!params.authenticated) {
+    return appendAutomationFlags(
+      isAutomationAccountFlow(params.options)
+        ? 'masumi-agent-messenger account login start'
+        : 'masumi-agent-messenger account login',
+      params.options
+    );
+  }
+
+  if (params.recoveryRequired) {
+    return appendAutomationFlags(
+      isAutomationAccountFlow(params.options)
+        ? 'masumi-agent-messenger account device request'
+        : 'masumi-agent-messenger account recover',
+      params.options
+    );
+  }
+
+  if (params.activeAgentSlug) {
+    return appendAutomationFlags(
+      `masumi-agent-messenger thread list --agent ${params.activeAgentSlug}`,
+      params.options
+    );
+  }
+
+  return appendAutomationFlags('masumi-agent-messenger agent list', params.options);
+}
+
+function buildAccountStatusReadiness(params: {
+  authenticated: boolean;
+  localKeysReady: boolean;
+  recoveryRequired: boolean;
+  recoveryReason: string | null;
+  activeAgentSlug?: string;
+  agentKeyPairMissing: boolean;
+  namespaceVaultMissing: boolean;
+}): AccountStatusReadiness {
+  const missing: string[] = [];
+  let state: AccountStatusReadinessState = 'ready';
+
+  if (!params.authenticated) {
+    state = 'needs_login';
+    missing.push('session');
+  } else if (params.recoveryRequired) {
+    state = 'needs_key_recovery';
+    if (params.recoveryReason === 'mismatch') {
+      missing.push('matching_agent_key_pair');
+    } else {
+      if (params.agentKeyPairMissing) missing.push('agent_key_pair');
+      if (params.namespaceVaultMissing) missing.push('namespace_vault');
+      if (missing.length === 0) missing.push('local_private_keys');
+    }
+  } else if (!params.activeAgentSlug) {
+    state = 'needs_agent_selection';
+    missing.push('active_agent');
+  }
+
+  return {
+    state,
+    readyForMessaging: state === 'ready' && params.localKeysReady,
+    missing,
+    ...(state === 'needs_key_recovery'
+      ? {
+          keyRecovery: {
+            preferred: ['device_share', 'backup_import'],
+            destructiveFallback: 'key_reset',
+            resetLosesOldMessages: true,
+          },
+        }
+      : {}),
+  };
 }
 
 function describePreviousKeyConfirmStatus(
@@ -986,24 +1099,45 @@ export function registerAccountCommands(program: Command): void {
           const secretStore = createSecretStore();
           const agentKeyPair = await secretStore.getAgentKeyPair(profile.name);
           const namespaceVault = await secretStore.getNamespaceKeyVault(profile.name);
+          const agentKeyPairMissing = !agentKeyPair;
+          const namespaceVaultMissing = !namespaceVault;
           const localKeysReady = Boolean(agentKeyPair && namespaceVault);
           const recoveryRequired =
             status.authenticated &&
             (!localKeysReady ||
               snapshotKeysRequireRecovery(profile.bootstrapSnapshot, agentKeyPair));
-          const nextAction = !status.authenticated
-            ? 'masumi-agent-messenger account login'
-            : recoveryRequired
-              ? 'masumi-agent-messenger account recover'
-              : profile.activeAgentSlug
-                ? 'masumi-agent-messenger thread list'
-                : 'masumi-agent-messenger agent list';
+          const recoveryReason = recoveryRequired
+            ? !agentKeyPair || !namespaceVault
+              ? 'missing'
+              : 'mismatch'
+            : null;
+          const recoveryOptions = recoveryRequired
+            ? ['device_share', 'backup_import', 'rotate']
+            : [];
+          const nextAction = buildAccountStatusNextAction({
+            options,
+            authenticated: status.authenticated,
+            recoveryRequired,
+            activeAgentSlug: profile.activeAgentSlug,
+          });
+          const readiness = buildAccountStatusReadiness({
+            authenticated: status.authenticated,
+            localKeysReady,
+            recoveryRequired,
+            recoveryReason,
+            activeAgentSlug: profile.activeAgentSlug,
+            agentKeyPairMissing,
+            namespaceVaultMissing,
+          });
 
           return {
             ...status,
             activeAgentSlug: profile.activeAgentSlug,
             localKeysReady,
             recoveryRequired,
+            recoveryReason,
+            recoveryOptions,
+            readiness,
             nextAction,
           };
         },
@@ -1105,7 +1239,7 @@ export function registerAccountCommands(program: Command): void {
       const options = commandInstance.optsWithGlobals() as AccountFlowOptions;
       if (!isInteractiveAccountFlow(options)) {
         throw userError(
-          'Run `masumi-agent-messenger account recover` in an interactive terminal, or use `masumi-agent-messenger account device`, `masumi-agent-messenger account backup import`, or `masumi-agent-messenger agent key reset <slug>` directly.',
+          'Run `masumi-agent-messenger account recover` in an interactive terminal, or ask the user which non-interactive path to use: recover keys with `masumi-agent-messenger account device` / `masumi-agent-messenger account backup import`, or approve `masumi-agent-messenger agent key reset <slug>`. Resetting keys makes old encrypted messages unreadable.',
           {
             code: 'AUTH_RECOVER_INTERACTIVE_REQUIRED',
           }

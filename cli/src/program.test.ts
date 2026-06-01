@@ -231,6 +231,10 @@ async function loadProgramWithMocks(params: {
     removedNamespaceVault: true,
     removedDeviceKeyMaterial: true,
   }));
+  const listDevices = vi.fn(async () => ({
+    profile: 'default',
+    devices: [],
+  }));
   const ensureAuthenticatedSession = vi.fn(async () => ({
     profile: {
       name: 'default',
@@ -261,6 +265,10 @@ async function loadProgramWithMocks(params: {
       },
     },
     registration: createEmptyMasumiRegistrationResult(),
+  }));
+  const syncOwnedSaasInboxAgents = vi.fn(async () => ({
+    profile: 'default',
+    import: makeOwnedAgentImportSummary(),
   }));
   const rotateInboxKeys = vi.fn(async (input: {
     actorSlug?: string;
@@ -769,6 +777,14 @@ async function loadProgramWithMocks(params: {
     confirmCurrentImportedRotationKey,
   }));
 
+  vi.doMock('./services/device', async importOriginal => {
+    const actual = await importOriginal<typeof import('./services/device')>();
+    return {
+      ...actual,
+      listDevices,
+    };
+  });
+
   vi.doMock('./services/spacetimedb', () => ({
     connectAnonymous,
     connectAuthenticated,
@@ -798,6 +814,7 @@ async function loadProgramWithMocks(params: {
     return {
       ...actual,
       createAgent,
+      syncOwnedSaasInboxAgents,
       rotateInboxKeys,
     };
   });
@@ -895,9 +912,11 @@ async function loadProgramWithMocks(params: {
       waitForEnterMessage,
       logout,
       removeLocalKeys,
+      listDevices,
       ensureAuthenticatedSession,
       requestVerificationEmailForIssuer,
       createAgent,
+      syncOwnedSaasInboxAgents,
       rotateInboxKeys,
       resolveRotationDeviceSelection,
       resolvePreferredAgentSlug,
@@ -1239,6 +1258,96 @@ describe('CLI command parsing', () => {
       })
     );
     expect(mocks.authStatus).not.toHaveBeenCalled();
+  });
+
+  it('returns an automation-safe login next action from account status JSON', async () => {
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'masumi-agent-status-'));
+    process.env.XDG_CONFIG_HOME = tempDir;
+
+    try {
+      const { buildProgram, mocks } = await loadProgramWithMocks({
+        authStatusResult: makeAuthStatus({ profile: 'ci' }),
+      });
+
+      await buildProgram().parseAsync([
+        'node',
+        'masumi-agent-messenger',
+        'account',
+        'status',
+        '--profile',
+        'ci',
+        '--json',
+      ]);
+
+      await expect(mocks.runCommandAction.mock.results[0]?.value).resolves.toMatchObject({
+        authenticated: false,
+        profile: 'ci',
+        readiness: {
+          state: 'needs_login',
+          readyForMessaging: false,
+          missing: ['session'],
+        },
+        nextAction: 'masumi-agent-messenger account login start --profile ci --json',
+      });
+    } finally {
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns non-interactive recovery guidance from account status JSON', async () => {
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'masumi-agent-status-'));
+    process.env.XDG_CONFIG_HOME = tempDir;
+
+    try {
+      const { buildProgram, mocks } = await loadProgramWithMocks({
+        authStatusResult: makeAuthStatus({
+          authenticated: true,
+          email: 'agent@example.com',
+          subject: 'subject-1',
+        }),
+      });
+
+      await buildProgram().parseAsync([
+        'node',
+        'masumi-agent-messenger',
+        'account',
+        'status',
+        '--json',
+      ]);
+
+      await expect(mocks.runCommandAction.mock.results[0]?.value).resolves.toMatchObject({
+        authenticated: true,
+        localKeysReady: false,
+        recoveryRequired: true,
+        recoveryReason: 'missing',
+        recoveryOptions: ['device_share', 'backup_import', 'rotate'],
+        readiness: {
+          state: 'needs_key_recovery',
+          readyForMessaging: false,
+          missing: ['agent_key_pair', 'namespace_vault'],
+          keyRecovery: {
+            preferred: ['device_share', 'backup_import'],
+            destructiveFallback: 'key_reset',
+            resetLosesOldMessages: true,
+          },
+        },
+        nextAction: 'masumi-agent-messenger account device request --json',
+      });
+    } finally {
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('preserves account sync display-name bootstrap input', async () => {
@@ -2269,6 +2378,81 @@ describe('CLI doctor', () => {
       expect(mocks.connectAuthenticated).not.toHaveBeenCalled();
       expect(mocks.listOwnedAgents).not.toHaveBeenCalled();
       expect(mocks.discoverAgents).not.toHaveBeenCalled();
+    } finally {
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns an automation-safe login next action from doctor JSON', async () => {
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'masumi-agent-messenger-doctor-'));
+    process.env.XDG_CONFIG_HOME = tempDir;
+
+    try {
+      const { buildProgram, mocks } = await loadProgramWithMocks({
+        authStatusResult: makeAuthStatus({ authenticated: false }),
+      });
+
+      await buildProgram().parseAsync(['node', 'masumi-agent-messenger', 'doctor', '--json']);
+
+      await expect(mocks.runCommandAction.mock.results[0]?.value).resolves.toMatchObject({
+        authenticated: false,
+        readiness: {
+          state: 'needs_login',
+          readyForMessaging: false,
+          missing: ['session'],
+        },
+        nextAction: 'masumi-agent-messenger account login start --json',
+      });
+    } finally {
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns non-interactive key recovery guidance from doctor JSON', async () => {
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'masumi-agent-messenger-doctor-'));
+    process.env.XDG_CONFIG_HOME = tempDir;
+
+    try {
+      const { buildProgram, mocks } = await loadProgramWithMocks({
+        authStatusResult: makeAuthStatus({
+          authenticated: true,
+          email: 'agent@example.com',
+          subject: 'subject-1',
+        }),
+      });
+
+      await buildProgram().parseAsync(['node', 'masumi-agent-messenger', 'doctor', '--json']);
+
+      await expect(mocks.runCommandAction.mock.results[0]?.value).resolves.toMatchObject({
+        authenticated: true,
+        localKeys: {
+          agentKeyPair: false,
+          namespaceVault: false,
+        },
+        readiness: {
+          state: 'needs_key_recovery',
+          readyForMessaging: false,
+          missing: ['agent_key_pair', 'namespace_vault'],
+          keyRecovery: {
+            preferred: ['device_share', 'backup_import'],
+            destructiveFallback: 'key_reset',
+            resetLosesOldMessages: true,
+          },
+        },
+        nextAction: 'masumi-agent-messenger account device request --json',
+      });
     } finally {
       if (previousXdgConfigHome === undefined) {
         delete process.env.XDG_CONFIG_HOME;

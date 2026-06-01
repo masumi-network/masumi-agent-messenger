@@ -399,6 +399,32 @@ export async function clearProfileState(profileName: string | undefined): Promis
   }));
 }
 
+export async function copyProfileState(params: {
+  sourceProfileName: string | undefined;
+  targetProfileName: string;
+}): Promise<ResolvedProfile> {
+  const normalizedSourceProfileName = normalizeProfileName(params.sourceProfileName);
+  const normalizedTargetProfileName = normalizeProfileName(params.targetProfileName);
+  const config = await readStoredConfig();
+  const sourceProfile = mergeProfile(config.profiles[normalizedSourceProfileName]);
+
+  config.profiles[normalizedSourceProfileName] = sourceProfile;
+  config.profiles[normalizedTargetProfileName] = StoredProfileSchema.parse(sourceProfile);
+  await writeStoredConfig(config);
+
+  return {
+    name: normalizedTargetProfileName,
+    ...config.profiles[normalizedTargetProfileName],
+    ...resolveSpacetimeTarget(),
+  };
+}
+
+export async function profileStateExists(profileName: string | undefined): Promise<boolean> {
+  const normalizedProfileName = normalizeProfileName(profileName);
+  const config = await readStoredConfig();
+  return config.profiles[normalizedProfileName] !== undefined;
+}
+
 export async function saveActiveAgentSlug(
   profileName: string | undefined,
   activeAgentSlug: string | undefined

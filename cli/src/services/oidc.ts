@@ -199,9 +199,12 @@ function isRecoverableSessionRefreshFailure(response: TokenResponse): boolean {
 
 function parseTokenError(response: TokenResponse, statusText: string): never {
   if (isRecoverableSessionRefreshFailure(response)) {
-    throw userError('Your sign-in session expired or was revoked. Run `masumi-agent-messenger account login` again.', {
-      code: 'AUTH_REQUIRED',
-    });
+    throw userError(
+      'Your sign-in session expired or was revoked. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
+      {
+        code: 'AUTH_REQUIRED',
+      }
+    );
   }
 
   const description = response.error_description ?? response.error ?? statusText;
@@ -486,7 +489,7 @@ function toDevicePollError(payload: TokenResponse): Error {
         code: 'OIDC_DEVICE_ACCESS_DENIED',
       });
     case 'expired_token':
-      return userError('The device authorization expired. Run `masumi-agent-messenger account login` again.', {
+      return userError('The device authorization expired. Run `masumi-agent-messenger account login start` again.', {
         code: 'OIDC_DEVICE_EXPIRED',
       });
     case 'invalid_client':
@@ -1105,7 +1108,7 @@ export async function waitForDeviceAuthorization(params: {
     await sleep(Math.min(intervalSeconds * 1000, remainingMs));
   }
 
-  throw userError('The device authorization expired. Run `masumi-agent-messenger account login` again.', {
+  throw userError('The device authorization expired. Run `masumi-agent-messenger account login start` again.', {
     code: 'OIDC_DEVICE_EXPIRED',
   });
 }
