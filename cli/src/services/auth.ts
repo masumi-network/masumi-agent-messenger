@@ -280,7 +280,7 @@ function isOidcIdTokenError(error: unknown): boolean {
 
 function invalidLocalSessionError(cause?: unknown) {
   return userError(
-    'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
+    'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal; it prints a login URL/code that the user must open in a browser to approve. Or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
     {
       code: 'AUTH_REQUIRED',
       cause,
@@ -845,7 +845,7 @@ export async function ensureAuthenticatedSession(params: {
 
   if (!storedSession) {
     throw userError(
-      'No local OIDC session found. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
+      'No local OIDC session found. Run `masumi-agent-messenger account login` in an interactive terminal; it prints a login URL/code that the user must open in a browser to approve. Or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
       {
         code: 'AUTH_REQUIRED',
       }
@@ -897,7 +897,7 @@ export async function ensureAuthenticatedSession(params: {
     if (!refreshed) {
       await secretStore.deleteOidcSession(profile.name);
       throw userError(
-        'OIDC session expired. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
+        'OIDC session expired. Run `masumi-agent-messenger account login` in an interactive terminal; it prints a login URL/code that the user must open in a browser to approve. Or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
         {
           code: 'AUTH_REQUIRED',
         }

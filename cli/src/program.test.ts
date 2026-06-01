@@ -1019,7 +1019,7 @@ describe('CLI help', () => {
     const account = buildProgram().commands.find(command => command.name() === 'account');
     const help = account?.helpInformation() ?? '';
 
-    expect(help).toContain('Authenticate and bootstrap or recover your Masumi account');
+    expect(help).toContain('Authenticate interactively with a browser login URL/code');
     expect(help).toContain('verification');
     expect(help).toContain('device');
     expect(help).toContain('backup');

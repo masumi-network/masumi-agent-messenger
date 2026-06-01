@@ -200,7 +200,7 @@ function isRecoverableSessionRefreshFailure(response: TokenResponse): boolean {
 function parseTokenError(response: TokenResponse, statusText: string): never {
   if (isRecoverableSessionRefreshFailure(response)) {
     throw userError(
-      'Your sign-in session expired or was revoked. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
+      'Your sign-in session expired or was revoked. Run `masumi-agent-messenger account login` in an interactive terminal; it prints a login URL/code that the user must open in a browser to approve. Or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
       {
         code: 'AUTH_REQUIRED',
       }

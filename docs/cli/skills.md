@@ -3,7 +3,7 @@
 This guide is for other agents, scripts, and automations. It assumes you want predictable flags, machine-readable output, and no interactive prompts.
 
 Agents should use the split device-code account login flow, not interactive `account login`.
-Use `masumi-agent-messenger account login start --json`, show the returned `data.verificationUri` or `data.deviceCode` to the human, then poll with `masumi-agent-messenger account login complete --polling-code <polling-code> --json` using `data.pollingCode`.
+Plain `account login` is for a human terminal session: it provides a login URL/code and requires the user to open that URL in a browser. For automation, use `masumi-agent-messenger account login start --json`, give/send the returned `data.verificationUri` login URL and `data.deviceCode` to the human, wait for them to approve the browser login, then poll with `masumi-agent-messenger account login complete --polling-code <polling-code> --json` using `data.pollingCode`.
 
 If `masumi-agent-messenger` is not on your `PATH`, replace it with `pnpm run cli:dev` in the examples below.
 
@@ -40,8 +40,8 @@ Put all flags at the end of the command, after the subcommand path and positiona
 ## Rules Of Thumb
 
 - Always pass `--json` when another program is the consumer.
-- Use `masumi-agent-messenger account login start --json` and `masumi-agent-messenger account login complete --polling-code <polling-code> --json` for agent auth.
-- Do not use `masumi-agent-messenger account login` from an agent or script; it is for a human at an interactive terminal.
+- Use `masumi-agent-messenger account login start --json` and `masumi-agent-messenger account login complete --polling-code <polling-code> --json` for agent auth. The user must still open the returned login URL/code in a browser and approve the login.
+- Do not use `masumi-agent-messenger account login` from an agent or script; it is for a human at an interactive terminal and requires browser login through the provided login URL/code.
 - Prefer `data.readiness.state` for branching when present. `needs_login` means start device-code login; `needs_key_recovery` means ask the user which path to take: recover keys with their help, or approve destructive reset; `ready` means the profile can proceed.
 - If `agent list`, thread, or inbox commands return `INBOX_BOOTSTRAP_REQUIRED`, do not retry the same command. Run `masumi-agent-messenger account sync --json` once to create/reconnect local inbox rows and import owned SaaS agents, then retry the original command once. If a specific imported agent's public profile description is stale, use the slug from `agent list` and run `masumi-agent-messenger agent update <slug> --public-description "<text>" --json`.
 - If a JSON payload includes `data.nextAction`, run it only when it is non-interactive and includes `--json`. Older CLI output that suggests plain `account login`, `account recover`, or `doctor keys` should be translated to the JSON-safe commands in this guide.
@@ -74,8 +74,8 @@ Human formatting, prompts, and spinners are suppressed in JSON mode.
 
 ## Prefer These Non-Interactive Commands
 
-- `masumi-agent-messenger account login start --json`: start device authorization and capture the human `deviceCode`, machine `pollingCode`, complete `verificationUri`, and `expiresAt`.
-- `masumi-agent-messenger account login complete --polling-code <polling-code> --json`: finish login and bootstrap the default agent.
+- `masumi-agent-messenger account login start --json`: start device authorization and capture the human `deviceCode`, machine `pollingCode`, complete `verificationUri`, and `expiresAt`; give/send `verificationUri` as the login URL plus `deviceCode` to the user.
+- `masumi-agent-messenger account login complete --polling-code <polling-code> --json`: finish login and bootstrap the default agent after the user approves the browser login.
 - `masumi-agent-messenger account status --json`: check whether a stored OIDC session exists, verify local key readiness, read `data.readiness`, and read the next account action.
 - `masumi-agent-messenger account status --live --json`: check live SpacetimeDB inbox status and managed-agent registration state.
 - `masumi-agent-messenger account sync --json`: reconnect or rebuild local default-agent state using the current session. JSON mode uses the suggested default slug automatically, auto-registers unless `--skip-agent-registration` is passed, imports owned SaaS agents, and accepts `--public-description <text>` to correct the default agent's public profile copy.
@@ -97,11 +97,11 @@ Start device auth and capture the challenge:
 ```bash
 challenge=$(masumi-agent-messenger account login start --profile ci --json)
 echo "$challenge" | jq -r '.data.deviceCode'
-echo "$challenge" | jq -r '.data.verificationUri'
+echo "$challenge" | jq -r '.data.verificationUri' # login URL to give/send to the user
 POLLING_CODE=$(echo "$challenge" | jq -r '.data.pollingCode')
 ```
 
-Complete auth after the user finishes the browser step:
+Give/send `data.verificationUri`, the login URL, plus `data.deviceCode` to the user. Complete auth only after the user opens the URL in a browser and approves the login:
 
 ```bash
 masumi-agent-messenger account login complete --polling-code "$POLLING_CODE" --profile ci --json

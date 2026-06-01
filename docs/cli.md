@@ -23,7 +23,7 @@ merge them. Private keys never leave the local machine.
 
 Run with no arguments to open the interactive TUI.
 
-Agents and scripts should avoid interactive auth. Use [the agent/automation guide](./cli/skills.md) and the split JSON flow: `masumi-agent-messenger account login start --json`, then `masumi-agent-messenger account login complete --polling-code <polling-code> --json`.
+Agents and scripts should avoid plain interactive auth. Use [the agent/automation guide](./cli/skills.md) and the split JSON flow: `masumi-agent-messenger account login start --json`, give/send the returned `data.verificationUri` login URL and `data.deviceCode` to the user, wait for them to approve it in a browser, then run `masumi-agent-messenger account login complete --polling-code <polling-code> --json`.
 
 Flag ordering: put all flags at the end of the command, after the subcommand path and positional arguments. Global flags (`--json`, `--profile`, `--verbose`, `--no-color`) go at the end alongside subcommand flags.
 

@@ -865,7 +865,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Your sign-in session expired or was revoked. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
+      message: 'Your sign-in session expired or was revoked. Run `masumi-agent-messenger account login` in an interactive terminal; it prints a login URL/code that the user must open in a browser to approve. Or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
@@ -902,7 +902,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal; it prints a login URL/code that the user must open in a browser to approve. Or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
@@ -927,7 +927,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal; it prints a login URL/code that the user must open in a browser to approve. Or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');
@@ -946,7 +946,7 @@ describe('auth service', () => {
       })
     ).rejects.toMatchObject({
       code: 'AUTH_REQUIRED',
-      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
+      message: 'Local OIDC session is invalid. Run `masumi-agent-messenger account login` in an interactive terminal; it prints a login URL/code that the user must open in a browser to approve. Or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>` in automation.',
     });
 
     expect(secretStore.deleteOidcSession).toHaveBeenCalledWith('default');

@@ -80,9 +80,10 @@ masumi-agent-messenger doctor --json
 masumi-agent-messenger account status --json
 ```
 
-Do not run plain `account login` from an agent. It is the human interactive
-flow. If any JSON command returns `ok: false` with `error.code: "AUTH_REQUIRED"`,
-start the split device-code flow below.
+Do not run plain `account login` from an agent. It is a human interactive flow:
+the CLI prints a login URL/code and the user must open that URL in a browser
+to approve the session. If any JSON command returns `ok: false` with
+`error.code: "AUTH_REQUIRED"`, start the split device-code flow below.
 
 Use `data.readiness.state` first when it is present:
 
@@ -94,9 +95,12 @@ If `account status --json` returns `ok: true` with `data.authenticated: false` o
 
 ```bash
 challenge=$(masumi-agent-messenger account login start --profile <profile> --json)
-echo "$challenge" | jq -r '.data.verificationUri'
+echo "$challenge" | jq -r '.data.verificationUri' # login URL to give/send to the user
+echo "$challenge" | jq -r '.data.deviceCode'
 POLLING_CODE=$(echo "$challenge" | jq -r '.data.pollingCode')
-# Surface verificationUri to the user, wait for them to confirm in their browser, then:
+# Give/send data.verificationUri, the login URL, and data.deviceCode to the user.
+# Wait until they open the URL, enter/confirm the code, and tell you the login
+# is approved. Then run:
 masumi-agent-messenger account login complete --polling-code "$POLLING_CODE" --profile <profile> --json
 ```
 
@@ -312,7 +316,7 @@ All `--json` commands return an envelope. Successful commands use `ok: true` and
 | `AUTH_REQUIRED` | No usable local OIDC session | Use `account login start --json`, then `account login complete --polling-code <polling-code> --json` |
 | `KEYCHAIN_SET_FAILED` | Could not write secret to OS keyring | Run `doctor --verbose --json` and `doctor keys --json`; the CLI now auto-falls back to the file backend if libsecret is unreachable |
 | `KEYCHAIN_GET_FAILED` | Could not read secret from OS keyring | Check `doctor --verbose --json`; use file backend if needed |
-| `AUTH_LOGIN_INTERACTIVE_REQUIRED` | Tried `account login` in non-interactive shell | Use `account login start` + `account login complete` instead |
+| `AUTH_LOGIN_INTERACTIVE_REQUIRED` | Tried `account login` in non-interactive shell | Use `account login start` + `account login complete`; the user still must open the returned login URL/code in a browser |
 | `AUTH_RECOVER_INTERACTIVE_REQUIRED` | Tried `account recover` in non-interactive shell | Ask the user which path to take: recovery via approved device/backup, or destructive key reset |
 | `OIDC_DEVICE_EXPIRED` | Device code expired before approval | Start a new `account login start` flow |
 | `OIDC_DEVICE_ACCESS_DENIED` | Browser/device approval was denied | Ask the human whether to restart auth; do not loop silently |
@@ -486,11 +490,13 @@ Start device-code auth flow:
 ```bash
 challenge=$(masumi-agent-messenger account login start --profile <profile> --json)
 echo "$challenge" | jq -r '.data.deviceCode'
-echo "$challenge" | jq -r '.data.verificationUri'
+echo "$challenge" | jq -r '.data.verificationUri' # login URL to give/send to the user
 POLLING_CODE=$(echo "$challenge" | jq -r '.data.pollingCode')
 ```
 
-Complete after user finishes the browser step:
+Give/send `data.verificationUri`, the login URL, plus `data.deviceCode` to the
+user. Wait until they open the URL in a browser, enter/confirm the code, and
+approve the login. Complete only after the user finishes that browser step:
 
 ```bash
 masumi-agent-messenger account login complete --polling-code "$POLLING_CODE" --profile <profile> --json

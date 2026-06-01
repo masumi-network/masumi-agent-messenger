@@ -313,7 +313,7 @@ function buildAccountDefaultSlugPrompt(
 function registerAccountLoginCommand(command: Command): void {
   const loginCommand = command
     .command('login')
-    .description('Authenticate and bootstrap or recover your Masumi account');
+    .description('Authenticate interactively with a browser login URL/code and bootstrap or recover your Masumi account');
 
   loginCommand
     .option('--issuer <url>', 'OIDC issuer URL')
@@ -336,7 +336,7 @@ function registerAccountLoginCommand(command: Command): void {
       const options = commandInstance.optsWithGlobals() as AccountFlowOptions;
       if (!isInteractiveAccountFlow(options)) {
         throw userError(
-          'Run `masumi-agent-messenger account login` in an interactive terminal, or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>`.',
+          'Run `masumi-agent-messenger account login` in an interactive terminal; it prints a login URL/code that the user must open in a browser to approve. Or use `masumi-agent-messenger account login start` / `masumi-agent-messenger account login complete --polling-code <polling-code>`.',
           {
             code: 'AUTH_LOGIN_INTERACTIVE_REQUIRED',
           }
@@ -425,7 +425,7 @@ function registerAccountLoginCommand(command: Command): void {
 
   loginCommand
     .command('start')
-    .description('Start device authorization and print the challenge without waiting')
+    .description('Start device authorization and print the login URL/code to give to the user')
     .option('--issuer <url>', 'OIDC issuer URL')
     .option('--client-id <id>', 'OIDC client id')
     .option('--debug', 'Log full device authorization flow details')
@@ -461,7 +461,7 @@ function registerAccountLoginCommand(command: Command): void {
 
   loginCommand
     .command('complete')
-    .description('Finish a started device authorization with a polling code')
+    .description('Finish device authorization after the user approves the browser login')
     .option('--polling-code <code>', 'Polling code returned by `account login start`')
     .option('--issuer <url>', 'OIDC issuer URL')
     .option('--client-id <id>', 'OIDC client id')

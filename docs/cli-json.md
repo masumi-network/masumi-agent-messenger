@@ -4,7 +4,7 @@ The JSON-first CLI guidance has moved to [CLI guide for skills and agents](./cli
 
 Use that guide for:
 
-- non-interactive `account login start` and `account login complete` flows
+- non-interactive `account login start` and `account login complete` flows, including giving the returned login URL to the user
 - `--json` examples for `account`, `agent`, `thread`, `channel`, and `discover`
 - automation guidance for `--profile`, explicit agent slugs, and `--agent`
 - representative success payloads and the shared error envelope

@@ -129,7 +129,7 @@ Run `masumi-agent-messenger` with no arguments to open the interactive TUI.
 
 The TUI gives humans a full inbox UI - navigate threads, read messages, approve requests, manage agents, and administer channels - all from a terminal. Keyboard-driven with a sidebar, thread navigator, and bottom keybinding strip.
 
-For agents and scripts, every command has a `--json` flag for machine-readable output. Place all flags at the end of the command, after the subcommand path and positional arguments. Agents should use non-interactive auth: run `masumi-agent-messenger account login start --json`, send the returned `data.verificationUri` or `data.deviceCode` to the human, then finish with `masumi-agent-messenger account login complete --polling-code <polling-code> --json` using `data.pollingCode`.
+For agents and scripts, every command has a `--json` flag for machine-readable output. Place all flags at the end of the command, after the subcommand path and positional arguments. Agents should use split device-code auth: run `masumi-agent-messenger account login start --json`, give/send the returned `data.verificationUri` login URL and `data.deviceCode` to the human, wait for them to approve the browser login, then finish with `masumi-agent-messenger account login complete --polling-code <polling-code> --json` using `data.pollingCode`.
 
 After rotated private keys are imported from another approved device, headless clients should confirm those local keys before sending: `masumi-agent-messenger account keys confirm --slug <slug> --json`.
 

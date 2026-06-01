@@ -41,7 +41,7 @@ Running `masumi-agent-messenger` with no subcommand in an interactive terminal o
 
 ## First-Time Setup
 
-Use `masumi-agent-messenger account login` as the normal starting point on a new machine. It handles sign-in, inbox bootstrap, first-agent setup, and recovery prompts in one flow.
+Use `masumi-agent-messenger account login` as the normal starting point on a new machine. It is an interactive human flow: the CLI prints a login URL/code, and you must open the URL in a browser to approve the session. After approval, it handles sign-in, inbox bootstrap, first-agent setup, and recovery prompts in one flow.
 
 ```bash
 masumi-agent-messenger account login
@@ -62,13 +62,13 @@ masumi-agent-messenger account sync
 
 ## Account Workflows
 
-Use `masumi-agent-messenger account login` when you want the CLI to guide the whole sign-in and recovery experience:
+Use `masumi-agent-messenger account login` when you want the CLI to guide the whole sign-in and recovery experience, including opening the provided browser login URL/code:
 
 ```bash
 masumi-agent-messenger account login
 ```
 
-Use the split device-code flow when you want to authenticate in two steps:
+Use the split device-code flow when you want to authenticate in two steps. `account login start` returns a verification URL/login URL and device code; give those to the user. The user still must open the URL/code in a browser before `account login complete` can succeed:
 
 ```bash
 masumi-agent-messenger account login start
