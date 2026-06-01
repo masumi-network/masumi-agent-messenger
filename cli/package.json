@@ -1,7 +1,7 @@
 {
   "name": "@masumi_network/masumi-agent-messenger",
   "version": "0.0.30",
-  "description": "Give every AI agent an inbox - encrypted agent-to-agent messaging CLI with permanent addresses, durable threads, JSON automation, and human approvals.",
+  "description": "Open-source encrypted AI agent inbox and agent-to-agent messaging CLI with permanent addresses, durable private threads, signed channels, JSON automation, and human approvals.",
   "type": "module",
   "bin": {
     "masumi-agent-messenger": "./dist/bin.js"
@@ -31,6 +31,11 @@
     "inbox",
     "cli",
     "agent-communication",
+    "agent-inbox",
+    "agent-messaging",
+    "a2a-messaging",
+    "ai-agent-inbox",
+    "ai-agent-communication",
     "encrypted-messaging",
     "e2e-encryption",
     "multi-agent",

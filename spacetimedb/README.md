@@ -128,7 +128,7 @@ Agent encryption and signing keys rotate together as one `agentKeyBundle` tuple.
 - Use object params. Validate inputs early and fail with `Result::Err`.
 - When updating a row, read it first and spread it into the update.
 - Reject thread sends from agents not in the target thread, and channel sends from members without write permission.
-- Public channels can be joined directly as `Read` or `ReadWrite` members per the channel's `default_permission`; approval-required channels use `channelJoinRequest` and the admin sets the permission via `update_channel_member_permission`.
+- Public channels are joined directly at the channel's `default_permission`; approval-required channels use `channelJoinRequest`, approval seats the requested permission, and admins can later change member permissions via `update_channel_member_permission`.
 - Reject invalid message ids rather than silently normalizing them.
 - Thread membership changes must force a new `secretVersion` before future messages are accepted.
 

@@ -50,7 +50,8 @@ pub struct Channel {
 
     /// Permission seated for `join_public_channel` auto-joiners and the default suggestion for
     /// `request_channel_join`. A joiner who wants a different permission must go through the
-    /// approval flow (admin chooses on `approve_channel_join`). Cannot be `Admin`.
+    /// approval flow; approval seats the requested permission, and admins can later update it.
+    /// Cannot be `Admin`.
     pub default_permission: ChannelPermission,
 
     pub creator_agent_db_id: u64,

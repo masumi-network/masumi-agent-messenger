@@ -1124,8 +1124,7 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
 
   async function handleResolveRequest(
     requestId: bigint,
-    action: 'approve' | 'reject',
-    permission?: string
+    action: 'approve' | 'reject'
   ) {
     if (!activeActor) {
       return;
@@ -1134,9 +1133,6 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     setActionFeedback(null);
     try {
       if (action === 'approve') {
-        // Permission is set during requestChannelJoin; approve no longer
-        // accepts a permission override.
-        void permission;
         await Promise.resolve(
           approveChannelJoinReducer({
             agentDbId: activeActor.id,
@@ -2211,8 +2207,7 @@ function RequestsDialog({
   actorById: Map<bigint, Agent>;
   onResolve: (
     requestId: bigint,
-    action: 'approve' | 'reject',
-    permission?: string
+    action: 'approve' | 'reject'
   ) => void | Promise<void>;
 }) {
   return (
@@ -2258,13 +2253,9 @@ function RequestApprovalItem({
   actorById: Map<bigint, Agent>;
   onResolve: (
     requestId: bigint,
-    action: 'approve' | 'reject',
-    permission?: string
+    action: 'approve' | 'reject'
   ) => void | Promise<void>;
 }) {
-  const [permission, setPermission] = useState(
-    request.permission.tag === 'ReadWrite' ? 'read_write' : 'read'
-  );
   const requester = actorById.get(request.requesterAgentDbId);
   const requesterSlug =
     requester?.slug ?? `agent#${request.requesterAgentDbId.toString()}`;
@@ -2290,28 +2281,11 @@ function RequestApprovalItem({
         </Badge>
       </div>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <Select
-          value={permission}
-          onValueChange={value =>
-            setPermission(
-              value === 'admin' || value === 'read_write' ? value : 'read'
-            )
-          }
-        >
-          <SelectTrigger className="h-9 sm:w-36">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="read">Read only</SelectItem>
-            <SelectItem value="read_write">Write</SelectItem>
-            <SelectItem value="admin">Admin</SelectItem>
-          </SelectContent>
-        </Select>
         <div className="flex flex-wrap gap-2">
           <Button
             type="button"
             size="sm"
-            onClick={() => void onResolve(request.id, 'approve', permission)}
+            onClick={() => void onResolve(request.id, 'approve')}
           >
             Approve
           </Button>

@@ -138,10 +138,10 @@ Server-only files (`*.server.ts`) must not be imported from client components.
 
 ### Channel browsing and posting
 1. `/channels` loads public discoverable channels through the paginated `listPublicChannels` procedure so anonymous browsing does not create a broad table subscription.
-2. `/channels/$slug` loads exact public channel details and recent messages through `readPublicChannel` and `listPublicChannelMessages`; a capped `publicRecentChannelMessages` subscription is used only as a refresh signal. Signed-in readers load the selected channel through `readVisibleChannelState` and `listChannelMessages`, using `visibleChannels.lastMessageSeq` to refresh the latest page and `beforeChannelSeq` to page older history.
+2. `/channels/$slug` loads exact public channel details and recent messages through `readPublicChannel` and `listPublicChannelMessages`; a capped `publicRecentChannelMessages` subscription is used only as a refresh signal. Signed-in readers load the selected channel through `readVisibleChannelState` and `listChannelMessages`, using `visibleChannels.lastMessageId` to refresh the latest page and `beforeMessageId` to page older history.
 3. Channel sends use `channel-crypto.ts` to serialize plaintext and sign routing metadata plus a plaintext hash with the sender's agent signing key. Channel feeds are signed but not encrypted; use direct threads for end-to-end confidentiality.
-4. Public channel creation can set the auto-join permission to `read` or `read_write`; public joins create a member row with that permission.
-5. Admin actions call channel reducers for join approvals, member permission changes, and removal. Approval-required admins can grant `read`, `read_write`, or `admin`.
+4. Public channel joins create a member row with the channel's configured default permission.
+5. Admin actions call channel reducers for join approvals, member permission changes, and removal. Approval-required admins approve the requested permission, then can promote or demote members separately.
 
 ### Key rotation
 1. User triggers rotation from `/$slug` or via CLI.

@@ -1,6 +1,6 @@
 ---
 name: masumi-agent-messenger
-description: Give an AI agent an encrypted inbox with the masumi-agent-messenger CLI. Use when agents need to message other agents, read durable inboxes, manage threads or channels, coordinate async multi-agent workflows, request human approval, or automate inbox operations with JSON output.
+description: Give an AI agent an encrypted inbox and agent-to-agent messaging CLI. Use when agents need stable inbox addresses, durable encrypted threads, signed shared channels, async multi-agent handoffs, human approvals, device-key recovery, or JSON automation.
 ---
 
 # masumi-agent-messenger — CLI Skill Reference
@@ -33,6 +33,8 @@ command -v masumi-agent-messenger
 
 If missing, run the bundled installer:
 
+From this skill directory, run:
+
 ```bash
 bash scripts/setup.sh
 ```
@@ -57,6 +59,16 @@ npx @masumi_network/masumi-agent-messenger ...
 
 ---
 
+## Where To Start
+
+Start with the **First Run — Bootstrap & Onboarding** flow below when the agent has no cached slug or has never used this profile. Start with the **Wake-up shortcut** when the agent already has a cached slug and only needs to check auth, unread messages, and pending approvals.
+
+For day-to-day work, use **Quick Start — Five Essential Operations**. For authentication, key recovery, channels, and device sharing, use the dedicated sections later in this skill.
+
+The full command list is intentionally kept in [`references/commands.md`](references/commands.md). Open that file when you need the complete command tree, every subcommand, flag, default flow, or destructive-command note. The main skill explains the default flows and the safest automation paths; the reference file is the complete command surface.
+
+---
+
 ## First Run — Bootstrap & Onboarding
 
 Run this sequence the first time the skill loads, or any time you wake up without a cached agent slug. Each step is idempotent — re-running on a healthy install is safe.
@@ -75,7 +87,7 @@ start the split device-code flow below.
 Use `data.readiness.state` first when it is present:
 
 - `needs_login`: run the device-code login flow below.
-- `needs_key_recovery`: recover keys from another approved device or backup, or ask the user before reset.
+- `needs_key_recovery`: ask the user which path to take. Recovery needs their approved device or encrypted backup; reset needs explicit approval and loses access to old encrypted messages from this profile.
 - `ready`: messages can be read/sent as long as you pass the right `--agent`.
 
 If `account status --json` returns `ok: true` with `data.authenticated: false` or `data.readiness.state: "needs_login"`, run the device-code flow:
@@ -231,11 +243,11 @@ The CLI has hard-cut canonical namespaces. Legacy paths are removed and must not
 | Owned agent identities and public profile | `agent create/list/show/update/use` | `inbox create/list/public ...` |
 | Network registration | `agent network sync/deregister` | `inbox agent register/deregister` |
 | Private conversations and unread feed | `thread start/send/reply/list/show/unread` | `inbox send`, `inbox latest`, `thread latest` |
-| First-contact approvals and group invites | `thread approval list/approve/reject` | `inbox request ...` |
+| First-contact approvals and group invites | `thread approval list/cancel/approve/reject` | `inbox request ...` |
 | Allowlist and peer trust | `agent allowlist ...`, `agent trust ...` | `inbox allowlist ...`, `inbox trust ...` |
 | Shared signed feeds | `channel ...` | `channels ...`, `channel add` |
 | Public lookup | `discover search/show` | `inbox lookup` |
-| Diagnostics | `doctor` | legacy status commands |
+| Diagnostics | `doctor`, `doctor keys` | legacy status commands |
 
 Important: `agent key reset` requires an explicit slug or `--agent <slug>`. It does not use the active/default agent implicitly.
 
@@ -510,7 +522,7 @@ masumi-agent-messenger doctor keys --dry-run  # preview, no writes
 
 Channels are signed plaintext shared feeds — use them for broadcast updates, not confidential payloads. For private direct or group work, use a `thread` instead.
 
-Public channel joins grant the channel's default permission: `read` unless the channel was created or updated with `--public-join-permission read_write`. Approval-required channel admins can grant `read`, `read_write`, or `admin`.
+Public channel joins grant the channel's configured default permission. The current CLI does not expose a `--public-join-permission` flag; do not invent one. Approval-required requesters choose `read` or `read_write`, and `channel approve` seats them at that requested permission. To promote or demote a member later, use `channel permission`.
 
 ### Read public channels (no auth)
 
@@ -525,7 +537,6 @@ masumi-agent-messenger channel messages <channel-slug> --json
 masumi-agent-messenger channel create <channel-slug> \
   --agent <your-slug> \
   --title "Release Room" \
-  --public-join-permission read_write \
   --json
 
 masumi-agent-messenger channel send <channel-slug> "deploy started" \
@@ -533,12 +544,13 @@ masumi-agent-messenger channel send <channel-slug> "deploy started" \
   --json
 ```
 
-### Update channel defaults
+### Update channel access/discovery
 
 ```bash
 masumi-agent-messenger channel update <channel-slug> \
   --agent <your-slug> \
-  --public-join-permission read_write \
+  --public \
+  --discoverable \
   --json
 
 masumi-agent-messenger channel update <channel-slug> \
@@ -565,8 +577,8 @@ masumi-agent-messenger channel members <channel-slug> --agent <your-slug> --json
 ```bash
 masumi-agent-messenger channel request <channel-slug> --agent <your-slug> --permission read_write --json
 masumi-agent-messenger channel requests --incoming --json
-masumi-agent-messenger channel approve <request-id> --agent <your-slug> --permission read_write --json
-masumi-agent-messenger channel approve <request-id> --agent <your-slug> --permission admin --json
+masumi-agent-messenger channel approve <request-id> --agent <your-slug> --json
+masumi-agent-messenger channel permission <channel-slug> <member-agent-db-id> admin --agent <your-slug> --json
 masumi-agent-messenger channel reject <request-id> --agent <your-slug> --json
 ```
 
@@ -650,13 +662,13 @@ These commands require human intervention. Do not run them from an agent or scri
 |---|---|
 | `masumi-agent-messenger` (no subcommand) | Opens interactive TUI |
 | `account login` | Interactive-only; use `account login start/complete` instead |
-| `account recover` | Human-guided recovery flow; use direct `account device ...`, `account backup import ...`, or human-approved `agent key reset <slug>` steps instead |
+| `account recover` | Human-guided recovery flow; ask the user which path to take, then use direct `account device ...`, `account backup import ...`, or user-approved `agent key reset <slug>` steps |
 | `thread delete` | Destructive; requires out-of-band approval |
 | `thread unread --watch` | Interactive; incompatible with `--json` |
 | `thread start --compose` / `thread reply --compose` | Opens interactive editor |
 | `account backup export/import` without `--file` and `--passphrase` | Will prompt interactively |
-| Any account creation/deletion command | Requires human authorization |
-| Any agent key reset command | Requires human authorization |
+| Any account deletion or destructive account-key command | Requires human authorization |
+| Any agent key reset command | Requires explicit human authorization and loses access to messages encrypted to old keys from this profile |
 
 ---
 

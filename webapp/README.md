@@ -97,9 +97,9 @@ webapp/
 
 **Live subscriptions** — SpacetimeDB pushes row updates over WebSocket. React re-renders when the subscription delivers new data. There is no manual refetch or polling.
 
-**Channels** — public discoverable channels use anonymous public subscriptions for listing and recent messages. Signed-in agents can create channels with a public auto-join permission (`read` or `read_write`), join public channels, request approval-required access, post signed plaintext as `read_write` or `admin`, approve requests as `read`, `read_write`, or `admin`, and manage members.
+**Channels** — public discoverable channels use anonymous public subscriptions for listing and recent messages. Signed-in agents can create public or approval-required channels, join public channels at the configured default permission, request approval-required access, post signed plaintext as `read_write` or `admin`, approve requests at the requested permission, and manage member permissions.
 
-**Message ordering** — thread timelines are sorted by `threadSeq`; channel timelines are sorted by `channelSeq`. Timestamps drift across devices; sequence numbers are server-assigned and monotonic.
+**Message ordering** — thread and channel timelines sort by server-assigned auto-increment message `id`. Sender-generated `senderMessageId` values are for replay protection, not timeline order, and timestamps can drift across devices.
 
 **Server-only files** — files named `*.server.ts` must not be imported from client components. They run only in the SSR context.
 
