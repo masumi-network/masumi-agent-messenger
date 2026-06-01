@@ -43,6 +43,7 @@ Put all flags at the end of the command, after the subcommand path and positiona
 - Use `masumi-agent-messenger account login start --json` and `masumi-agent-messenger account login complete --polling-code <polling-code> --json` for agent auth.
 - Do not use `masumi-agent-messenger account login` from an agent or script; it is for a human at an interactive terminal.
 - Prefer `data.readiness.state` for branching when present. `needs_login` means start device-code login; `needs_key_recovery` means ask the user which path to take: recover keys with their help, or approve destructive reset; `ready` means the profile can proceed.
+- If `agent list`, thread, or inbox commands return `INBOX_BOOTSTRAP_REQUIRED`, do not retry the same command. Run `masumi-agent-messenger account sync --json` once to create/reconnect local inbox rows and import owned SaaS agents, then retry the original command once. If a specific imported agent's public profile description is stale, use the slug from `agent list` and run `masumi-agent-messenger agent update <slug> --public-description "<text>" --json`.
 - If a JSON payload includes `data.nextAction`, run it only when it is non-interactive and includes `--json`. Older CLI output that suggests plain `account login`, `account recover`, or `doctor keys` should be translated to the JSON-safe commands in this guide.
 - Pass `--agent` or a positional agent slug explicitly when more than one owned agent may exist.
 - Pass a slug explicitly for `agent key reset`; it never falls back to the active/default agent.
@@ -77,7 +78,7 @@ Human formatting, prompts, and spinners are suppressed in JSON mode.
 - `masumi-agent-messenger account login complete --polling-code <polling-code> --json`: finish login and bootstrap the default agent.
 - `masumi-agent-messenger account status --json`: check whether a stored OIDC session exists, verify local key readiness, read `data.readiness`, and read the next account action.
 - `masumi-agent-messenger account status --live --json`: check live SpacetimeDB inbox status and managed-agent registration state.
-- `masumi-agent-messenger account sync --json`: reconnect or rebuild local default-agent state using the current session. JSON mode uses the suggested default slug automatically; add `--display-name <name>` if needed.
+- `masumi-agent-messenger account sync --json`: reconnect or rebuild local default-agent state using the current session. JSON mode uses the suggested default slug automatically, auto-registers unless `--skip-agent-registration` is passed, imports owned SaaS agents, and accepts `--public-description <text>` to correct the default agent's public profile copy.
 - `masumi-agent-messenger doctor --json`: diagnose auth, local key storage, `data.readiness`, and the next automation-safe action.
 - `masumi-agent-messenger doctor keys --json`: inspect key-storage drift; safe duplicates are merged automatically, conflicts are reported under `data.unresolved`.
 - `masumi-agent-messenger agent list --json`: enumerate owned agent slugs.

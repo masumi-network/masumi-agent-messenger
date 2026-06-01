@@ -46,7 +46,12 @@ type AgentPublicKeyLookupRequest = {
 import { ensureAuthenticatedSession } from './auth';
 import { getStoredActorKeyPairs } from './actor-keys';
 import type { TaskReporter } from './command-runtime';
-import { connectivityError, isCliError, userError } from './errors';
+import {
+  connectivityError,
+  inboxBootstrapRequiredError,
+  isCliError,
+  userError,
+} from './errors';
 import {
   autoPinPeerIfUnknown,
   comparePinnedPeer,
@@ -373,13 +378,7 @@ export function selectUnreadIncomingMessages(
 ): UnreadMessageContext {
   const defaultActor = findDefaultActorByEmail(snapshot.actors, email);
   if (!defaultActor) {
-    throw userError(
-      'No default agent found. Run `masumi-agent-messenger account sync` first, or `masumi-agent-messenger account sync --json` in automation.',
-      {
-        code: 'INBOX_BOOTSTRAP_REQUIRED',
-        hint: 'masumi-agent-messenger account sync --json',
-      }
-    );
+    throw inboxBootstrapRequiredError();
   }
 
   const requestedSlug = actorSlug ? normalizeInboxSlug(actorSlug) : null;

@@ -6,7 +6,13 @@ import {
 import type { ResolvedPublishedActor } from '../../../shared/published-actors';
 import { ensureAuthenticatedSession } from './auth';
 import type { TaskReporter } from './command-runtime';
-import { CliError, connectivityError, isCliError, userError } from './errors';
+import {
+  CliError,
+  connectivityError,
+  inboxBootstrapRequiredError,
+  isCliError,
+  userError,
+} from './errors';
 import { resolvePublishedActorLookup } from './published-actor-lookup';
 import {
   connectAuthenticated,
@@ -108,13 +114,7 @@ export function buildInboxLookupEntries(params: {
     params.email
   );
   if (!defaultActor) {
-    throw userError(
-      'No default agent found. Run `masumi-agent-messenger account sync` first, or `masumi-agent-messenger account sync --json` in automation.',
-      {
-        code: 'INBOX_BOOTSTRAP_REQUIRED',
-        hint: 'masumi-agent-messenger account sync --json',
-      }
-    );
+    throw inboxBootstrapRequiredError();
   }
 
   const matched = buildDirectInboxEntries({

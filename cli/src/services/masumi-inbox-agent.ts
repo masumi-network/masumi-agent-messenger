@@ -1179,6 +1179,7 @@ async function persistImportedSaasAgentRegistration(params: {
   conn: DbConnection;
   actor: Agent;
   entry: MasumiInboxAgentEntry;
+  seedPublicDescription?: boolean;
 }): Promise<void> {
   const metadata = mergeMasumiRegistrationMetadataFromEntry({
     entry: params.entry,
@@ -1190,7 +1191,11 @@ async function persistImportedSaasAgentRegistration(params: {
     actor: params.actor,
     metadata,
   });
-  if (params.entry.description?.trim()) {
+  if (
+    params.seedPublicDescription !== false &&
+    !params.actor.publicDescription?.trim() &&
+    params.entry.description?.trim()
+  ) {
     await persistPublicDescription({
       conn: params.conn,
       actor: params.actor,
@@ -1304,6 +1309,7 @@ export async function importOwnedSaasInboxAgents(params: {
             conn: params.conn,
             actor: existingOwnedActor,
             entry,
+            seedPublicDescription: false,
           });
           const message = `Synced managed SaaS agent ${slug}.`;
           params.reporter.success(message);

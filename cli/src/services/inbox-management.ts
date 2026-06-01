@@ -17,7 +17,12 @@ import {
   previewStoredActorKeyRotation,
 } from './actor-keys';
 import type { TaskReporter } from './command-runtime';
-import { connectivityError, isCliError, userError } from './errors';
+import {
+  connectivityError,
+  inboxBootstrapRequiredError,
+  isCliError,
+  userError,
+} from './errors';
 import {
   exportNamespaceKeyShareSnapshot,
   getOrCreateCliDeviceKeyMaterial,
@@ -134,13 +139,7 @@ function requireOwnedActor(params: {
     params.actors.find(actor => actor.email === params.email && actor.isDefault) ??
     null;
   if (!defaultActor) {
-    throw userError(
-      'No default agent found. Run `masumi-agent-messenger account sync` first, or `masumi-agent-messenger account sync --json` in automation.',
-      {
-        code: 'INBOX_BOOTSTRAP_REQUIRED',
-        hint: 'masumi-agent-messenger account sync --json',
-      }
-    );
+    throw inboxBootstrapRequiredError();
   }
 
   const ownedActors = params.actors.filter(actor => actor.accountId === defaultActor.accountId);

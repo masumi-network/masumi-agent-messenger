@@ -38,6 +38,16 @@ export function userError(
   });
 }
 
+export function inboxBootstrapRequiredError(): CliError {
+  return userError(
+    'This CLI profile is signed in, but no local default inbox is bootstrapped yet. Public discovery can already show registered agents in this state; run `masumi-agent-messenger account sync --json` once to create or reconnect the local inbox rows, import owned SaaS agents, and then retry the original command.',
+    {
+      code: 'INBOX_BOOTSTRAP_REQUIRED',
+      hint: 'masumi-agent-messenger account sync --json',
+    }
+  );
+}
+
 export function connectivityError(
   message: string,
   options?: {

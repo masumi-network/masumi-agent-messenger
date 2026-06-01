@@ -8,7 +8,11 @@ import type {
 } from '../../../webapp/src/module_bindings/types';
 import { ensureAuthenticatedSession } from './auth';
 import type { TaskReporter } from './command-runtime';
-import { connectivityError, userError } from './errors';
+import {
+  connectivityError,
+  inboxBootstrapRequiredError,
+  userError,
+} from './errors';
 import { resolvePublishedActorLookup } from './published-actor-lookup';
 import {
   connectAuthenticated,
@@ -23,13 +27,7 @@ function requireDefaultOwnedActor(
 ): Agent {
   const actor = actors.find(row => row.isDefault && row.email === email);
   if (!actor) {
-    throw userError(
-      'No default agent found. Run `masumi-agent-messenger account sync` first, or `masumi-agent-messenger account sync --json` in automation.',
-      {
-        code: 'INBOX_BOOTSTRAP_REQUIRED',
-        hint: 'masumi-agent-messenger account sync --json',
-      }
-    );
+    throw inboxBootstrapRequiredError();
   }
   return actor;
 }

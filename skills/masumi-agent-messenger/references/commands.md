@@ -137,6 +137,7 @@ Use this map before choosing a command. For agent/script workflows, every comman
 |---|---|---|
 | Unknown local state | `doctor --json`, then `account status --json` | Branch on `data.readiness.state` when present. Do not run interactive login or recovery from automation. |
 | Not signed in | `account login start --json` | Show `data.verificationUri` and `data.deviceCode` to the user, wait for confirmation, then run `account login complete --polling-code <code> --json`. |
+| `INBOX_BOOTSTRAP_REQUIRED` from `agent list`, thread, or inbox commands | `account sync --json` | This means the local CLI profile is signed in but has no default inbox rows yet. Public discovery may already be registered. After sync, retry the original command once. To correct stale profile text for a specific imported agent, run `agent update <slug> --public-description "<text>" --json`. |
 | Missing or mismatched private keys | `account status --json` or `doctor --json` | Ask the user which path to take. Recovery uses `account device request/approve/claim` or `account backup import`; reset uses `agent key reset <slug>` only after explicit approval and makes old encrypted messages unreadable from this profile. |
 | Imported rotated keys are pending confirmation | `account keys confirm --slug <slug> --json` | Re-run `account status --json`, then resume reading or sending. |
 | No owned agent slug cached | `agent list --json` | If none exist, ask the user for slug, display name, and public description, then run `agent create`. If several exist, ask which slug to use, then `agent use <slug>`. |
@@ -156,7 +157,7 @@ Authentication, recovery, device, backup, and local-key commands.
 | `account login start` | `[--issuer <url>]`, `[--client-id <id>]`, `[--debug]` | Start device-code auth for automation. Show the returned verification URL/code to the user, then complete with the polling code. |
 | `account login complete` | `[--polling-code <code>]`, `[--issuer <url>]`, `[--client-id <id>]`, `[--skip-agent-registration]`, `[--disable-linked-email]`, `[--public-description <text>]`, `[--public-description-file <path>]`, `[--debug]` | Finish device-code auth. If keys are missing afterward, ask the user to choose recovery or reset. |
 | `account verification resend` | `--email <email>`, `[--issuer <url>]`, `[--callback-url <url>]` | Resend email verification. |
-| `account sync` | `[--display-name <name>]`, `[--skip-agent-registration]`, `[--disable-linked-email]`, `[--public-description <text>]`, `[--public-description-file <path>]` | Reconnect or rebuild default agent state from the current session. Interactive first-time sync prompts for the public slug; JSON mode uses the suggested slug automatically. |
+| `account sync` | `[--display-name <name>]`, `[--skip-agent-registration]`, `[--disable-linked-email]`, `[--public-description <text>]`, `[--public-description-file <path>]` | Reconnect or rebuild default agent state from the current session. JSON mode auto-registers the default managed agent unless `--skip-agent-registration` is passed, uses the suggested slug automatically, and imports owned SaaS agents. |
 | `account recover` | | Human-guided local key recovery. Automation should ask the user which path to take, then use direct device-share, backup import, or approved key reset commands. |
 | `account device request` | | Register a key-share request on a new device. |
 | `account device claim` | `[--timeout <sec>]` | Import approved keys on the new device. |
@@ -177,7 +178,7 @@ Owned agent identity, profile, allowlist, and network commands.
 | Command | Key Flags | Notes |
 |---|---|---|
 | `agent list` | `[--sort <unread\|name\|updated>]`, `[--view <compact\|detailed>]` | List owned agents for the current account. |
-| `agent create` | `<slug>`, `[--display-name <name>]`, `[--skip-agent-registration]`, `[--disable-linked-email]`, `[--public-description <text>]`, `[--public-description-file <path>]` | Create a new owned agent slug. Also registers on the network unless `--skip-agent-registration`. |
+| `agent create` | `<slug>`, `[--display-name <name>]`, `[--skip-agent-registration]`, `[--disable-linked-email]`, `[--public-description <text>]`, `[--public-description-file <path>]` | Create a new owned agent slug. In JSON/non-interactive mode it auto-registers on the network unless `--skip-agent-registration` is passed. |
 | `agent use` | `<slug>` | Persist the active agent for this CLI profile. |
 | `agent show` | `[slug]`, `[--agent <slug>]` | Show one owned agent and its public/profile state. |
 | `agent update` | `[slug]`, `[--agent <slug>]`, `[--display-name <name>]`, `[--clear-display-name]`, `[--public-description <text>]`, `[--public-description-file <path>]`, `[--clear-public-description]`, `[--linked-email <visible\|hidden>]` | Update one owned agent profile. |

@@ -428,6 +428,59 @@ describe('importOwnedSaasInboxAgents', () => {
     expect(filterStatuses).toEqual(['Registered', 'Pending']);
   });
 
+  it('does not seed stale SaaS descriptions onto existing local agents', async () => {
+    const defaultActor = actor({
+      id: 1n,
+      accountId: 10n,
+      email: 'agent@example.com',
+      slug: 'agent',
+      isDefault: true,
+      publicIdentity: 'agent',
+      displayName: 'Agent',
+      currentKeyBundleVersion: 1,
+      createdAt: timestamp(1n),
+      updatedAt: timestamp(1n),
+    });
+    const existingActor = actor({
+      id: 2n,
+      accountId: 10n,
+      email: 'agent@example.com',
+      slug: 'saas-bot',
+      isDefault: false,
+      publicIdentity: 'saas-bot',
+      displayName: 'SaaS Bot',
+      currentKeyBundleVersion: 1,
+      createdAt: timestamp(2n),
+      updatedAt: timestamp(2n),
+    });
+    vi.mocked(readAccounts).mockResolvedValue({
+      accounts: [],
+      actors: [defaultActor, existingActor],
+    });
+    mockOwnedAgentImportFetch([
+      ownedPayAgentRecord({ description: 'Stale SaaS description' }),
+    ]);
+
+    const conn = createImportConn();
+    const summary = await importOwnedSaasInboxAgents({
+      profile: importProfile,
+      session: importSession,
+      conn,
+      email: 'agent@example.com',
+      reporter: importReporter(),
+      apply: true,
+    });
+
+    expect(summary.synced).toBe(1);
+    expect(conn.reducers.upsertMasumiRegistration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentDbId: 2n,
+        masumiInboxAgentId: 'pay-agent-1',
+      })
+    );
+    expect(conn.reducers.updateAgentProfile).not.toHaveBeenCalled();
+  });
+
   it('reports missing SaaS agents without creating them during doctor checks', async () => {
     const defaultActor = actor({
       id: 1n,

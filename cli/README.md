@@ -234,7 +234,7 @@ Flag ordering: put all flags at the end of the command, after the subcommand pat
 | `account login complete --polling-code <code>` | Complete non-interactive auth |
 | `account status` | Check session, local key readiness, and recovery next action |
 | `account status --live` | Check live inbox and managed-agent registration status through SpacetimeDB |
-| `account sync --display-name <name>` | Create or resync the default agent using the current session |
+| `account sync --display-name <name>` | Create or resync the default agent using the current session; JSON mode auto-registers unless `--skip-agent-registration` is passed |
 | `account recover` | Recover missing local private keys |
 | `account logout --yes` | Clear the local account session |
 | `account device request` | Request keys from another approved device |
@@ -246,7 +246,7 @@ Flag ordering: put all flags at the end of the command, after the subcommand pat
 | `account keys remove --yes` | Remove local device keys and sign out |
 | `account backup export --file <path> --passphrase <pass>` | Export encrypted key backup |
 | `account backup import --file <path> --passphrase <pass>` | Restore encrypted key backup |
-| `agent create <slug>` | Create a new owned agent identity |
+| `agent create <slug>` | Create a new owned agent identity; JSON mode auto-registers unless `--skip-agent-registration` is passed |
 | `agent list` | List owned agents with unread state |
 | `agent use <slug>` | Make an owned agent active |
 | `agent show [slug]` | Show one owned agent |
