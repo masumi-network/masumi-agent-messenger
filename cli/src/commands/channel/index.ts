@@ -16,6 +16,7 @@ import {
   showPublicChannel,
   updateChannelSettings,
 } from '../../services/channel';
+import { resolvePreferredAgentSlug } from '../../services/agent-state';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
 import { userError } from '../../services/errors';
 import { renderEmpty, renderKeyValue, renderTable, type TableColumn } from '../../services/render';
@@ -152,7 +153,7 @@ export function registerChannelCommands(program: Command): void {
     .description('Read public recent messages, or authenticated paged channel history')
     .argument('<slug>', 'Channel slug')
     .option('--authenticated', 'Use authenticated channel history access')
-    .option('--agent <slug>', 'Owned agent slug for authenticated history')
+    .option('--agent <slug>', 'Override active agent for authenticated history')
     .option('--before-message-id <id>', 'Read messages before this message id')
     .option('--limit <count>', 'Maximum messages to return, capped by the server')
     .action(async function (this: Command, slug: string) {
@@ -163,6 +164,9 @@ export function registerChannelCommands(program: Command): void {
           options.beforeMessageId ||
           options.limit
       );
+      const actorSlug = useAuthenticatedHistory
+        ? await resolvePreferredAgentSlug(options.profile, options.agent)
+        : undefined;
       await runCommandAction({
         title: 'Masumi channel messages',
         options,
@@ -170,7 +174,7 @@ export function registerChannelCommands(program: Command): void {
           useAuthenticatedHistory
             ? readAuthenticatedChannelMessages({
                 profileName: options.profile,
-                actorSlug: options.agent,
+                actorSlug,
                 slug,
                 beforeMessageId: options.beforeMessageId,
                 limit: options.limit,
@@ -202,18 +206,19 @@ export function registerChannelCommands(program: Command): void {
     .command('members')
     .description('List channel members as a member')
     .argument('<slug>', 'Channel slug')
-    .option('--agent <slug>', 'Member agent slug')
+    .option('--agent <slug>', 'Override active member agent')
     .option('--after-member-id <id>', 'Continue after this member row id')
     .option('--limit <count>', 'Maximum members to return, capped by the server')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi channel members',
         options,
         run: ({ reporter }) =>
           listChannelMembers({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             slug,
             afterMemberId: options.afterMemberId,
             limit: options.limit,
@@ -248,20 +253,21 @@ export function registerChannelCommands(program: Command): void {
     .command('create')
     .description('Create a channel from an owned agent')
     .argument('<slug>', 'Channel slug')
-    .option('--agent <slug>', 'Owned agent slug to create from')
+    .option('--agent <slug>', 'Override active agent to create from')
     .option('--title <title>', 'Channel title')
     .option('--description <text>', 'Channel description')
     .option('--approval-required', 'Require admin approval to join')
     .option('--no-discoverable', 'Hide from discovery/search surfaces')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi channel create',
         options,
         run: ({ reporter }) =>
           createChannel({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             slug,
             title: options.title,
             description: options.description,
@@ -280,16 +286,17 @@ export function registerChannelCommands(program: Command): void {
     .command('join')
     .description('Join a public channel')
     .argument('<slug>', 'Channel slug')
-    .option('--agent <slug>', 'Owned agent slug to join as')
+    .option('--agent <slug>', 'Override active agent to join as')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi channel join',
         options,
         run: ({ reporter }) =>
           joinPublicChannel({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             slug,
             reporter,
           }),
@@ -306,13 +313,14 @@ export function registerChannelCommands(program: Command): void {
     .command('update')
     .description('Update channel access and discovery settings')
     .argument('<slug>', 'Channel slug')
-    .option('--agent <slug>', 'Admin agent slug')
+    .option('--agent <slug>', 'Override active admin agent')
     .option('--public', 'Allow direct public joins')
     .option('--approval-required', 'Require admin approval to join')
     .option('--discoverable', 'Show in discovery/search surfaces')
     .option('--no-discoverable', 'Hide from discovery/search surfaces')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       const accessMode = resolveAccessModeOption(options);
       if (
         accessMode === undefined &&
@@ -328,7 +336,7 @@ export function registerChannelCommands(program: Command): void {
         run: ({ reporter }) =>
           updateChannelSettings({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             slug,
             accessMode,
             discoverable: options.discoverable,
@@ -350,17 +358,18 @@ export function registerChannelCommands(program: Command): void {
     .command('request')
     .description('Request access to an approval-required channel')
     .argument('<slug>', 'Channel slug')
-    .option('--agent <slug>', 'Owned agent slug to request as')
+    .option('--agent <slug>', 'Override active agent to request as')
     .option('--permission <permission>', 'Requested permission: read or read_write', 'read')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi channel request',
         options,
         run: ({ reporter }) =>
           requestChannelJoin({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             slug,
             permission: options.permission ?? 'read',
             reporter,
@@ -375,6 +384,7 @@ export function registerChannelCommands(program: Command): void {
   channel
     .command('requests')
     .description('List visible channel join requests (pending by default)')
+    .option('--agent <slug>', 'Override active agent context')
     .option('--incoming', 'Show only requests to channels this agent admins')
     .option('--outgoing', 'Show only requests this agent made')
     .option('--all', 'Include resolved (approved/rejected) requests')
@@ -388,12 +398,14 @@ export function registerChannelCommands(program: Command): void {
         : options.outgoing
           ? ('outgoing' as const)
           : undefined;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi channel requests',
         options,
         run: ({ reporter }) =>
           listChannelJoinRequests({
             profileName: options.profile,
+            actorSlug,
             direction,
             includeResolved: options.all === true,
             reporter,
@@ -431,17 +443,18 @@ export function registerChannelCommands(program: Command): void {
     .command('approvals')
     .description('List join approvals for one channel you administer')
     .argument('<slug>', 'Channel slug')
-    .option('--agent <slug>', 'Admin agent slug')
+    .option('--agent <slug>', 'Override active admin agent')
     .option('--all', 'Include resolved (approved/rejected) requests')
     .action(async function (this: Command, slug: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi channel approvals',
         options,
         run: ({ reporter }) =>
           listChannelJoinRequests({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             slug,
             direction: 'incoming',
             includeResolved: options.all === true,
@@ -477,16 +490,17 @@ export function registerChannelCommands(program: Command): void {
     .command('approve')
     .description('Approve a channel join request')
     .argument('<requestId>', 'Visible request id')
-    .option('--agent <slug>', 'Admin agent slug')
+    .option('--agent <slug>', 'Override active admin agent')
     .action(async function (this: Command, requestId: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi channel approve',
         options,
         run: ({ reporter }) =>
           approveChannelJoin({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             requestId,
             reporter,
           }),
@@ -503,16 +517,17 @@ export function registerChannelCommands(program: Command): void {
     .command('reject')
     .description('Reject a channel join request')
     .argument('<requestId>', 'Visible request id')
-    .option('--agent <slug>', 'Admin agent slug')
+    .option('--agent <slug>', 'Override active admin agent')
     .action(async function (this: Command, requestId: string) {
       const options = this.optsWithGlobals() as ChannelOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi channel reject',
         options,
         run: ({ reporter }) =>
           rejectChannelJoin({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             requestId,
             reporter,
           }),
@@ -529,7 +544,7 @@ export function registerChannelCommands(program: Command): void {
     .argument('<slug>', 'Channel slug')
     .argument('<memberAgentDbId>', 'Member agent row id')
     .argument('<permission>', 'read, read_write, or admin')
-    .option('--agent <slug>', 'Admin agent slug')
+    .option('--agent <slug>', 'Override active admin agent')
     .action(
       async function (
         this: Command,
@@ -538,13 +553,14 @@ export function registerChannelCommands(program: Command): void {
         permission: string
       ) {
         const options = this.optsWithGlobals() as ChannelOptions;
+        const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
         await runCommandAction({
           title: 'Masumi channel permission',
           options,
           run: ({ reporter }) =>
             updateChannelMemberPermission({
               profileName: options.profile,
-              actorSlug: options.agent,
+              actorSlug,
               slug,
               memberAgentDbId,
               permission,
@@ -563,10 +579,11 @@ export function registerChannelCommands(program: Command): void {
     .description('Remove a channel member (destructive; requires --confirm)')
     .argument('<slug>', 'Channel slug')
     .argument('<memberAgentDbId>', 'Member agent row id')
-    .option('--agent <slug>', 'Admin agent slug')
+    .option('--agent <slug>', 'Override active admin agent')
     .option('--confirm', 'Confirm the destructive removal', false)
     .action(async function (this: Command, slug: string, memberAgentDbId: string) {
       const options = this.optsWithGlobals() as ChannelOptions & { confirm?: boolean };
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       if (!options.confirm) {
         throw userError(
           `Refusing to remove member ${memberAgentDbId} from channel \`${slug}\` without --confirm. Re-run with --confirm to proceed.`,
@@ -579,7 +596,7 @@ export function registerChannelCommands(program: Command): void {
         run: ({ reporter }) =>
           removeChannelMember({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             slug,
             memberAgentDbId,
             reporter,
@@ -596,7 +613,7 @@ export function registerChannelCommands(program: Command): void {
     .description('Send a signed channel message')
     .argument('<slug>', 'Channel slug')
     .argument('[message...]', 'Message text')
-    .option('--agent <slug>', 'Owned agent slug to send as')
+    .option('--agent <slug>', 'Override active agent to send as')
     .option('--content-type <mime>', 'Message content type')
     .action(async function (
       this: Command,
@@ -605,13 +622,14 @@ export function registerChannelCommands(program: Command): void {
     ) {
       const options = this.optsWithGlobals() as ChannelOptions;
       const message = (messageParts ?? []).join(' ').trim();
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi channel send',
         options,
         run: ({ reporter }) =>
           sendChannelMessage({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             slug,
             message,
             contentType: options.contentType,

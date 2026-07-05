@@ -1445,6 +1445,27 @@ describe('CLI command parsing', () => {
     );
   });
 
+  it('parses account keys confirm with the active agent by default', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'account',
+      'keys',
+      'confirm',
+    ]);
+
+    expect(mocks.resolvePreferredAgentSlug).toHaveBeenCalledWith('default', undefined);
+    expect(mocks.confirmCurrentImportedRotationKey).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'agent',
+      })
+    );
+  });
+
   it('parses account keys remove with non-interactive confirmation', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
@@ -1580,6 +1601,26 @@ describe('CLI command parsing', () => {
     );
   });
 
+  it('parses agent show with the active agent by default', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'agent',
+      'show',
+    ]);
+
+    expect(mocks.resolvePreferredAgentSlug).toHaveBeenCalledWith('default', undefined);
+    expect(mocks.getOwnedAgentProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorSlug: 'agent',
+        profileName: 'default',
+      })
+    );
+  });
+
   it('parses thread start positional arguments', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
@@ -1656,6 +1697,7 @@ describe('CLI command parsing', () => {
       expect.objectContaining({
         to: 'support@example.com',
         message: '{"ok":true}',
+        actorSlug: 'agent',
         contentType: 'application/json',
         headerLines: ['X-Workflow: deploy', 'X-Trace: 123'],
         forceUnsupported: true,
@@ -1939,7 +1981,54 @@ describe('CLI command parsing', () => {
     );
   });
 
-  it('parses thread approval contact requests without requiring agent context', async () => {
+  it('parses channel send with the active agent by default', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channel',
+      'send',
+      'release-room',
+      'ship',
+      'it',
+    ]);
+
+    expect(mocks.resolvePreferredAgentSlug).toHaveBeenCalledWith('default', undefined);
+    expect(mocks.sendChannelMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'agent',
+        slug: 'release-room',
+        message: 'ship it',
+      })
+    );
+  });
+
+  it('parses channel requests with the active agent by default', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'channel',
+      'requests',
+      '--incoming',
+    ]);
+
+    expect(mocks.resolvePreferredAgentSlug).toHaveBeenCalledWith('default', undefined);
+    expect(mocks.listChannelJoinRequests).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileName: 'default',
+        actorSlug: 'agent',
+        direction: 'incoming',
+      })
+    );
+  });
+
+  it('parses thread approval contact requests with active agent context', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
     await buildProgram().parseAsync([
@@ -1957,9 +2046,10 @@ describe('CLI command parsing', () => {
       expect.objectContaining({
         requestId: '42',
         action: 'approve',
+        actorSlug: 'agent',
       })
     );
-    expect(mocks.resolvePreferredAgentSlug).not.toHaveBeenCalled();
+    expect(mocks.resolvePreferredAgentSlug).toHaveBeenCalledWith('default', undefined);
   });
 
   it('accepts the request id format printed by thread approval list', async () => {
@@ -1999,6 +2089,30 @@ describe('CLI command parsing', () => {
     expect(mocks.showDiscoveredAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         identifier: 'support-bot',
+        actorSlug: 'agent',
+        profileName: 'default',
+      })
+    );
+    expect(mocks.resolvePreferredAgentSlug).toHaveBeenCalledWith('default', undefined);
+  });
+
+  it('parses discover search with the active agent by default', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'discover',
+      'search',
+      'support',
+    ]);
+
+    expect(mocks.resolvePreferredAgentSlug).toHaveBeenCalledWith('default', undefined);
+    expect(mocks.discoverAgents).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorSlug: 'agent',
+        query: 'support',
         profileName: 'default',
       })
     );
@@ -2024,6 +2138,36 @@ describe('CLI command parsing', () => {
         allowAllHeaders: true,
         supportedContentTypes: [],
         supportedHeaders: [],
+        profileName: 'default',
+      })
+    );
+  });
+
+  it('parses agent message content-type add with the active agent by default', async () => {
+    const { buildProgram, mocks } = await loadProgramWithMocks();
+
+    await buildProgram().parseAsync([
+      'node',
+      'masumi-agent-messenger',
+      '--json',
+      'agent',
+      'message',
+      'content-type',
+      'add',
+      'application/json',
+    ]);
+
+    expect(mocks.resolvePreferredAgentSlug).toHaveBeenCalledWith('default', undefined);
+    expect(mocks.getOwnedAgentProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorSlug: 'agent',
+        profileName: 'default',
+      })
+    );
+    expect(mocks.updateOwnedAgentMessageCapabilities).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorSlug: 'agent',
+        supportedContentTypes: ['application/json'],
         profileName: 'default',
       })
     );

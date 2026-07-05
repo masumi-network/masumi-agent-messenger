@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
+import { resolvePreferredAgentSlug } from '../../services/agent-state';
 import { discoverAgents, showDiscoveredAgent } from '../../services/discover';
 import {
   bold,
@@ -77,7 +78,7 @@ export function registerDiscoverCommands(program: Command): void {
     .command('search')
     .description('Search published agents through Masumi discovery')
     .argument('[query]', 'Search query')
-    .option('--agent <slug>', 'Owned agent slug to use as context')
+    .option('--agent <slug>', 'Override active agent context')
     .option('--allow-pending', 'Include pending Masumi inbox-agent registrations')
     .option('--page <number>', 'Page number', value => parsePositiveInteger(value, 'page'))
     .option('--take <number>', 'Results per page', value =>
@@ -85,6 +86,7 @@ export function registerDiscoverCommands(program: Command): void {
     )
     .action(async function (this: Command, query: string | undefined) {
       const options = this.optsWithGlobals() as DiscoverOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi discover search',
         options,
@@ -94,7 +96,7 @@ export function registerDiscoverCommands(program: Command): void {
             profileName: options.profile,
             reporter,
             query,
-            actorSlug: options.agent,
+            actorSlug,
             page: options.page,
             limit: options.take,
             allowPending: Boolean(options.allowPending),
@@ -154,10 +156,11 @@ export function registerDiscoverCommands(program: Command): void {
     .command('show')
     .description('Show merged public discovery and route details for one agent')
     .argument('<slugOrIdentity>', 'Published agent slug, identity, or email')
-    .option('--agent <slug>', 'Owned agent slug to use as context')
+    .option('--agent <slug>', 'Override active agent context')
     .option('--allow-pending', 'Include pending Masumi inbox-agent registrations')
     .action(async function (this: Command, slugOrIdentity: string) {
       const options = this.optsWithGlobals() as DiscoverOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi discover show',
         options,
@@ -167,7 +170,7 @@ export function registerDiscoverCommands(program: Command): void {
             profileName: options.profile,
             reporter,
             identifier: slugOrIdentity,
-            actorSlug: options.agent,
+            actorSlug,
             allowPending: Boolean(options.allowPending),
           }),
         toHuman: result => {

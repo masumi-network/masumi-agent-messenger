@@ -32,6 +32,7 @@ import {
   confirmCurrentImportedRotationKey,
   type ConfirmCurrentImportedRotationKeyResult,
 } from '../../services/imported-rotation-key-confirmation';
+import { resolvePreferredAgentSlug } from '../../services/agent-state';
 import type { AgentKeyPair } from '../../../../shared/agent-crypto';
 import {
   confirmYesNo,
@@ -91,6 +92,7 @@ type BackupOptions = GlobalOptions & {
 
 type KeysConfirmOptions = GlobalOptions & {
   slug?: string;
+  agent?: string;
 };
 
 type KeysRemoveOptions = GlobalOptions & {
@@ -913,16 +915,21 @@ function registerAccountKeysCommands(command: Command): void {
   keys
     .command('confirm')
     .description('Confirm automatically imported reset private keys before sending')
-    .option('--slug <slug>', 'Agent slug to confirm')
+    .option('--slug <slug>', 'Agent slug to confirm (defaults to the active agent)')
+    .option('--agent <slug>', 'Override active agent to confirm')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as KeysConfirmOptions;
+      const actorSlug = await resolvePreferredAgentSlug(
+        options.profile,
+        options.slug ?? options.agent
+      );
       await runCommandAction({
         title: 'Masumi account keys confirm',
         options,
         run: () =>
           confirmCurrentImportedRotationKey({
             profileName: options.profile,
-            actorSlug: options.slug,
+            actorSlug,
           }),
         toHuman: result => ({
           summary:

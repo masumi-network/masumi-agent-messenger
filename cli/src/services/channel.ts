@@ -273,9 +273,12 @@ async function readOwnedChannelActor(params: {
     });
   }
   if (!normalizedSlug) {
-    throw userError('Pass --agent <slug> for channel actions.', {
-      code: 'AGENT_SLUG_REQUIRED',
-    });
+    throw userError(
+      'Select an active agent with `agent use <slug>` or pass --agent <slug> for channel actions.',
+      {
+        code: 'AGENT_SLUG_REQUIRED',
+      }
+    );
   }
   const actor = await params.conn.procedures.readOwnedAgent({
     slug: normalizedSlug,
@@ -458,6 +461,41 @@ function buildChannelSigningKey(agentDbId: bigint, signingKeyVersion: number): s
   return `${agentDbId.toString()}:${signingKeyVersion}`;
 }
 
+function channelReducerErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'event' in error &&
+    (error as { event?: unknown }).event instanceof Error
+  ) {
+    return (error as { event: Error }).event.message;
+  }
+  return typeof error === 'string' ? error : '';
+}
+
+function mapChannelSendReducerError(error: unknown): never {
+  const message = channelReducerErrorMessage(error);
+  if (
+    message === 'Caller is not a member of this channel' ||
+    message === 'Caller is not an active member of this channel'
+  ) {
+    throw userError('Join the channel before sending.', {
+      code: 'CHANNEL_MEMBERSHIP_REQUIRED',
+      cause: error,
+    });
+  }
+  if (message === 'Caller does not have write permission in this channel') {
+    throw userError('Channel membership is read-only. Ask an admin for read_write permission before sending.', {
+      code: 'CHANNEL_WRITE_PERMISSION_REQUIRED',
+      cause: error,
+    });
+  }
+  throw error;
+}
+
 async function resolveChannelMessageSigningKeys(
   conn: DbConnection | null,
   messages: Array<{
@@ -637,9 +675,12 @@ function requireChannelAdminActor(params: {
 }): Agent {
   const actor = params.preferredActor;
   if (!actor) {
-    throw userError('Pass --agent <slug> for channel admin actions.', {
-      code: 'AGENT_SLUG_REQUIRED',
-    });
+    throw userError(
+      'Select an active admin agent with `agent use <slug>` or pass --agent <slug> for channel admin actions.',
+      {
+        code: 'AGENT_SLUG_REQUIRED',
+      }
+    );
   }
   const hasAdminMembership = params.memberships.some(
     membership =>
@@ -1222,11 +1263,7 @@ export async function sendChannelMessage(params: {
         code: 'CHANNEL_NOT_FOUND',
       });
     }
-    const membership =
-      channelState.memberships.find(
-        row => row.channelId === channel.id && row.agentDbId === actor.id && row.active
-      ) ?? null;
-    if (!membership) {
+    if (channelState.memberships.length === 0) {
       throw userError('Join the channel before sending.', {
         code: 'CHANNEL_MEMBERSHIP_REQUIRED',
       });
@@ -1241,15 +1278,19 @@ export async function sendChannelMessage(params: {
       payload: buildTextPayload(params.message, params.contentType),
     });
     // The reducer's success is authoritative; no post-send poll needed.
-    await conn.reducers.sendChannelMessage({
-      agentDbId: actor.id,
-      channelId: channel.id,
-      senderMessageId,
-      senderSigningKeyVersion: prepared.senderSigningKeyVersion,
-      plaintext: prepared.plaintext,
-      signature: fromHex(prepared.signature),
-      replyToMessageId: undefined,
-    });
+    try {
+      await conn.reducers.sendChannelMessage({
+        agentDbId: actor.id,
+        channelId: channel.id,
+        senderMessageId,
+        senderSigningKeyVersion: prepared.senderSigningKeyVersion,
+        plaintext: prepared.plaintext,
+        signature: fromHex(prepared.signature),
+        replyToMessageId: undefined,
+      });
+    } catch (error) {
+      mapChannelSendReducerError(error);
+    }
     params.reporter.success(`Sent message to ${params.slug}`);
     return {
       profile: profile.name,
@@ -1322,10 +1363,17 @@ export async function listChannelJoinRequests(params: {
       });
     }
 
-    const ownedAgentIds = new Set(channelState.actors.map(agent => agent.id));
+    const ownedAgentIds = new Set(
+      (actor ? [actor] : channelState.actors).map(agent => agent.id)
+    );
     const adminChannelIds = new Set(
       channelState.memberships
-        .filter(membership => membership.active && enumTag(membership.permission) === 'Admin')
+        .filter(
+          membership =>
+            membership.active &&
+            enumTag(membership.permission) === 'Admin' &&
+            (!actor || membership.agentDbId === actor.id)
+        )
         .map(membership => membership.channelId)
     );
     const channelsById = new Map(channelState.visible_channels.map(channel => [channel.id, channel] as const));
@@ -1341,6 +1389,13 @@ export async function listChannelJoinRequests(params: {
     );
     const filtered = requestRows.filter(request => {
       if (selectedChannelId !== null && request.channelId !== selectedChannelId) {
+        return false;
+      }
+      if (
+        actor &&
+        request.requesterAgentDbId !== actor.id &&
+        !adminChannelIds.has(request.channelId)
+      ) {
         return false;
       }
       const direction =

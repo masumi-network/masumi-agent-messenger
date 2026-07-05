@@ -61,6 +61,7 @@ import {
   resolveStoredActorKeyPairForPublishedActor,
   type PublishedActorKeyBundle,
 } from './actor-keys';
+import { resolvePreferredAgentSlug } from './agent-state';
 import { requireImportedRotationKeyConfirmed } from './imported-rotation-key-confirmation';
 import { createSecretStore } from './secret-store';
 import {
@@ -697,15 +698,21 @@ function requireOwnedActor(params: {
       return actor;
     }
     if (candidates.length > 1) {
-      throw userError('Multiple owned agents are participants in this thread. Pass --agent <slug>.', {
-        code: 'AGENT_SLUG_REQUIRED',
-      });
+      throw userError(
+        'Multiple owned agents are participants in this thread. Select one with `agent use <slug>` or pass --agent <slug>.',
+        {
+          code: 'AGENT_SLUG_REQUIRED',
+        }
+      );
     }
   }
 
-  throw userError('Pass --agent <slug> when sending outside a selected thread.', {
-    code: 'AGENT_SLUG_REQUIRED',
-  });
+  throw userError(
+    'Select an active agent with `agent use <slug>` or pass --agent <slug> when sending outside a selected thread.',
+    {
+      code: 'AGENT_SLUG_REQUIRED',
+    }
+  );
 }
 
 function findDirectThread(
@@ -1309,6 +1316,7 @@ export async function sendMessageToSlug(params: {
       code: 'SEND_THREAD_SELECTION_CONFLICT',
     });
   }
+  const actorSlug = await resolvePreferredAgentSlug(params.profileName, params.actorSlug);
 
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
   const email = normalizeEmail(claims.email ?? '');
@@ -1332,7 +1340,7 @@ export async function sendMessageToSlug(params: {
       runSendSpacetimeOperation('latest metadata read', () =>
         readLatestMetadataRows(conn, {
           email,
-          actorSlug: params.actorSlug,
+          actorSlug,
         })
       );
     let snapshot = await read();
@@ -1341,9 +1349,9 @@ export async function sendMessageToSlug(params: {
       !snapshot.threads.some(thread => thread.id === requestedThreadId)
     ) {
       const visibleActor =
-        (params.actorSlug
+        (actorSlug
           ? await runSendSpacetimeOperation('owned agent lookup', () =>
-              readOwnedAgentRow(conn, { email, actorSlug: params.actorSlug })
+              readOwnedAgentRow(conn, { email, actorSlug })
             )
           : null) ??
         snapshot.actors.find(actor => actor.email === email && actor.isDefault) ??
@@ -1384,7 +1392,7 @@ export async function sendMessageToSlug(params: {
       actors: snapshot.actors,
       participants: snapshot.participants,
       email,
-      actorSlug: params.actorSlug,
+      actorSlug,
       threadId: requestedThreadId ?? undefined,
     });
     const keyPair = await requireLocalActorKeyPairForSending({
@@ -1740,7 +1748,7 @@ export async function sendMessageToSlug(params: {
       readThreadSendSnapshot({
         conn,
         email,
-        actorSlug: params.actorSlug,
+        actorSlug,
         threadId: thread.id,
       })
     );
@@ -1906,6 +1914,7 @@ export async function sendMessageToThread(params: {
       code: 'INVALID_THREAD_ID',
     });
   }
+  const actorSlug = await resolvePreferredAgentSlug(params.profileName, params.actorSlug);
 
   const { profile, session, claims } = await ensureAuthenticatedSession(params);
   const email = normalizeEmail(claims.email ?? '');
@@ -1929,7 +1938,7 @@ export async function sendMessageToThread(params: {
       readThreadSendSnapshot({
         conn,
         email,
-        actorSlug: params.actorSlug,
+        actorSlug,
         threadId: requestedThreadId,
       })
     );
@@ -1939,7 +1948,7 @@ export async function sendMessageToThread(params: {
       conn,
       snapshot,
       requestedThreadId,
-      actorSlug: params.actorSlug,
+      actorSlug,
       message: params.message,
       contentType: params.contentType,
       headerLines: params.headerLines,
@@ -1970,6 +1979,7 @@ export async function sendMessageToThreadFromLiveSnapshot(params: {
   }
 
   const { profile, claims } = params.auth ?? (await ensureAuthenticatedSession(params));
+  const actorSlug = await resolvePreferredAgentSlug(params.profileName, params.actorSlug);
   const email = normalizeEmail(claims.email ?? '');
   if (!email) {
     throw userError('Current OIDC session is missing an email claim.', {
@@ -1983,7 +1993,7 @@ export async function sendMessageToThreadFromLiveSnapshot(params: {
     conn: params.conn,
     snapshot: params.snapshot,
     requestedThreadId,
-    actorSlug: params.actorSlug,
+    actorSlug,
     message: params.message,
     contentType: params.contentType,
     headerLines: params.headerLines,

@@ -526,9 +526,10 @@ export function registerAgentCommands(program: Command): void {
     .command('show')
     .description('Show one owned agent and its public/profile state')
     .argument('[slug]', 'Owned agent slug (defaults to the active agent)')
-    .option('--agent <slug>', 'Owned agent slug to inspect')
+    .option('--agent <slug>', 'Override active agent to inspect')
     .action(async function (this: Command, slugArg: string | undefined) {
       const options = this.optsWithGlobals() as AgentContextOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, slugArg ?? options.agent);
       await runCommandAction({
         title: 'Masumi agent show',
         options,
@@ -536,7 +537,7 @@ export function registerAgentCommands(program: Command): void {
           getOwnedAgentProfile({
             profileName: options.profile,
             reporter,
-            actorSlug: slugArg ?? options.agent,
+            actorSlug,
           }),
         toHuman: result => ({
           summary: `Showing agent ${cyan(result.agent.slug)}.`,
@@ -591,7 +592,7 @@ export function registerAgentCommands(program: Command): void {
     .command('update')
     .description('Update one owned agent profile')
     .argument('[slug]', 'Owned agent slug (defaults to the active agent)')
-    .option('--agent <slug>', 'Owned agent slug to update')
+    .option('--agent <slug>', 'Override active agent to update')
     .option('--display-name <name>', 'Set the agent display name')
     .option('--clear-display-name', 'Clear the agent display name')
     .option('--public-description <text>', 'Set the public description')
@@ -600,6 +601,7 @@ export function registerAgentCommands(program: Command): void {
     .option('--linked-email <visibility>', 'Set linked email visibility to visible or hidden')
     .action(async function (this: Command, slugArg: string | undefined) {
       const options = this.optsWithGlobals() as AgentUpdateOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, slugArg ?? options.agent);
       const publicDescription = options.clearPublicDescription
         ? undefined
         : await resolvePublicDescriptionOption({
@@ -614,7 +616,7 @@ export function registerAgentCommands(program: Command): void {
           updateOwnedAgentProfile({
             profileName: options.profile,
             reporter,
-            actorSlug: slugArg ?? options.agent,
+            actorSlug,
             displayName: options.displayName,
             clearDisplayName: options.clearDisplayName,
             publicDescription,
@@ -646,9 +648,10 @@ export function registerAgentCommands(program: Command): void {
     .command('show')
     .description('Show the public message capabilities for one owned agent')
     .argument('[slug]', 'Owned agent slug (defaults to the active agent)')
-    .option('--agent <slug>', 'Owned agent slug to inspect')
+    .option('--agent <slug>', 'Override active agent to inspect')
     .action(async function (this: Command, slugArg: string | undefined) {
       const options = this.optsWithGlobals() as AgentContextOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, slugArg ?? options.agent);
       await runCommandAction({
         title: 'Masumi agent message show',
         options,
@@ -656,7 +659,7 @@ export function registerAgentCommands(program: Command): void {
           getOwnedAgentProfile({
             profileName: options.profile,
             reporter,
-            actorSlug: slugArg ?? options.agent,
+            actorSlug,
           }),
         toHuman: result => ({
           summary: `Showing message policy for ${cyan(result.agent.slug)}.`,
@@ -676,9 +679,10 @@ export function registerAgentCommands(program: Command): void {
     .command('add')
     .description('Allow one explicit content type and switch to an explicit content-type list')
     .argument('<mime>', 'Content type to advertise')
-    .option('--agent <slug>', 'Owned agent slug to update')
+    .option('--agent <slug>', 'Override active agent to update')
     .action(async function (this: Command, mime: string) {
       const options = this.optsWithGlobals() as AgentMessageMutateOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       let beforeMessageCapabilities: OwnedAgentMessageCapabilities | null = null;
       await runCommandAction({
         title: 'Masumi agent message content-type add',
@@ -687,7 +691,7 @@ export function registerAgentCommands(program: Command): void {
           const profile = await getOwnedAgentProfile({
             profileName: options.profile,
             reporter,
-            actorSlug: options.agent,
+            actorSlug,
           });
           beforeMessageCapabilities = profile.agent.messageCapabilities;
           const nextContentTypes = profile.agent.messageCapabilities.supportedContentTypes.includes(
@@ -698,7 +702,7 @@ export function registerAgentCommands(program: Command): void {
           return updateOwnedAgentMessageCapabilities({
             profileName: options.profile,
             reporter,
-            actorSlug: options.agent,
+            actorSlug,
             allowAllContentTypes: inferAllowAllFromSelection(nextContentTypes),
             supportedContentTypes: nextContentTypes,
           });
@@ -717,9 +721,10 @@ export function registerAgentCommands(program: Command): void {
     .command('remove')
     .description('Remove one explicit content type; empty selection returns to default allow-all')
     .argument('<mime>', 'Content type to remove')
-    .option('--agent <slug>', 'Owned agent slug to update')
+    .option('--agent <slug>', 'Override active agent to update')
     .action(async function (this: Command, mime: string) {
       const options = this.optsWithGlobals() as AgentMessageMutateOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       let beforeMessageCapabilities: OwnedAgentMessageCapabilities | null = null;
       await runCommandAction({
         title: 'Masumi agent message content-type remove',
@@ -728,7 +733,7 @@ export function registerAgentCommands(program: Command): void {
           const profile = await getOwnedAgentProfile({
             profileName: options.profile,
             reporter,
-            actorSlug: options.agent,
+            actorSlug,
           });
           beforeMessageCapabilities = profile.agent.messageCapabilities;
           const nextContentTypes = profile.agent.messageCapabilities.supportedContentTypes.filter(
@@ -737,7 +742,7 @@ export function registerAgentCommands(program: Command): void {
           return updateOwnedAgentMessageCapabilities({
             profileName: options.profile,
             reporter,
-            actorSlug: options.agent,
+            actorSlug,
             allowAllContentTypes: inferAllowAllFromSelection(nextContentTypes),
             supportedContentTypes: nextContentTypes,
           });
@@ -763,9 +768,10 @@ export function registerAgentCommands(program: Command): void {
     .command('add')
     .description('Allow one explicit header and switch to an explicit header list')
     .argument('<name>', 'Header name to advertise')
-    .option('--agent <slug>', 'Owned agent slug to update')
+    .option('--agent <slug>', 'Override active agent to update')
     .action(async function (this: Command, name: string) {
       const options = this.optsWithGlobals() as AgentMessageMutateOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       let beforeMessageCapabilities: OwnedAgentMessageCapabilities | null = null;
       await runCommandAction({
         title: 'Masumi agent message header add',
@@ -774,7 +780,7 @@ export function registerAgentCommands(program: Command): void {
           const profile = await getOwnedAgentProfile({
             profileName: options.profile,
             reporter,
-            actorSlug: options.agent,
+            actorSlug,
           });
           beforeMessageCapabilities = profile.agent.messageCapabilities;
           const nextHeaders = profile.agent.messageCapabilities.supportedHeaders.includes(name)
@@ -783,7 +789,7 @@ export function registerAgentCommands(program: Command): void {
           return updateOwnedAgentMessageCapabilities({
             profileName: options.profile,
             reporter,
-            actorSlug: options.agent,
+            actorSlug,
             allowAllHeaders: inferAllowAllFromSelection(nextHeaders),
             supportedHeaders: nextHeaders,
           });
@@ -802,9 +808,10 @@ export function registerAgentCommands(program: Command): void {
     .command('remove')
     .description('Remove one explicit header; empty selection returns to default allow-all')
     .argument('<name>', 'Header name to remove')
-    .option('--agent <slug>', 'Owned agent slug to update')
+    .option('--agent <slug>', 'Override active agent to update')
     .action(async function (this: Command, name: string) {
       const options = this.optsWithGlobals() as AgentMessageMutateOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       let beforeMessageCapabilities: OwnedAgentMessageCapabilities | null = null;
       await runCommandAction({
         title: 'Masumi agent message header remove',
@@ -813,7 +820,7 @@ export function registerAgentCommands(program: Command): void {
           const profile = await getOwnedAgentProfile({
             profileName: options.profile,
             reporter,
-            actorSlug: options.agent,
+            actorSlug,
           });
           beforeMessageCapabilities = profile.agent.messageCapabilities;
           const nextHeaders = profile.agent.messageCapabilities.supportedHeaders.filter(
@@ -822,7 +829,7 @@ export function registerAgentCommands(program: Command): void {
           return updateOwnedAgentMessageCapabilities({
             profileName: options.profile,
             reporter,
-            actorSlug: options.agent,
+            actorSlug,
             allowAllHeaders: inferAllowAllFromSelection(nextHeaders),
             supportedHeaders: nextHeaders,
           });
@@ -841,9 +848,10 @@ export function registerAgentCommands(program: Command): void {
     .command('allow-all')
     .description('Enable true wildcard content-type and header acceptance for one agent')
     .argument('[slug]', 'Owned agent slug (defaults to the active agent)')
-    .option('--agent <slug>', 'Owned agent slug to update')
+    .option('--agent <slug>', 'Override active agent to update')
     .action(async function (this: Command, slugArg: string | undefined) {
       const options = this.optsWithGlobals() as AgentContextOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, slugArg ?? options.agent);
       await runCommandAction({
         title: 'Masumi agent message allow-all',
         options,
@@ -851,7 +859,7 @@ export function registerAgentCommands(program: Command): void {
           updateOwnedAgentMessageCapabilities({
             profileName: options.profile,
             reporter,
-            actorSlug: slugArg ?? options.agent,
+            actorSlug,
             allowAllContentTypes: true,
             allowAllHeaders: true,
             supportedContentTypes: [],
@@ -868,9 +876,10 @@ export function registerAgentCommands(program: Command): void {
     .command('reset-defaults')
     .description('Restore the default allow-all message capability policy for one agent')
     .argument('[slug]', 'Owned agent slug (defaults to the active agent)')
-    .option('--agent <slug>', 'Owned agent slug to update')
+    .option('--agent <slug>', 'Override active agent to update')
     .action(async function (this: Command, slugArg: string | undefined) {
       const options = this.optsWithGlobals() as AgentContextOptions;
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, slugArg ?? options.agent);
       await runCommandAction({
         title: 'Masumi agent message reset-defaults',
         options,
@@ -878,7 +887,7 @@ export function registerAgentCommands(program: Command): void {
           updateOwnedAgentMessageCapabilities({
             profileName: options.profile,
             reporter,
-            actorSlug: slugArg ?? options.agent,
+            actorSlug,
             allowAllContentTypes: true,
             allowAllHeaders: true,
             supportedContentTypes: [],
@@ -902,7 +911,7 @@ export function registerAgentCommands(program: Command): void {
     .command('sync')
     .description('Register or resync a managed agent on the Masumi network')
     .argument('[slug]', 'Owned agent slug (defaults to the active agent)')
-    .option('--agent <slug>', 'Owned agent slug to register or sync')
+    .option('--agent <slug>', 'Override active agent to register or sync')
     .option(
       '--disable-linked-email',
       'Disable linked email exposure when registration runs automatically'
@@ -911,8 +920,10 @@ export function registerAgentCommands(program: Command): void {
     .option('--public-description-file <path>', 'Read the public description from a local file when registration runs automatically')
     .action(async function (this: Command, slugArg: string | undefined) {
       const options = this.optsWithGlobals() as AgentNetworkOptions;
-      const selectedAgentSlug =
-        (slugArg ?? options.agent) ?? (await resolvePreferredAgentSlug(options.profile));
+      const selectedAgentSlug = await resolvePreferredAgentSlug(
+        options.profile,
+        slugArg ?? options.agent
+      );
       await runCommandAction({
         title: 'Masumi agent network sync',
         options,
@@ -977,12 +988,14 @@ export function registerAgentCommands(program: Command): void {
     .command('deregister')
     .description('Deregister a managed agent from the Masumi network')
     .argument('[slug]', 'Owned agent slug (defaults to the active agent)')
-    .option('--agent <slug>', 'Owned agent slug to deregister')
+    .option('--agent <slug>', 'Override active agent to deregister')
     .option('-y, --yes', 'Skip the confirmation prompt')
     .action(async function (this: Command, slugArg: string | undefined) {
       const options = this.optsWithGlobals() as AgentNetworkDeregisterOptions;
-      const selectedAgentSlug =
-        (slugArg ?? options.agent) ?? (await resolvePreferredAgentSlug(options.profile));
+      const selectedAgentSlug = await resolvePreferredAgentSlug(
+        options.profile,
+        slugArg ?? options.agent
+      );
       await runCommandAction({
         title: 'Masumi agent network deregister',
         options,
@@ -1033,7 +1046,7 @@ export function registerAgentCommands(program: Command): void {
   allowlist
     .command('list')
     .description('List allowlist entries for the selected agent')
-    .option('--agent <slug>', 'Owned agent slug to use as context')
+    .option('--agent <slug>', 'Override active agent context')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as AgentContextOptions;
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
@@ -1082,7 +1095,7 @@ export function registerAgentCommands(program: Command): void {
     .command('add')
     .description('Add an allowlist entry for the selected agent')
     .argument('<identifier>', 'Agent slug/public identity or email address')
-    .option('--agent <slug>', 'Owned agent slug to use as context')
+    .option('--agent <slug>', 'Override active agent context')
     .action(async function (this: Command, identifier: string) {
       const options = this.optsWithGlobals() as AgentAllowlistMutateOptions;
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
@@ -1113,7 +1126,7 @@ export function registerAgentCommands(program: Command): void {
     .command('remove')
     .description('Remove an allowlist entry for the selected agent')
     .argument('<identifier>', 'Agent slug/public identity or email address')
-    .option('--agent <slug>', 'Owned agent slug to use as context')
+    .option('--agent <slug>', 'Override active agent context')
     .action(async function (this: Command, identifier: string) {
       const options = this.optsWithGlobals() as AgentAllowlistMutateOptions;
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);

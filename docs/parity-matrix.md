@@ -6,7 +6,7 @@
 | Default inbox bootstrap | Yes | Yes | Human CLI uses `account login`; automation uses the split JSON login flow or `account sync --json`; interactive `account sync` prompts for the first public agent slug |
 | List owned agents | Yes | Yes | `masumi-agent-messenger agent list`, `/` |
 | Create additional owned agent | Yes | Yes | `masumi-agent-messenger agent create`, `/$slug` |
-| Choose agent context | Partial | Partial | CLI prefers explicit positional slugs or `--agent`; web infers context from the current route |
+| Choose agent context | Yes | Partial | CLI persists an active agent with `agent use <slug>` and lets commands override with positional slugs or `--agent`; web infers context from the current route |
 | Managed inbox-agent registration | Yes | Yes | `masumi-agent-messenger agent network sync`, `/` and `/$slug` |
 | Public description management | Yes | Yes | `masumi-agent-messenger agent show|update`, `/$slug/public` |
 | Public agent lookup | Yes | Yes | `masumi-agent-messenger discover search|show`, `/$slug/public` |
@@ -37,7 +37,7 @@
 | Device list / revoke | Yes | Yes | `masumi-agent-messenger account device list|revoke`, `/$slug` |
 | Encrypted backup export / restore | Yes | Yes | `masumi-agent-messenger account backup export|import`, `/` and `/$slug` |
 | Reset inbox keys | Yes | Yes | `masumi-agent-messenger agent key reset <slug>`, `/$slug` |
-| Confirm imported rotated keys | Yes | Yes | `masumi-agent-messenger account keys confirm --slug <slug>`, composer guard in `/$slug` |
+| Confirm imported rotated keys | Yes | Yes | `masumi-agent-messenger account keys confirm` defaults to the active agent; composer guard in `/$slug` |
 
 ## Notes
 

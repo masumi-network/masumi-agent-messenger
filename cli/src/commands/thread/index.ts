@@ -237,7 +237,7 @@ export function registerThreadCommands(program: Command): void {
   thread
     .command('list')
     .description('List visible threads for one owned agent')
-    .option('--agent <slug>', 'Owned agent slug to use for thread visibility')
+    .option('--agent <slug>', 'Override active agent for thread visibility')
     .option('--include-archived', 'Include archived threads')
     .option('--filter <mode>', 'Thread filter: active, latest, archived, or all')
     .option('--page <number>', 'Page number', '1')
@@ -245,14 +245,7 @@ export function registerThreadCommands(program: Command): void {
     .option('--after <cursor>', 'Cursor returned by the previous page')
     .action(async (_options, commandInstance) => {
       const options = commandInstance.optsWithGlobals() as ThreadOptions;
-      const actorSlug = options.agent
-        ? await resolvePreferredAgentSlug(options.profile, options.agent)
-        : undefined;
-      if (!actorSlug) {
-        throw userError('Pass --agent <slug> to start a thread.', {
-          code: 'AGENT_SLUG_REQUIRED',
-        });
-      }
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
       await runCommandAction({
         title: 'Masumi thread list',
         options,
@@ -342,7 +335,7 @@ export function registerThreadCommands(program: Command): void {
     .command('count')
     .description('Count messages in a direct or group thread')
     .argument('<threadId>', 'Thread id to count')
-    .option('--agent <slug>', 'Owned agent slug to use for thread visibility')
+    .option('--agent <slug>', 'Override active agent for thread visibility')
     .action(async function (this: Command, threadId: string) {
       const options = this.optsWithGlobals() as ThreadOptions;
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
@@ -386,7 +379,7 @@ export function registerThreadCommands(program: Command): void {
     .command('show')
     .description('Show message history for a thread')
     .argument('<threadId>', 'Thread id to inspect')
-    .option('--agent <slug>', 'Owned agent slug to use when decrypting history')
+    .option('--agent <slug>', 'Override active agent when decrypting history')
     .option('--page <number>', 'Newest-first page number')
     .option('--page-size <number>', 'Messages per page', '25')
     .option(
@@ -461,7 +454,7 @@ export function registerThreadCommands(program: Command): void {
   thread
     .command('unread')
     .description('Show the unread message feed for the selected agent')
-    .option('--agent <slug>', 'Owned agent slug to use for unread state')
+    .option('--agent <slug>', 'Override active agent for unread state')
     .option('--thread-id <id>', 'Only unread messages for this thread id')
     .option('--page <number>', 'Page number')
     .option('--page-size <number>', 'Messages per page', '25')
@@ -669,7 +662,7 @@ export function registerThreadCommands(program: Command): void {
     .description('Start or reuse a direct thread with a target agent')
     .argument('<target>', 'Target agent slug or email')
     .argument('[message...]', 'Optional first message')
-    .option('--agent <slug>', 'Owned agent slug that will start the thread')
+    .option('--agent <slug>', 'Override active agent that will start the thread')
     .option('--title <title>', 'Optional direct thread title')
     .option('--new', 'Always create a fresh direct thread before sending')
     .option('--compose', 'Compose the first message interactively (multiline)')
@@ -776,7 +769,7 @@ export function registerThreadCommands(program: Command): void {
     .description('Send an encrypted direct message to an agent or direct thread')
     .argument('[to]', 'Recipient agent slug or exact email')
     .argument('[message...]', 'Plaintext message body')
-    .option('--agent <slug>', 'Owned agent slug that will send the message')
+    .option('--agent <slug>', 'Override active agent that will send the message')
     .option('--to <identifier>', 'Recipient agent slug or exact email')
     .option('--message <text>', 'Plaintext message body')
     .option('--thread-id <id>', 'Send to a specific existing direct thread id')
@@ -806,6 +799,7 @@ export function registerThreadCommands(program: Command): void {
           code: 'SEND_MESSAGE_REQUIRED',
         });
       }
+      const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
 
       if (options.threadId && !to) {
         if (options.new) {
@@ -820,7 +814,7 @@ export function registerThreadCommands(program: Command): void {
           run: ({ reporter }) =>
             sendMessageToThread({
               profileName: options.profile,
-              actorSlug: options.agent,
+              actorSlug,
               threadId,
               message,
               contentType: options.contentType,
@@ -863,7 +857,7 @@ export function registerThreadCommands(program: Command): void {
         run: ({ reporter }) =>
           sendMessageToSlug({
             profileName: options.profile,
-            actorSlug: options.agent,
+            actorSlug,
             to,
             message,
             contentType: options.contentType,
@@ -927,7 +921,7 @@ export function registerThreadCommands(program: Command): void {
       '[message...]',
       'Encrypted message body (omit when using --compose)'
     )
-    .option('--agent <slug>', 'Owned agent slug that will send the reply')
+    .option('--agent <slug>', 'Override active agent that will send the reply')
     .option('--compose', 'Compose reply interactively (multiline)')
     .option('--content-type <mime>', 'Encrypted message content type (defaults to text/plain)')
     .option(
@@ -1005,7 +999,7 @@ export function registerThreadCommands(program: Command): void {
   group
     .command('create')
     .description('Create a new group thread')
-    .option('--agent <slug>', 'Owned agent slug that will create the thread')
+    .option('--agent <slug>', 'Override active agent that will create the thread')
     .option(
       '--participant <identifier>',
       'Participant agent slug or exact email',
@@ -1056,7 +1050,7 @@ export function registerThreadCommands(program: Command): void {
     .description('Add a participant to an open thread')
     .argument('<threadId>', 'Thread id')
     .argument('<participant>', 'Participant agent slug or exact email')
-    .option('--agent <slug>', 'Owned agent slug performing the change')
+    .option('--agent <slug>', 'Override active agent performing the change')
     .action(async function (this: Command, threadId: string, target: string) {
       const options = this.optsWithGlobals() as ThreadOptions;
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
@@ -1093,7 +1087,7 @@ export function registerThreadCommands(program: Command): void {
     .description('Remove a participant from a thread')
     .argument('<threadId>', 'Thread id')
     .argument('<participant>', 'Participant agent slug')
-    .option('--agent <slug>', 'Owned agent slug performing the change')
+    .option('--agent <slug>', 'Override active agent performing the change')
     .action(async function (this: Command, threadId: string, target: string) {
       const options = this.optsWithGlobals() as ThreadOptions;
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
@@ -1126,7 +1120,7 @@ export function registerThreadCommands(program: Command): void {
     .command('read')
     .description('Advance read state for a thread')
     .argument('<threadId>', 'Thread id')
-    .option('--agent <slug>', 'Owned agent slug performing the change')
+    .option('--agent <slug>', 'Override active agent performing the change')
     .option(
       '--through-message-id <id>',
       'Mark read up to and including this message id (defaults to the latest)'
@@ -1159,7 +1153,7 @@ export function registerThreadCommands(program: Command): void {
     .command('archive')
     .description('Archive a thread for the selected agent')
     .argument('<threadId>', 'Thread id')
-    .option('--agent <slug>', 'Owned agent slug performing the change')
+    .option('--agent <slug>', 'Override active agent performing the change')
     .action(async function (this: Command, threadId: string) {
       const options = this.optsWithGlobals() as ThreadOptions;
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
@@ -1188,7 +1182,7 @@ export function registerThreadCommands(program: Command): void {
     .command('restore')
     .description('Restore an archived thread for the selected agent')
     .argument('<threadId>', 'Thread id')
-    .option('--agent <slug>', 'Owned agent slug performing the change')
+    .option('--agent <slug>', 'Override active agent performing the change')
     .action(async function (this: Command, threadId: string) {
       const options = this.optsWithGlobals() as ThreadOptions;
       const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
@@ -1217,7 +1211,7 @@ export function registerThreadCommands(program: Command): void {
     .command('delete')
     .description('Permanently delete a thread and all its messages (admin only)')
     .argument('<threadId>', 'Thread id')
-    .option('--agent <slug>', 'Owned admin agent slug performing the delete')
+    .option('--agent <slug>', 'Override active admin agent performing the delete')
     .option('--yes', 'Skip the interactive confirmation prompt')
     .action(async function (this: Command, threadId: string) {
       const options = this.optsWithGlobals() as ThreadOptions & { yes?: boolean };
@@ -1271,7 +1265,7 @@ export function registerThreadCommands(program: Command): void {
   approval
     .command('list')
     .description('List incoming or outgoing thread approval requests')
-    .option('--agent <slug>', 'Owned agent slug to use as context')
+    .option('--agent <slug>', 'Override active agent context')
     .option('--incoming', 'Only incoming requests')
     .option('--outgoing', 'Only outgoing requests')
     .action(async (_options, commandInstance) => {
@@ -1368,7 +1362,7 @@ export function registerThreadCommands(program: Command): void {
     .command('cancel')
     .description('Cancel an outgoing thread request')
     .argument('[approvalId]', 'Request id, or request:<id>')
-    .option('--agent <slug>', 'Owned agent slug to use as context')
+    .option('--agent <slug>', 'Override active agent context')
     .option('--request-id <id>', 'Contact request id')
     .action(async function (this: Command, approvalIdArg: string | undefined) {
       const options = this.optsWithGlobals() as ThreadOptions;
@@ -1388,9 +1382,7 @@ export function registerThreadCommands(program: Command): void {
         title: 'Masumi thread approval cancel',
         options,
         run: async ({ reporter }) => {
-          const actorSlug = options.agent
-            ? await resolvePreferredAgentSlug(options.profile, options.agent)
-            : undefined;
+          const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
           return cancelContactRequest({
             profileName: options.profile,
             reporter,
@@ -1409,7 +1401,7 @@ export function registerThreadCommands(program: Command): void {
     .command('approve')
     .description('Approve an incoming thread request')
     .argument('[approvalId]', 'Request id, or invite:<id> for a group invite')
-    .option('--agent <slug>', 'Owned agent slug to use as context')
+    .option('--agent <slug>', 'Override active agent context')
     .option('--request-id <id>', 'Contact request id')
     .action(async function (this: Command, approvalIdArg: string | undefined) {
       const options = this.optsWithGlobals() as ThreadOptions;
@@ -1435,9 +1427,7 @@ export function registerThreadCommands(program: Command): void {
             });
           }
 
-          const actorSlug = options.agent
-            ? await resolvePreferredAgentSlug(options.profile, options.agent)
-            : undefined;
+          const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
           return resolveContactRequest({
             profileName: options.profile,
             reporter,
@@ -1460,7 +1450,7 @@ export function registerThreadCommands(program: Command): void {
     .command('reject')
     .description('Reject an incoming thread request')
     .argument('[approvalId]', 'Request id, or invite:<id> for a group invite')
-    .option('--agent <slug>', 'Owned agent slug to use as context')
+    .option('--agent <slug>', 'Override active agent context')
     .option('--request-id <id>', 'Contact request id')
     .action(async function (this: Command, approvalIdArg: string | undefined) {
       const options = this.optsWithGlobals() as ThreadOptions;
@@ -1486,9 +1476,7 @@ export function registerThreadCommands(program: Command): void {
             });
           }
 
-          const actorSlug = options.agent
-            ? await resolvePreferredAgentSlug(options.profile, options.agent)
-            : undefined;
+          const actorSlug = await resolvePreferredAgentSlug(options.profile, options.agent);
           return resolveContactRequest({
             profileName: options.profile,
             reporter,

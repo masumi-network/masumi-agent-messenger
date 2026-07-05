@@ -313,8 +313,12 @@ export async function claimDeviceShare(params: {
             })
           : 0;
         if (pendingImportedRotationKeyCount > 0) {
+          const firstActorSlug = snapshot.actors[0]?.identity.slug;
+          const overrideHint = firstActorSlug
+            ? `, or \`masumi-agent-messenger account keys confirm --agent ${firstActorSlug} --json\` to confirm that agent explicitly`
+            : '';
           params.reporter.info(
-            `Reset private keys require local confirmation before sending. Run \`masumi-agent-messenger account keys confirm --slug ${snapshot.actors[0]?.identity.slug ?? '<slug>'}\`.`
+            `Reset private keys require local confirmation before sending. Run \`masumi-agent-messenger account keys confirm --json\` for the active agent${overrideHint}.`
           );
         }
         params.reporter.clearBanner?.();
