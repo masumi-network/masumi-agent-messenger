@@ -559,8 +559,17 @@ function applyColorPreference(options: GlobalOptions): void {
   process.env.FORCE_COLOR = '0';
 }
 
+function stringifyJsonValue(value: unknown): string {
+  return JSON.stringify(
+    value,
+    (_key, entry: unknown) =>
+      typeof entry === 'bigint' ? entry.toString() : entry,
+    2
+  );
+}
+
 function writeJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  process.stdout.write(`${stringifyJsonValue(value)}\n`);
 }
 
 /**

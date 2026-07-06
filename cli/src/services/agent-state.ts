@@ -119,7 +119,17 @@ function resolveOwnedActor(params: {
     return defaultActor;
   }
 
-  return ownedActors.find(actor => actor.slug === requestedSlug) ?? defaultActor;
+  const requestedActor = ownedActors.find(actor => actor.slug === requestedSlug) ?? null;
+  if (requestedActor) {
+    return requestedActor;
+  }
+  if (params.actorSlug) {
+    throw userError(`No owned agent found for slug \`${requestedSlug}\`.`, {
+      code: 'OWNED_ACTOR_NOT_FOUND',
+    });
+  }
+
+  return defaultActor;
 }
 
 function requireOwnedActorBySlug(params: {

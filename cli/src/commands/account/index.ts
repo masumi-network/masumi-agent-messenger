@@ -26,6 +26,7 @@ import {
   defaultBackupFilePath,
   restoreInboxKeys,
 } from '../../services/key-backup';
+import { getStoredActorKeyPair } from '../../services/actor-keys';
 import { loadProfile, type BootstrapSnapshot } from '../../services/config-store';
 import { createSecretStore } from '../../services/secret-store';
 import {
@@ -41,6 +42,7 @@ import {
   promptText,
 } from '../../services/prompts';
 import { runCommandAction, type GlobalOptions } from '../../services/command-runtime';
+import { normalizeEmail, normalizeInboxSlug } from '../../../../shared/inbox-slug';
 import {
   badge,
   bold,
@@ -123,6 +125,33 @@ type AccountStatusReadiness = {
     resetLosesOldMessages: true;
   };
 };
+
+function resolveAccountStatusActorIdentity(params: {
+  email: string | null;
+  activeAgentSlug?: string;
+  snapshot?: BootstrapSnapshot;
+}): { email: string; slug: string } | null {
+  const activeSlug = params.activeAgentSlug
+    ? normalizeInboxSlug(params.activeAgentSlug)
+    : null;
+  const email = normalizeEmail(params.email ?? params.snapshot?.inbox.email ?? '');
+
+  if (activeSlug && email) {
+    return {
+      email,
+      slug: activeSlug,
+    };
+  }
+
+  if (params.snapshot) {
+    return {
+      email: params.snapshot.inbox.email,
+      slug: params.snapshot.actor.slug,
+    };
+  }
+
+  return null;
+}
 
 function snapshotKeysRequireRecovery(
   snapshot: BootstrapSnapshot | undefined,
@@ -1104,15 +1133,30 @@ export function registerAccountCommands(program: Command): void {
 
           const profile = await loadProfile(options.profile);
           const secretStore = createSecretStore();
-          const agentKeyPair = await secretStore.getAgentKeyPair(profile.name);
           const namespaceVault = await secretStore.getNamespaceKeyVault(profile.name);
+          const actorIdentity = resolveAccountStatusActorIdentity({
+            email: status.email,
+            activeAgentSlug: profile.activeAgentSlug,
+            snapshot: profile.bootstrapSnapshot,
+          });
+          const agentKeyPair = actorIdentity
+            ? await getStoredActorKeyPair({
+                profile,
+                secretStore,
+                identity: actorIdentity,
+              })
+            : null;
           const agentKeyPairMissing = !agentKeyPair;
           const namespaceVaultMissing = !namespaceVault;
           const localKeysReady = Boolean(agentKeyPair && namespaceVault);
+          const checksBootstrapActor =
+            Boolean(actorIdentity && profile.bootstrapSnapshot) &&
+            actorIdentity?.slug === profile.bootstrapSnapshot?.actor.slug;
           const recoveryRequired =
             status.authenticated &&
             (!localKeysReady ||
-              snapshotKeysRequireRecovery(profile.bootstrapSnapshot, agentKeyPair));
+              (checksBootstrapActor &&
+                snapshotKeysRequireRecovery(profile.bootstrapSnapshot, agentKeyPair)));
           const recoveryReason = recoveryRequired
             ? !agentKeyPair || !namespaceVault
               ? 'missing'

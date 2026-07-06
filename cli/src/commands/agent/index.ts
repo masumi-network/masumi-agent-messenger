@@ -529,7 +529,10 @@ export function registerAgentCommands(program: Command): void {
     .option('--agent <slug>', 'Override active agent to inspect')
     .action(async function (this: Command, slugArg: string | undefined) {
       const options = this.optsWithGlobals() as AgentContextOptions;
-      const actorSlug = await resolvePreferredAgentSlug(options.profile, slugArg ?? options.agent);
+      const requestedSlug = slugArg ?? options.agent;
+      const actorSlug = requestedSlug
+        ? await resolvePreferredAgentSlug(options.profile, requestedSlug)
+        : undefined;
       await runCommandAction({
         title: 'Masumi agent show',
         options,
@@ -651,7 +654,10 @@ export function registerAgentCommands(program: Command): void {
     .option('--agent <slug>', 'Override active agent to inspect')
     .action(async function (this: Command, slugArg: string | undefined) {
       const options = this.optsWithGlobals() as AgentContextOptions;
-      const actorSlug = await resolvePreferredAgentSlug(options.profile, slugArg ?? options.agent);
+      const requestedSlug = slugArg ?? options.agent;
+      const actorSlug = requestedSlug
+        ? await resolvePreferredAgentSlug(options.profile, requestedSlug)
+        : undefined;
       await runCommandAction({
         title: 'Masumi agent message show',
         options,

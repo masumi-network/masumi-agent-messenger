@@ -17,14 +17,22 @@ import {
   waitForBootstrapRows,
   type PublishedAgentKeyPair,
 } from './spacetimedb';
-import { saveBootstrapSnapshot, type BootstrapSnapshot, type ResolvedProfile } from './config-store';
+import {
+  listProfiles,
+  saveBootstrapSnapshot,
+  type BootstrapSnapshot,
+  type ResolvedProfile,
+} from './config-store';
 import {
   ensureNamespaceVaultContainsDefaultActor,
   getOrCreateCliDeviceKeyMaterial,
 } from './device-keys';
 import { userError } from './errors';
 import type { TaskReporter } from './command-runtime';
-import { resolveStoredActorKeyPairForPublishedActor } from './actor-keys';
+import {
+  findStoredActorKeyPairForPublishedActorInProfiles,
+  resolveStoredActorKeyPairForPublishedActor,
+} from './actor-keys';
 import {
   applyRegistrationMetadataToActor,
   importOwnedSaasInboxAgents,
@@ -42,6 +50,7 @@ import type { IdTokenClaims, StoredOidcSession } from './oidc';
 export type BootstrapKeySource =
   | 'existing_local'
   | 'new_local'
+  | 'profile_import'
   | 'device_share'
   | 'backup_import'
   | 'rotated';
@@ -281,15 +290,34 @@ export async function bootstrapAuthenticatedInbox(params: {
             params.reporter.verbose?.('Loaded local agent key bundle');
           }
         } else {
-          params.reporter.info(
-            resolvedLocalKeys.status === 'mismatch'
-              ? 'Local agent key bundle does not match the published default inbox keys. Recover the correct private keys, import a backup, or reset keys before this CLI profile can decrypt messages.'
-              : 'Default inbox already exists. Reusing published public keys and keeping local private key recovery pending for this CLI profile.'
-          );
-          localKeyPair = null;
-          recoveryRequired = true;
-          recoveryReason = resolvedLocalKeys.status;
-          recoveryOptions = ['device_share', 'backup_import', 'rotate'];
+          const profileMatch = await findStoredActorKeyPairForPublishedActorInProfiles({
+            profiles: await listProfiles(),
+            currentProfileName: params.profile.name,
+            secretStore,
+            identity: {
+              email,
+              slug: existingDefaultActor.slug,
+            },
+            published: publishedKeyPair!,
+          });
+
+          if (profileMatch) {
+            localKeyPair = profileMatch.keyPair;
+            keySource = 'profile_import';
+            params.reporter.verbose?.(
+              `Recovered matching local agent key bundle from CLI profile ${profileMatch.profileName}`
+            );
+          } else {
+            params.reporter.info(
+              resolvedLocalKeys.status === 'mismatch'
+                ? 'Local agent key bundle does not match the published default inbox keys. Recover the correct private keys, import a backup, or reset keys before this CLI profile can decrypt messages.'
+                : 'Default inbox already exists. Reusing published public keys and keeping local private key recovery pending for this CLI profile.'
+            );
+            localKeyPair = null;
+            recoveryRequired = true;
+            recoveryReason = resolvedLocalKeys.status;
+            recoveryOptions = ['device_share', 'backup_import', 'rotate'];
+          }
         }
       } else if (existingLocalKeyPair) {
         params.reporter.verbose?.('Loaded local agent key bundle');

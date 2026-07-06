@@ -346,11 +346,6 @@ function resolveOwnedActor(params: {
   actorSlug?: string;
   threadId?: bigint;
 }): Agent {
-  const defaultActor = requireDefaultActor(params.snapshot, params.email);
-  const ownedActors = params.snapshot.actors
-    .filter(actor => actor.accountId === defaultActor.accountId)
-    .sort(sortActors);
-
   if (params.actorSlug) {
     const normalizedSlug = normalizeInboxSlug(params.actorSlug);
     if (!normalizedSlug) {
@@ -359,6 +354,22 @@ function resolveOwnedActor(params: {
       });
     }
 
+    const exactOwnedActor =
+      params.snapshot.actors.find(
+        row => row.email === params.email && row.slug === normalizedSlug
+      ) ?? null;
+    if (exactOwnedActor) {
+      return exactOwnedActor;
+    }
+  }
+
+  const defaultActor = requireDefaultActor(params.snapshot, params.email);
+  const ownedActors = params.snapshot.actors
+    .filter(actor => actor.accountId === defaultActor.accountId)
+    .sort(sortActors);
+
+  if (params.actorSlug) {
+    const normalizedSlug = normalizeInboxSlug(params.actorSlug);
     const actor = ownedActors.find(row => row.slug === normalizedSlug);
     if (!actor) {
       throw userError(`No owned inbox actor found for slug \`${normalizedSlug}\`.`, {
@@ -451,7 +462,6 @@ async function readVisibleThreadPageForActor(params: {
   actorSlug?: string;
   threadId: bigint;
 }): Promise<{ actor: Agent; page: VisibleThreadPage }> {
-  const defaultActor = requireDefaultActor(params.snapshot, params.email);
   const candidates = params.actorSlug
     ? [
         resolveOwnedActor({
@@ -460,9 +470,12 @@ async function readVisibleThreadPageForActor(params: {
           actorSlug: params.actorSlug,
         }),
       ]
-    : params.snapshot.actors
-        .filter(actor => actor.accountId === defaultActor.accountId)
-        .sort(sortActors);
+    : (() => {
+        const defaultActor = requireDefaultActor(params.snapshot, params.email);
+        return params.snapshot.actors
+          .filter(actor => actor.accountId === defaultActor.accountId)
+          .sort(sortActors);
+      })();
 
   for (const actor of candidates) {
     try {

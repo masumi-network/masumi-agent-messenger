@@ -237,6 +237,36 @@ describe('getOwnedAgentProfile', () => {
     });
   });
 
+  it('rejects an explicit missing owned agent slug instead of falling back to default', async () => {
+    mocks.actors = [
+      actor({
+        id: 1n,
+        accountId: 10n,
+        email: 'owner@example.com',
+        slug: 'owner',
+        isDefault: true,
+        publicIdentity: 'owner',
+        displayName: 'Owner',
+        currentKeyBundleVersion: 1,
+        createdAt: timestamp(1n),
+        updatedAt: timestamp(1n),
+      }),
+    ];
+
+    await expect(
+      getOwnedAgentProfile({
+        profileName: 'default',
+        actorSlug: 'missing-agent',
+        reporter: {
+          info() {},
+          success() {},
+        },
+      })
+    ).rejects.toMatchObject({
+      code: 'OWNED_ACTOR_NOT_FOUND',
+    });
+  });
+
   it('refreshes stale registration metadata before returning list summaries', async () => {
     global.fetch = vi.fn().mockResolvedValueOnce(
       jsonResponse(200, {

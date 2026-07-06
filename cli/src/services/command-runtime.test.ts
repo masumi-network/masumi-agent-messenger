@@ -39,6 +39,60 @@ afterEach(() => {
 });
 
 describe('runCommandAction prompt mode', () => {
+  it('serializes bigint values as strings in JSON mode', async () => {
+    const stdoutWrite = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const previousNoColor = process.env.NO_COLOR;
+    const previousForceColor = process.env.FORCE_COLOR;
+
+    try {
+      vi.resetModules();
+      const { runCommandAction } = await import('./command-runtime');
+
+      await runCommandAction({
+        title: 'BigInt JSON',
+        options: {
+          json: true,
+          profile: 'default',
+          color: false,
+          verbose: false,
+        },
+        run: async () => ({
+          threadId: 42n,
+          nested: {
+            messageId: 99n,
+          },
+        }),
+        toHuman: result => ({
+          summary: result.threadId.toString(),
+          details: [],
+        }),
+      });
+    } finally {
+      if (previousNoColor === undefined) {
+        delete process.env.NO_COLOR;
+      } else {
+        process.env.NO_COLOR = previousNoColor;
+      }
+      if (previousForceColor === undefined) {
+        delete process.env.FORCE_COLOR;
+      } else {
+        process.env.FORCE_COLOR = previousForceColor;
+      }
+      vi.resetModules();
+    }
+
+    const output = stdoutWrite.mock.calls.map(call => String(call[0])).join('');
+    expect(JSON.parse(output)).toMatchObject({
+      ok: true,
+      data: {
+        threadId: '42',
+        nested: {
+          messageId: '99',
+        },
+      },
+    });
+  });
+
   it('uses plain output instead of Ink when stdin is not interactive', async () => {
     const restoreStdinTTY = stubIsTTY(process.stdin, false);
     const restoreStdoutTTY = stubIsTTY(process.stdout, true);

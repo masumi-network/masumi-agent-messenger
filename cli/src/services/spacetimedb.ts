@@ -1070,23 +1070,30 @@ export async function readSubscribedMessageRows(
   }
 ): Promise<MessageRows> {
   const rows = await readMessageRowsWithExactOwnedActor(conn, params);
-  const defaultActor = params?.email
-    ? findDefaultActorByEmail(rows.actors, params.email)
-    : rows.actors.find(actor => actor.isDefault) ?? rows.actors[0];
-  if (!defaultActor) {
-    return rows;
-  }
-
   const requestedSlug = params?.actorSlug ? normalizeInboxSlug(params.actorSlug) : null;
   if (params?.actorSlug && !requestedSlug) {
     throw userError('Agent slug is invalid.', {
       code: 'INVALID_SLUG',
     });
   }
+  const exactRequestedActor =
+    requestedSlug && params?.email
+      ? rows.actors.find(row => row.email === params.email && row.slug === requestedSlug) ?? null
+      : null;
+  const defaultActor = params?.email
+    ? exactRequestedActor ?? findDefaultActorByEmail(rows.actors, params.email)
+    : rows.actors.find(actor => actor.isDefault) ?? rows.actors[0];
+  if (!defaultActor) {
+    return rows;
+  }
+
   const actor =
-    requestedSlug === null
+    exactRequestedActor ??
+    (requestedSlug === null
       ? defaultActor
-      : rows.actors.find(row => row.accountId === defaultActor.accountId && row.slug === requestedSlug);
+      : rows.actors.find(
+          row => row.accountId === defaultActor.accountId && row.slug === requestedSlug
+        ));
   if (!actor) {
     throw userError(`No owned agent found for slug \`${requestedSlug ?? ''}\`.`, {
       code: 'OWNED_ACTOR_NOT_FOUND',

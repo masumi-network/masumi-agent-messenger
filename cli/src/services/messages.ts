@@ -376,11 +376,6 @@ export function selectUnreadIncomingMessages(
   email: string,
   actorSlug?: string
 ): UnreadMessageContext {
-  const defaultActor = findDefaultActorByEmail(snapshot.actors, email);
-  if (!defaultActor) {
-    throw inboxBootstrapRequiredError();
-  }
-
   const requestedSlug = actorSlug ? normalizeInboxSlug(actorSlug) : null;
   if (actorSlug && !requestedSlug) {
     throw userError('Agent slug is invalid.', {
@@ -388,13 +383,25 @@ export function selectUnreadIncomingMessages(
     });
   }
 
-  const recipientActor =
+  const exactRequestedActor =
     requestedSlug
+      ? snapshot.actors.find(
+          actor => actor.email === email && actor.slug === requestedSlug
+        ) ?? null
+      : null;
+  const defaultActor = exactRequestedActor ?? findDefaultActorByEmail(snapshot.actors, email);
+  if (!defaultActor) {
+    throw inboxBootstrapRequiredError();
+  }
+
+  const recipientActor =
+    exactRequestedActor ??
+    (requestedSlug
       ? snapshot.actors.find(
           actor =>
             actor.accountId === defaultActor.accountId && actor.slug === requestedSlug
         ) ?? null
-      : defaultActor;
+      : defaultActor);
   if (!recipientActor) {
     throw userError(`No owned agent found for slug \`${requestedSlug}\`.`, {
       code: 'OWNED_ACTOR_NOT_FOUND',

@@ -575,6 +575,102 @@ describe('selectUnreadIncomingMessages', () => {
     expect(result.ownActorIds).toEqual(new Set([2n]));
     expect(result.unreadMessages.map(message => message.id)).toEqual([201n]);
   });
+
+  it('supports active-agent scoped snapshots without the default actor row', () => {
+    const result = selectUnreadIncomingMessages(
+      {
+        actors: [
+          actor({
+            id: 2n,
+            accountId: 10n,
+            email: 'agent@example.com',
+            slug: 'circuit',
+            isDefault: false,
+            publicIdentity: 'circuit',
+            displayName: 'Circuit',
+            currentKeyBundleVersion: 1,
+            createdAt: timestamp(1n),
+            updatedAt: timestamp(1n),
+          }),
+          actor({
+            id: 4n,
+            accountId: 20n,
+            email: 'external@example.com',
+            slug: 'external',
+            isDefault: true,
+            publicIdentity: 'external',
+            displayName: 'External',
+            currentKeyBundleVersion: 1,
+            createdAt: timestamp(1n),
+            updatedAt: timestamp(1n),
+          }),
+        ],
+        participants: [
+          {
+            id: 1n,
+            threadId: 30n,
+            agentDbId: 2n,
+            createdAt: timestamp(1n),
+            lastSentSeq: 0n,
+            lastSentSecretVersion: 0,
+            isAdmin: true,
+            active: true,
+            activeRecencySortKey: 0n,
+            accountId: 0n,
+            membershipVersion: 1n,
+            lastReadMessageId: 0n,
+            archived: false,
+            updatedAt: timestamp(1n),
+          },
+          {
+            id: 2n,
+            threadId: 30n,
+            agentDbId: 4n,
+            createdAt: timestamp(1n),
+            lastSentSeq: 0n,
+            lastSentSecretVersion: 0,
+            isAdmin: false,
+            active: true,
+            activeRecencySortKey: 0n,
+            accountId: 0n,
+            membershipVersion: 1n,
+            lastReadMessageId: 0n,
+            archived: false,
+            updatedAt: timestamp(1n),
+          },
+        ],
+        readStates: [],
+        secretEnvelopes: [],
+        threads: [],
+        messages: [
+          {
+            id: 201n,
+            threadId: 30n,
+            idDescSortKey: 0n,
+            membershipVersion: 1n,
+            senderAgentDbId: 4n,
+            senderMessageId: 1n,
+            secretVersion: 1,
+            attachesNewEnvelopes: false,
+            signingKeyVersion: 1,
+            ciphertext: bytes('ciphertext'),
+            iv: bytes('iv'),
+            cipherAlgorithm: { tag: 'AesGcm256V1' as const },
+            signature: bytes('signature'),
+            replyToMessageId: undefined,
+            createdAt: timestamp(100n),
+            updatedAt: timestamp(1n),
+          },
+        ],
+      },
+      'agent@example.com',
+      'circuit'
+    );
+
+    expect(result.defaultActor.slug).toBe('circuit');
+    expect(result.ownActorIds).toEqual(new Set([2n]));
+    expect(result.unreadMessages.map(message => message.id)).toEqual([201n]);
+  });
 });
 
 describe('paginateNewMessages', () => {

@@ -356,6 +356,15 @@ export async function loadProfile(
   };
 }
 
+export async function listProfiles(): Promise<ResolvedProfile[]> {
+  const config = await readStoredConfig();
+  return Object.entries(config.profiles).map(([profileName, profile]) => ({
+    name: profileName,
+    ...mergeProfile(profile),
+    ...resolveSpacetimeTarget(),
+  }));
+}
+
 export async function mutateProfile(
   profileName: string | undefined,
   mutate: (profile: StoredProfile) => StoredProfile

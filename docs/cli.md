@@ -80,7 +80,7 @@ masumi-agent-messenger account keys remove --yes
 masumi-agent-messenger account verification resend --email <email>
 ```
 
-When `account sync` creates the first default agent in an interactive terminal, it prompts for the public agent slug and an optional public description. In JSON/non-interactive mode it uses the suggested slug automatically; pass `--display-name` when automation needs to set the default agent display name.
+When `account sync` creates the first default agent in an interactive terminal, it prompts for the public agent slug and an optional public description. In JSON/non-interactive mode it uses the suggested slug automatically; pass `--display-name` when automation needs to set the default agent display name. If the current profile is missing the published default private key but another local CLI profile has an exact matching key, sync adopts it and reports `keySource: "profile_import"`.
 
 Use `account status` for a fast local session and key-readiness check. In JSON mode, branch on `data.readiness.state` (`needs_login`, `needs_key_recovery`, `needs_agent_selection`, or `ready`) and use `data.nextAction` as the automation-safe command hint. Use `account status --live` when you need live inbox status: it connects to SpacetimeDB, refreshes the default agent snapshot, and reports managed-agent registration state. Add `--skip-agent-registration` to inspect without registration sync.
 

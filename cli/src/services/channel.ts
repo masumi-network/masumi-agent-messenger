@@ -185,6 +185,8 @@ type JoinedPublicChannelSnapshot = {
   membership: ChannelMember;
 };
 
+const CHANNEL_MEMBER_PAGE_SIZE = 25;
+
 function subscribeQueries(
   conn: DbConnection,
   queries: ChannelQuery[],
@@ -238,6 +240,7 @@ async function readVisibleChannelStateSnapshot(
     channelId?: bigint;
     channelSlug?: string;
     requestId?: bigint;
+    memberAgentId?: bigint;
   }
 ): Promise<ChannelSnapshot> {
   const state = await conn.procedures.readVisibleChannelState({
@@ -248,16 +251,65 @@ async function readVisibleChannelStateSnapshot(
     readAllOwnedAgents(conn),
     readPendingChannelJoinRequests(conn),
   ]);
+  const memberships = state
+    ? await readVisibleChannelMembers(conn, {
+        channelId: state.channel.id,
+        fallbackMember: state.member ?? null,
+        targetAgentId: params.memberAgentId,
+      })
+    : [];
   return {
     actors,
     visible_channels: state ? [state.channel] : [],
-    memberships: state?.member ? [state.member] : [],
+    memberships,
     requests: params.requestId
       ? requests.filter(request => request.id === params.requestId)
       : state
         ? requests.filter(request => request.channelId === state.channel.id)
         : requests,
   };
+}
+
+async function readVisibleChannelMembers(
+  conn: DbConnection,
+  params: {
+    channelId: bigint;
+    fallbackMember: ChannelMember | null;
+    targetAgentId?: bigint;
+  }
+): Promise<ChannelMember[]> {
+  const members: ChannelMember[] = [];
+  let afterId: bigint | undefined;
+
+  while (true) {
+    const page = await conn.procedures.listChannelMembers({
+      channelId: params.channelId,
+      afterId,
+      limit: CHANNEL_MEMBER_PAGE_SIZE,
+    });
+    members.push(...page);
+
+    if (
+      params.targetAgentId !== undefined &&
+      page.some(member => member.agentDbId === params.targetAgentId)
+    ) {
+      break;
+    }
+    if (page.length < CHANNEL_MEMBER_PAGE_SIZE) {
+      break;
+    }
+
+    const lastMember = page.at(-1);
+    if (!lastMember || lastMember.id === afterId) {
+      break;
+    }
+    afterId = lastMember.id;
+  }
+
+  if (members.length > 0) {
+    return members;
+  }
+  return params.fallbackMember ? [params.fallbackMember] : [];
 }
 
 async function readOwnedChannelActor(params: {
@@ -925,6 +977,7 @@ export async function readAuthenticatedChannelMessages(params: {
     });
     const channelState = await readVisibleChannelStateSnapshot(conn, {
       channelSlug: normalizedSlug,
+      memberAgentId: actor.id,
     });
     const visibleChannel =
       channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
@@ -943,8 +996,14 @@ export async function readAuthenticatedChannelMessages(params: {
       });
     }
     const channelSlug = visibleChannel?.slug ?? publicChannel?.slug ?? normalizedSlug;
+    const selectedMembership = channelState.memberships.find(
+      membership =>
+        membership.channelId === channelId &&
+        membership.agentDbId === actor.id &&
+        membership.active
+    ) ?? null;
     const rows =
-      visibleChannel && channelState.memberships.some(row => row.agentDbId === actor.id && row.active)
+      visibleChannel && selectedMembership
         ? await conn.procedures.listChannelMessages({
             channelId,
             beforeMessageId: parseOptionalU64(params.beforeMessageId, 'beforeMessageId'),
@@ -986,7 +1045,7 @@ export async function listChannelMembers(params: {
   const connected = await connectForAuthenticatedChannels(params);
   const { profile, email, conn, subscription } = connected;
   try {
-    await readOwnedChannelActor({
+    const actor = await readOwnedChannelActor({
       conn,
       email,
       actorSlug: params.actorSlug,
@@ -994,12 +1053,24 @@ export async function listChannelMembers(params: {
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const channelState = await readVisibleChannelStateSnapshot(conn, {
       channelSlug: normalizedSlug,
+      memberAgentId: actor.id,
     });
     const channel =
       channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
     if (!channel) {
       throw userError(`Channel \`${params.slug}\` is not visible.`, {
         code: 'CHANNEL_NOT_FOUND',
+      });
+    }
+    const selectedMembership = channelState.memberships.find(
+      membership =>
+        membership.channelId === channel.id &&
+        membership.agentDbId === actor.id &&
+        membership.active
+    ) ?? null;
+    if (!selectedMembership) {
+      throw userError('Join the channel before listing members.', {
+        code: 'CHANNEL_MEMBERSHIP_REQUIRED',
       });
     }
     const members = await conn.procedures.listChannelMembers({
@@ -1089,6 +1160,7 @@ export async function updateChannelSettings(params: {
     });
     const channelState = await readVisibleChannelStateSnapshot(conn, {
       channelSlug: normalizedSlug,
+      memberAgentId: actor.id,
     });
     const channel =
       channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
@@ -1160,6 +1232,7 @@ export async function joinPublicChannel(params: {
         read: () =>
           readVisibleChannelStateSnapshot(conn, {
             channelSlug: normalizedSlug,
+            memberAgentId: actor.id,
           }),
         slug: normalizedSlug,
         actorId: actor.id,
@@ -1255,6 +1328,7 @@ export async function sendChannelMessage(params: {
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const channelState = await readVisibleChannelStateSnapshot(conn, {
       channelSlug: normalizedSlug,
+      memberAgentId: actor.id,
     });
     const channel =
       channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
@@ -1263,7 +1337,13 @@ export async function sendChannelMessage(params: {
         code: 'CHANNEL_NOT_FOUND',
       });
     }
-    if (channelState.memberships.length === 0) {
+    const selectedMembership = channelState.memberships.find(
+      membership =>
+        membership.channelId === channel.id &&
+        membership.agentDbId === actor.id &&
+        membership.active
+    ) ?? null;
+    if (!selectedMembership) {
       throw userError('Join the channel before sending.', {
         code: 'CHANNEL_MEMBERSHIP_REQUIRED',
       });
@@ -1334,6 +1414,7 @@ export async function listChannelJoinRequests(params: {
     const channelState = channelSlug
       ? await readVisibleChannelStateSnapshot(conn, {
           channelSlug,
+          memberAgentId: actor?.id,
         })
       : snapshot;
     const selectedChannel = channelSlug
@@ -1560,6 +1641,7 @@ export async function updateChannelMemberPermission(params: {
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const channelState = await readVisibleChannelStateSnapshot(conn, {
       channelSlug: normalizedSlug,
+      memberAgentId: adminActor.id,
     });
     const channel =
       channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;
@@ -1605,6 +1687,7 @@ export async function removeChannelMember(params: {
     const normalizedSlug = normalizeChannelSlugInput(params.slug);
     const channelState = await readVisibleChannelStateSnapshot(conn, {
       channelSlug: normalizedSlug,
+      memberAgentId: actor.id,
     });
     const channel =
       channelState.visible_channels.find(row => row.slug === normalizedSlug) ?? null;

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { AgentKeyPair } from '../../shared/agent-crypto';
 import { createEmptyMasumiRegistrationResult } from '../../shared/inbox-agent-registration';
 import type {
   AuthStatusResult,
@@ -11,6 +12,7 @@ import type {
   PendingDeviceLoginResult,
 } from './services/auth';
 import { DEFAULT_SPACETIMEDB_DB_NAME } from './services/config-store';
+import type { NamespaceKeyVault } from './services/secret-store';
 
 type CliPackageJson = {
   version: string;
@@ -35,6 +37,23 @@ function makeAuthStatus(
     grantedScopes: [],
     profile: 'default',
     ...overrides,
+  };
+}
+
+function makeAgentKeyPair(label: string): AgentKeyPair {
+  return {
+    encryption: {
+      publicKey: `${label}-enc-public`,
+      privateKey: `${label}-enc-private`,
+      keyVersion: 1,
+      algorithm: 'EcdhP256AesGcm256V1',
+    },
+    signing: {
+      publicKey: `${label}-sig-public`,
+      privateKey: `${label}-sig-private`,
+      keyVersion: 1,
+      algorithm: 'EcdsaP256Sha256V1',
+    },
   };
 }
 
@@ -1350,6 +1369,72 @@ describe('CLI command parsing', () => {
     }
   });
 
+  it('uses active-agent namespace keys for account status readiness', async () => {
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'masumi-agent-status-'));
+    process.env.XDG_CONFIG_HOME = tempDir;
+
+    try {
+      const { saveActiveAgentSlug } = await import('./services/config-store');
+      await saveActiveAgentSlug('default', 'support-bot');
+
+      const activeKeyPair = makeAgentKeyPair('support-bot');
+      const namespaceVault: NamespaceKeyVault = {
+        version: 1,
+        email: 'agent@example.com',
+        actors: [
+          {
+            identity: {
+              email: 'agent@example.com',
+              slug: 'support-bot',
+            },
+            current: activeKeyPair,
+            archived: [],
+          },
+        ],
+      };
+
+      const { buildProgram, mocks } = await loadProgramWithMocks({
+        authStatusResult: makeAuthStatus({
+          authenticated: true,
+          email: 'agent@example.com',
+          subject: 'subject-1',
+        }),
+      });
+      mocks.getNamespaceKeyVault.mockResolvedValue(namespaceVault as never);
+
+      await buildProgram().parseAsync([
+        'node',
+        'masumi-agent-messenger',
+        'account',
+        'status',
+        '--json',
+      ]);
+
+      await expect(mocks.runCommandAction.mock.results[0]?.value).resolves.toMatchObject({
+        authenticated: true,
+        activeAgentSlug: 'support-bot',
+        localKeysReady: true,
+        recoveryRequired: false,
+        recoveryReason: null,
+        recoveryOptions: [],
+        readiness: {
+          state: 'ready',
+          readyForMessaging: true,
+          missing: [],
+        },
+        nextAction: 'masumi-agent-messenger thread list --agent support-bot --json',
+      });
+    } finally {
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('preserves account sync display-name bootstrap input', async () => {
     const { buildProgram, mocks } = await loadProgramWithMocks();
 
@@ -1612,10 +1697,10 @@ describe('CLI command parsing', () => {
       'show',
     ]);
 
-    expect(mocks.resolvePreferredAgentSlug).toHaveBeenCalledWith('default', undefined);
+    expect(mocks.resolvePreferredAgentSlug).not.toHaveBeenCalled();
     expect(mocks.getOwnedAgentProfile).toHaveBeenCalledWith(
       expect.objectContaining({
-        actorSlug: 'agent',
+        actorSlug: undefined,
         profileName: 'default',
       })
     );

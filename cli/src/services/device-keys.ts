@@ -221,6 +221,7 @@ export async function ensureNamespaceVaultContainsDefaultActor(params: {
     email: identity.email,
     actors: nextActors,
   });
+  await params.secretStore.setAgentKeyPair(params.profile.name, params.keyPair);
 }
 
 export async function exportNamespaceKeyShareSnapshot(params: {

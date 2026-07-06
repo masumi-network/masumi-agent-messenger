@@ -4,6 +4,7 @@ import type { ResolvedProfile } from './config-store';
 import type { KeychainBackend } from './secret-store';
 import { createSecretStore } from './secret-store';
 import {
+  findStoredActorKeyPairForPublishedActorInProfiles,
   getStoredActorKeyPairForEncryptionVersion,
   resolveStoredActorKeyPairForPublishedActor,
 } from './actor-keys';
@@ -25,9 +26,9 @@ function createKeyPair(suffix: string, version = 1): AgentKeyPair {
   };
 }
 
-function createProfile(): ResolvedProfile {
+function createProfile(name = 'default'): ResolvedProfile {
   return {
-    name: 'default',
+    name,
     issuer: 'https://issuer.example',
     clientId: 'masumi-cli',
     oidcScope: 'openid profile email offline_access',
@@ -290,5 +291,103 @@ describe('resolveStoredActorKeyPairForPublishedActor', () => {
         },
       ],
     });
+  });
+});
+
+describe('findStoredActorKeyPairForPublishedActorInProfiles', () => {
+  it('finds a matching published default key in another local profile', async () => {
+    const currentProfile = createProfile('default');
+    const sourceProfile = createProfile('codex-bundlewatch');
+    const store = createStore();
+    const matching = createKeyPair('current');
+
+    await store.setAgentKeyPair(sourceProfile.name, matching);
+    await store.setNamespaceKeyVault(sourceProfile.name, {
+      version: 1,
+      email: 'agent@example.com',
+      actors: [
+        {
+          identity: {
+            email: 'agent@example.com',
+            slug: 'agent',
+          },
+          current: matching,
+          archived: [],
+        },
+      ],
+    });
+
+    await expect(
+      findStoredActorKeyPairForPublishedActorInProfiles({
+        profiles: [currentProfile, sourceProfile],
+        currentProfileName: currentProfile.name,
+        secretStore: store,
+        identity: {
+          email: 'agent@example.com',
+          slug: 'agent',
+        },
+        published: {
+          encryption: {
+            publicKey: matching.encryption.publicKey,
+            keyVersion: matching.encryption.keyVersion,
+          },
+          signing: {
+            publicKey: matching.signing.publicKey,
+            keyVersion: matching.signing.keyVersion,
+          },
+        },
+      })
+    ).resolves.toEqual({
+      profileName: sourceProfile.name,
+      keyPair: matching,
+      source: 'namespace_current',
+      actorSlug: 'agent',
+    });
+  });
+
+  it('does not treat unrelated local keys as recovery candidates', async () => {
+    const currentProfile = createProfile('default');
+    const sourceProfile = createProfile('codex-bundlewatch');
+    const store = createStore();
+    const unrelated = createKeyPair('unrelated');
+    const published = createKeyPair('published');
+
+    await store.setAgentKeyPair(sourceProfile.name, unrelated);
+    await store.setNamespaceKeyVault(sourceProfile.name, {
+      version: 1,
+      email: 'agent@example.com',
+      actors: [
+        {
+          identity: {
+            email: 'agent@example.com',
+            slug: 'agent',
+          },
+          current: unrelated,
+          archived: [],
+        },
+      ],
+    });
+
+    await expect(
+      findStoredActorKeyPairForPublishedActorInProfiles({
+        profiles: [currentProfile, sourceProfile],
+        currentProfileName: currentProfile.name,
+        secretStore: store,
+        identity: {
+          email: 'agent@example.com',
+          slug: 'agent',
+        },
+        published: {
+          encryption: {
+            publicKey: published.encryption.publicKey,
+            keyVersion: published.encryption.keyVersion,
+          },
+          signing: {
+            publicKey: published.signing.publicKey,
+            keyVersion: published.signing.keyVersion,
+          },
+        },
+      })
+    ).resolves.toBeNull();
   });
 });

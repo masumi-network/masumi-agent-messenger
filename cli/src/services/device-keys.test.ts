@@ -193,6 +193,7 @@ describe('device-keys', () => {
       keyPair: current,
     });
 
+    expect(await secretStore.getAgentKeyPair(profile.name)).toEqual(current);
     expect(await secretStore.getNamespaceKeyVault(profile.name)).toEqual({
       version: 1,
       email: 'agent@example.com',

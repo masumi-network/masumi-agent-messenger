@@ -34,6 +34,13 @@ export type StoredActorKeyPairResolution =
       keyPair: null;
     };
 
+export type StoredActorKeyPairProfileMatch = {
+  profileName: string;
+  keyPair: AgentKeyPair;
+  source: 'default_agent_keypair' | 'namespace_current' | 'namespace_archived';
+  actorSlug?: string;
+};
+
 function buildDefaultActorIdentity(profile: ResolvedProfile): ActorIdentity | null {
   const snapshot = profile.bootstrapSnapshot;
   if (!snapshot) {
@@ -82,6 +89,27 @@ function matchesPublishedActorKeys(
     published.signing.publicKey === pair.signing.publicKey &&
     published.signing.keyVersion === pair.signing.keyVersion
   );
+}
+
+function findMatchingPublishedCandidate(
+  published: PublishedActorKeyBundle,
+  candidates: StoredActorKeyPairProfileMatch[]
+): StoredActorKeyPairProfileMatch | null {
+  const seen = new Set<string>();
+
+  for (const candidate of candidates) {
+    const key = keyPairIdentity(candidate.keyPair);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    if (matchesPublishedActorKeys(published, candidate.keyPair)) {
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
 function dedupeArchivedKeyPairs(pairs: AgentKeyPair[]): AgentKeyPair[] {
@@ -285,6 +313,84 @@ export async function resolveStoredActorKeyPairForPublishedActor(params: {
     status: 'matched',
     keyPair: matched,
   };
+}
+
+export async function findStoredActorKeyPairForPublishedActorInProfiles(params: {
+  profiles: ResolvedProfile[];
+  currentProfileName: string;
+  secretStore: SecretStore;
+  identity: ActorIdentity;
+  published: PublishedActorKeyBundle;
+}): Promise<StoredActorKeyPairProfileMatch | null> {
+  for (const profile of params.profiles) {
+    if (profile.name === params.currentProfileName) {
+      continue;
+    }
+
+    const vault = await params.secretStore.getNamespaceKeyVault(profile.name);
+    const actors = vault?.actors ?? [];
+    const sameSlugActors = actors.filter(actor => actor.identity.slug === params.identity.slug);
+    const otherActors = actors.filter(actor => actor.identity.slug !== params.identity.slug);
+    const candidates: StoredActorKeyPairProfileMatch[] = [];
+
+    for (const actor of sameSlugActors) {
+      if (actor.current) {
+        candidates.push({
+          profileName: profile.name,
+          keyPair: actor.current,
+          source: 'namespace_current',
+          actorSlug: actor.identity.slug,
+        });
+      }
+    }
+
+    const defaultKeyPair = await params.secretStore.getAgentKeyPair(profile.name);
+    if (defaultKeyPair) {
+      candidates.push({
+        profileName: profile.name,
+        keyPair: defaultKeyPair,
+        source: 'default_agent_keypair',
+        actorSlug: profile.bootstrapSnapshot?.actor.slug,
+      });
+    }
+
+    for (const actor of sameSlugActors) {
+      for (const keyPair of actor.archived) {
+        candidates.push({
+          profileName: profile.name,
+          keyPair,
+          source: 'namespace_archived',
+          actorSlug: actor.identity.slug,
+        });
+      }
+    }
+
+    for (const actor of otherActors) {
+      if (actor.current) {
+        candidates.push({
+          profileName: profile.name,
+          keyPair: actor.current,
+          source: 'namespace_current',
+          actorSlug: actor.identity.slug,
+        });
+      }
+      for (const keyPair of actor.archived) {
+        candidates.push({
+          profileName: profile.name,
+          keyPair,
+          source: 'namespace_archived',
+          actorSlug: actor.identity.slug,
+        });
+      }
+    }
+
+    const match = findMatchingPublishedCandidate(params.published, candidates);
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
 }
 
 export async function setStoredActorKeyPair(params: {
