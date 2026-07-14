@@ -128,6 +128,30 @@ function buildSnapshot(email: string, actors: SharedActorKeyMaterial[]): DeviceK
   };
 }
 
+/**
+ * Repair legacy vault rows whose `identity.email` is missing or empty (written
+ * by older CLI versions for slug-only agents). Every actor in a namespace vault
+ * belongs to the vault's account, so inheriting the vault email is always
+ * correct — and without it a single legacy row makes `account backup export`
+ * and device key-sharing fail for the whole account with
+ * "actors[N].identity.email must be a string".
+ */
+function normalizeVaultActorIdentities(
+  vaultEmail: string,
+  actors: SharedActorKeyMaterial[]
+): SharedActorKeyMaterial[] {
+  return actors.map(actor => {
+    const email = actor.identity.email as string | undefined;
+    if (typeof email === 'string' && email.trim() !== '') {
+      return actor;
+    }
+    return {
+      ...actor,
+      identity: { ...actor.identity, email: vaultEmail },
+    };
+  });
+}
+
 function mergeOverrideActors(params: {
   email: string;
   existingActors: SharedActorKeyMaterial[];
@@ -235,7 +259,7 @@ export async function exportNamespaceKeyShareSnapshot(params: {
       existingVault.email,
       mergeOverrideActors({
         email: existingVault.email,
-        existingActors: existingVault.actors,
+        existingActors: normalizeVaultActorIdentities(existingVault.email, existingVault.actors),
         overrides: params.overrides,
       })
     );
