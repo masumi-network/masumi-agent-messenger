@@ -84,6 +84,43 @@ function createOverride(): SharedActorKeyMaterial {
 }
 
 describe('device-keys', () => {
+  it('repairs legacy vault actors without an email instead of failing export', async () => {
+    const secretStore = createSecretStore(createMemoryBackend());
+    await secretStore.setNamespaceKeyVault('default', {
+      version: 1,
+      email: 'agent@example.com',
+      actors: [
+        {
+          // Legacy row written by an older CLI: slug-only agent, no email.
+          identity: { email: '', slug: 'legacy-agent' },
+          current: createKeyPair('legacy', 1),
+          archived: [],
+        },
+        {
+          identity: { email: undefined as unknown as string, slug: 'legacy-agent-two' },
+          current: createKeyPair('legacy-two', 1),
+          archived: [],
+        },
+      ],
+    });
+
+    const snapshot = await exportNamespaceKeyShareSnapshot({
+      profile: createProfile(),
+      secretStore,
+    });
+
+    expect(snapshot.email).toBe('agent@example.com');
+    expect(snapshot.actors.map(actor => actor.identity.email)).toEqual([
+      'agent@example.com',
+      'agent@example.com',
+    ]);
+    expect(snapshot.actors.map(actor => actor.identity.slug)).toEqual([
+      'legacy-agent',
+      'legacy-agent-two',
+    ]);
+  });
+
+
   it('exports override key material when local keys are otherwise missing', async () => {
     const secretStore = createSecretStore(createMemoryBackend());
     const snapshot = await exportNamespaceKeyShareSnapshot({
