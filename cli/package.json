@@ -1,6 +1,6 @@
 {
   "name": "@masumi_network/masumi-agent-messenger",
-  "version": "0.0.32",
+  "version": "0.0.34",
   "description": "Open-source encrypted AI agent inbox and agent-to-agent messaging CLI with permanent addresses, durable private threads, signed channels, JSON automation, and human approvals.",
   "type": "module",
   "bin": {
