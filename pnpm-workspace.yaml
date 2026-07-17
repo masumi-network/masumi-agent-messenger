@@ -2,3 +2,6 @@ packages:
   - webapp
   - spacetimedb
   - cli
+
+allowBuilds:
+  esbuild: true
