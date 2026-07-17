@@ -1,4 +1,4 @@
-import { Link, createFileRoute } from '@tanstack/react-router';
+import { Link, createFileRoute, useNavigate } from '@tanstack/react-router';
 import {
   ArrowDown,
   ArrowLeft,
@@ -48,6 +48,7 @@ import { DayDivider } from '@/components/inbox/day-divider';
 import { EmptyState } from '@/components/inbox/empty-state';
 import { MessageComposer } from '@/components/inbox/message-composer';
 import { MessageItem } from '@/components/inbox/message-item';
+import { KeyVaultDialog } from '@/components/key-vault-form';
 import { loadStoredAgentKeyPair } from '@/lib/agent-session';
 import { buildLoginHref, useAuthSession } from '@/lib/auth-session';
 import {
@@ -78,6 +79,11 @@ import {
 import { parseOptionalSlug } from '@/lib/app-shell';
 import { useWorkspaceShell } from '@/features/workspace/use-workspace-shell';
 import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell';
+import { useKeyVault } from '@/hooks/use-key-vault';
+import {
+  isKeyVaultLockedError,
+  isOidcTokenExpiredError,
+} from '@/lib/session-recovery';
 import { DbConnection, reducers, tables } from '@/module_bindings';
 import type {
   Agent,
@@ -605,7 +611,9 @@ function AuthenticatedChannelPageContent({
   activeActor: Agent | null;
 }) {
   const { slug } = Route.useParams();
+  const navigate = useNavigate();
   const auth = useAuthSession();
+  const vault = useKeyVault();
   const connectionState = useSpacetimeDB();
   const connection = connectionState.getConnection?.() as DbConnection | null;
   const approveChannelJoinReducer = useReducer(reducers.approveChannelJoin);
@@ -714,6 +722,7 @@ function AuthenticatedChannelPageContent({
   const [requestsOpen, setRequestsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [vaultDialogOpen, setVaultDialogOpen] = useState(false);
 
   const feedScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef<boolean>(true);
@@ -734,6 +743,19 @@ function AuthenticatedChannelPageContent({
         : null,
     [activeActor, channelId, memberships]
   );
+  const alternativeChannelActors = useMemo(() => {
+    if (!activeActor) {
+      return [];
+    }
+    const activeMemberIds = new Set(
+      memberships
+        .filter(row => row.active && row.agentDbId !== activeActor.id)
+        .map(row => row.agentDbId)
+    );
+    return actors
+      .filter(actor => activeMemberIds.has(actor.id))
+      .sort((left, right) => left.slug.localeCompare(right.slug));
+  }, [activeActor, actors, memberships]);
   const canSend =
     membership?.permission.tag === 'ReadWrite' || membership?.permission.tag === 'Admin';
   const canManage = membership?.permission.tag === 'Admin';
@@ -998,6 +1020,22 @@ function AuthenticatedChannelPageContent({
     shouldAutoScrollRef.current = true;
   }, []);
 
+  function reportChannelActionError(error: unknown, fallback: string) {
+    if (isOidcTokenExpiredError(error)) {
+      setActionError(null);
+      setActionFeedback('Sign-in session expired. Reconnecting…');
+      void auth.refresh();
+      return;
+    }
+    if (isKeyVaultLockedError(error)) {
+      setActionError(null);
+      setActionFeedback(null);
+      setVaultDialogOpen(true);
+      return;
+    }
+    setActionError(error instanceof Error ? error.message : fallback);
+  }
+
   async function handleJoin() {
     if (!activeActor) {
       return;
@@ -1017,7 +1055,7 @@ function AuthenticatedChannelPageContent({
       );
       setActionFeedback('Joined channel.');
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Unable to join channel');
+      reportChannelActionError(error, 'Unable to join channel');
     } finally {
       setJoining(false);
     }
@@ -1043,7 +1081,7 @@ function AuthenticatedChannelPageContent({
       );
       setActionFeedback('Requested channel access.');
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Unable to request channel access');
+      reportChannelActionError(error, 'Unable to request channel access');
     } finally {
       setRequesting(false);
     }
@@ -1078,7 +1116,7 @@ function AuthenticatedChannelPageContent({
       );
       setActionFeedback('Rejected channel request.');
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Unable to update channel request');
+      reportChannelActionError(error, 'Unable to update channel request');
     }
   }
 
@@ -1101,7 +1139,7 @@ function AuthenticatedChannelPageContent({
       });
       setMemberRows(current => (reset ? rows : [...current, ...rows]));
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Unable to load channel members');
+      reportChannelActionError(error, 'Unable to load channel members');
     } finally {
       setLoadingMembers(false);
     }
@@ -1137,7 +1175,7 @@ function AuthenticatedChannelPageContent({
       );
       setActionFeedback('Updated member permission.');
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Unable to update permission');
+      reportChannelActionError(error, 'Unable to update permission');
     }
   }
 
@@ -1169,7 +1207,7 @@ function AuthenticatedChannelPageContent({
       setSettingsOpen(false);
       setActionFeedback('Updated channel settings.');
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Unable to update channel settings');
+      reportChannelActionError(error, 'Unable to update channel settings');
     } finally {
       setSavingSettings(false);
     }
@@ -1198,7 +1236,7 @@ function AuthenticatedChannelPageContent({
       );
       setActionFeedback('Removed channel member.');
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Unable to remove member');
+      reportChannelActionError(error, 'Unable to remove member');
     }
   }
 
@@ -1230,7 +1268,7 @@ function AuthenticatedChannelPageContent({
         setActionFeedback('No older messages.');
       }
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Unable to load older messages');
+      reportChannelActionError(error, 'Unable to load older messages');
     } finally {
       setLoadingOlder(false);
     }
@@ -1304,6 +1342,11 @@ function AuthenticatedChannelPageContent({
     if (!channel || !activeActor || !membership || !canSend) {
       return;
     }
+    if (!vault.loading && !vault.unlocked) {
+      setActionError(null);
+      setVaultDialogOpen(true);
+      return;
+    }
     const body = draft.trim();
     if (!body) {
       return;
@@ -1324,7 +1367,7 @@ function AuthenticatedChannelPageContent({
       }
       setDraft('');
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Unable to send message');
+      reportChannelActionError(error, 'Unable to send message');
     } finally {
       setSending(false);
     }
@@ -1486,6 +1529,11 @@ function AuthenticatedChannelPageContent({
                         ? `${accessModeLabel} · Requested`
                         : accessModeLabel}
                   </Badge>
+                  {activeActor ? (
+                    <Badge variant="outline" className="font-mono font-normal">
+                      Agent /{activeActor.slug}
+                    </Badge>
+                  ) : null}
                   {channel.accessMode === 'public' && !membership ? (
                     <Badge variant="outline">
                       {'See channel access mode'}
@@ -1755,6 +1803,37 @@ function AuthenticatedChannelPageContent({
                 disabled={sending}
                 placeholder={composerPlaceholder}
               />
+            ) : authenticatedSession &&
+              activeActor &&
+              !membership &&
+              alternativeChannelActors.length > 0 ? (
+              <div className="flex flex-col items-center justify-center gap-3 rounded-md border bg-muted/30 px-4 py-4 text-center">
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">Joined with another agent</p>
+                  <p className="text-xs text-muted-foreground">
+                    Switch agent context to open this channel with its existing membership.
+                  </p>
+                </div>
+                <div className="flex flex-wrap justify-center gap-2">
+                  {alternativeChannelActors.map(actor => (
+                    <Button
+                      key={actor.id.toString()}
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        void navigate({
+                          to: '/channels/$slug',
+                          params: { slug },
+                          search: { agent: actor.slug },
+                        });
+                      }}
+                    >
+                      Switch to /{actor.slug}
+                    </Button>
+                  ))}
+                </div>
+              </div>
             ) : (
               <ChannelFooterCta
                 channel={channel}
@@ -1779,6 +1858,30 @@ function AuthenticatedChannelPageContent({
               onSave={handleUpdateChannelSettings}
             />
           ) : null}
+
+          <KeyVaultDialog
+            open={vaultDialogOpen && !vault.loading && !vault.unlocked}
+            onOpenChange={setVaultDialogOpen}
+            mode={vault.initialized ? 'unlock' : 'setup'}
+            busy={vault.submitting}
+            error={vault.error}
+            title={vault.initialized ? 'Unlock Private Keys' : 'Create Private Key Vault'}
+            description={
+              activeActor
+                ? `Unlock the local vault to sign channel messages as /${activeActor.slug}.`
+                : 'Unlock the local vault to sign channel messages.'
+            }
+            submitLabel={vault.initialized ? 'Unlock keys' : 'Create vault'}
+            onSubmit={async (passphrase, _confirmPassphrase) => {
+              await vault.handleSubmit(passphrase);
+              setVaultDialogOpen(false);
+              setActionFeedback(
+                activeActor
+                  ? `Keys unlocked for /${activeActor.slug}. Send again when ready.`
+                  : 'Keys unlocked. Send again when ready.'
+              );
+            }}
+          />
 
           <MembersDialog
             open={membersOpen}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useReducer, useSpacetimeDB } from 'spacetimedb/tanstack';
 import { useAuthSession, type AuthenticatedBrowserSession } from '@/lib/auth-session';
 import {
@@ -30,6 +30,7 @@ import type {
   AccountChangeSignal,
 } from '@/module_bindings/types';
 import { buildMasumiRegistrationSyncKey } from './actor-settings';
+import { isOidcTokenExpiredError } from '@/lib/session-recovery';
 
 type RefreshedWorkspaceAgentRegistration = {
   sourceSyncKey: string | null;
@@ -96,6 +97,7 @@ export function useWorkspaceShell(params?: {
   selectedSlug?: string | null;
 }): WorkspaceShellState {
   const auth = useAuthSession();
+  const refreshAuthSession = auth.refresh;
   const conn = useSpacetimeDB();
   const session = auth.status === 'authenticated' ? auth.session : null;
   const upsertMasumiRegistrationReducer = useReducer(
@@ -109,6 +111,7 @@ export function useWorkspaceShell(params?: {
     useState(false);
   const [ownedAgentRegistrationRefreshErrors, setOwnedAgentRegistrationRefreshErrors] =
     useState<Record<string, string>>({});
+  const recoveredExpiredTokenRef = useRef<string | null>(null);
 
   const [inboxes, inboxesReady, inboxesError] = useLiveTable<Account>(
     tables.visible_accounts,
@@ -227,10 +230,37 @@ export function useWorkspaceShell(params?: {
     visible_channelsReady &&
     visible_channel_membershipsReady &&
     pendingChannelJoinRequestsReady;
-  const channelTablesError =
+  const rawChannelTablesError =
     visible_channelsError ||
     visible_channel_membershipsError ||
     pendingChannelJoinRequestsError;
+  const rawTablesError =
+    inboxesError || actorsError || contactRequestsError || threadInvitesError;
+  const expiredOidcError = [rawTablesError, rawChannelTablesError].find(error =>
+    isOidcTokenExpiredError(error)
+  );
+
+  useEffect(() => {
+    if (!session || !expiredOidcError) {
+      if (!expiredOidcError) {
+        recoveredExpiredTokenRef.current = null;
+      }
+      return;
+    }
+    if (recoveredExpiredTokenRef.current === session.idToken) {
+      return;
+    }
+
+    recoveredExpiredTokenRef.current = session.idToken;
+    void refreshAuthSession();
+  }, [expiredOidcError, refreshAuthSession, session]);
+
+  const channelTablesError = isOidcTokenExpiredError(rawChannelTablesError)
+    ? null
+    : rawChannelTablesError;
+  const tablesError = isOidcTokenExpiredError(rawTablesError)
+    ? null
+    : rawTablesError;
 
   useEffect(() => {
     if (
@@ -377,7 +407,7 @@ export function useWorkspaceShell(params?: {
     threadInvitesReady,
     channelTablesReady,
     tablesReady: inboxesReady && actorsReady && contactRequestsReady && threadInvitesReady,
-    tablesError: inboxesError || actorsError || contactRequestsError || threadInvitesError,
+    tablesError,
     channelTablesError,
     email: snapshot.email,
     ownedInbox: snapshot.ownedInbox,

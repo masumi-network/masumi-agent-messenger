@@ -18,6 +18,7 @@ import {
   GENERATED_MASUMI_OIDC_ISSUER,
   GENERATED_OIDC_CONFIG_SOURCE,
 } from '../../../shared/generated-oidc-config';
+import { ExpiringSingleFlight } from './expiring-single-flight';
 import { ensureWorkspaceEnvLoaded } from './workspace-env.server';
 
 ensureWorkspaceEnvLoaded();
@@ -26,6 +27,7 @@ const SESSION_COOKIE_NAME = 'masumi_oidc_session';
 const FLOW_COOKIE_MAX_AGE_SECONDS = 10 * 60;
 const SESSION_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 const SESSION_REFRESH_WINDOW_MS = 2 * 60 * 1000;
+const SESSION_REFRESH_SINGLE_FLIGHT_TTL_MS = 15_000;
 
 type OidcMetadata = {
   issuer: string;
@@ -133,6 +135,9 @@ let oidcMetadataCache:
       cachedAt: number;
     }
   | undefined;
+const sessionRefreshSingleFlight = new ExpiringSingleFlight<StoredOidcSession | null>({
+  ttlMs: SESSION_REFRESH_SINGLE_FLIGHT_TTL_MS,
+});
 let jwksCache: JwksCacheEntry | undefined;
 
 class OidcIdTokenValidationError extends Error {
@@ -876,18 +881,15 @@ async function exchangeAuthorizationCode(params: {
   });
 }
 
-async function refreshStoredSession(
+async function requestRefreshedSession(
   session: StoredOidcSession,
-  metadata: OidcMetadata
+  metadata: OidcMetadata,
+  refreshToken: string
 ): Promise<StoredOidcSession | null> {
-  if (!session.refreshToken) {
-    return null;
-  }
-
   const body = new URLSearchParams();
   body.set('grant_type', 'refresh_token');
   body.set('client_id', getClientId());
-  body.set('refresh_token', session.refreshToken);
+  body.set('refresh_token', refreshToken);
 
   const response = await fetch(metadata.token_endpoint, {
     method: 'POST',
@@ -914,6 +916,23 @@ async function refreshStoredSession(
     accessToken: refreshed.access_token ?? session.accessToken,
     createdAt: session.createdAt,
   };
+}
+
+async function refreshStoredSession(
+  session: StoredOidcSession,
+  metadata: OidcMetadata
+): Promise<StoredOidcSession | null> {
+  const refreshToken = session.refreshToken;
+  if (!refreshToken) {
+    return null;
+  }
+
+  // A rotating refresh token can reach several authenticated API handlers at
+  // once. Share the exchange briefly so one request cannot invalidate another.
+  const refreshKey = createHash('sha256').update(refreshToken).digest('base64url');
+  return sessionRefreshSingleFlight.run(refreshKey, () =>
+    requestRefreshedSession(session, metadata, refreshToken)
+  );
 }
 
 async function loadSession(request: Request): Promise<{

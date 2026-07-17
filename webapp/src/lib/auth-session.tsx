@@ -182,6 +182,7 @@ export function AuthSessionProvider({
   const [session, setSession] = useState<AuthenticatedBrowserSession | null>(null);
   const [error, setError] = useState<string | null>(null);
   const previousSessionRef = useRef<AuthenticatedBrowserSession | null>(null);
+  const refreshInFlightRef = useRef<Promise<BrowserAuthSession> | null>(null);
 
   const applySessionResult = useCallback((result: BrowserAuthSession) => {
     if (result.authenticated) {
@@ -201,6 +202,26 @@ export function AuthSessionProvider({
     setSession(null);
     setStatus('error');
     setError(readAuthSessionError(sessionError));
+  }, []);
+
+  const applyRefreshError = useCallback((sessionError: unknown) => {
+    setError(readAuthSessionError(sessionError));
+    setStatus(current => (current === 'authenticated' ? current : 'error'));
+  }, []);
+
+  const refreshFromServer = useCallback((): Promise<BrowserAuthSession> => {
+    const existing = refreshInFlightRef.current;
+    if (existing) {
+      return existing;
+    }
+
+    const refresh = fetchAuthSession().finally(() => {
+      if (refreshInFlightRef.current === refresh) {
+        refreshInFlightRef.current = null;
+      }
+    });
+    refreshInFlightRef.current = refresh;
+    return refresh;
   }, []);
 
   useEffect(() => {
@@ -224,7 +245,7 @@ export function AuthSessionProvider({
 
     const scheduleRefresh = (delayMs: number) => {
       timeoutId = window.setTimeout(() => {
-        void fetchAuthSession()
+        void refreshFromServer()
           .then(result => {
             if (cancelled) return;
 
@@ -240,9 +261,9 @@ export function AuthSessionProvider({
           .catch(sessionError => {
             if (cancelled) return;
 
-            // A background refresh failure must not discard a token that is
-            // still valid. Keep the current connection alive and retry before
-            // the independent expiry timer signs the session out.
+            // A background refresh failure must not discard the authenticated
+            // identity or its unlocked vault. Keep retrying while the expiry
+            // recovery path requests a replacement session.
             setError(readAuthSessionError(sessionError));
             const retryDelay = getSessionRefreshRetryDelayMs(session);
             if (retryDelay !== null) {
@@ -260,7 +281,7 @@ export function AuthSessionProvider({
         window.clearTimeout(timeoutId);
       }
     };
-  }, [applySessionResult, session]);
+  }, [applySessionResult, refreshFromServer, session]);
 
   useEffect(() => {
     if (!session) return;
@@ -268,22 +289,36 @@ export function AuthSessionProvider({
     const msUntilExpiry = getSessionExpiryDelayMs(session);
     if (msUntilExpiry === null) return;
 
-    const expireSession = () => {
-      setSession(null);
-      setStatus('anonymous');
-      setError(null);
+    let cancelled = false;
+    let retryId: number | null = null;
+
+    const refreshExpiredSession = () => {
+      void refreshFromServer()
+        .then(result => {
+          if (!cancelled) {
+            applySessionResult(result);
+          }
+        })
+        .catch(sessionError => {
+          if (cancelled) return;
+          applyRefreshError(sessionError);
+          retryId = window.setTimeout(refreshExpiredSession, SESSION_REFRESH_RETRY_INTERVAL_MS);
+        });
     };
 
     if (msUntilExpiry === 0) {
-      expireSession();
-      return;
+      refreshExpiredSession();
+    } else {
+      retryId = window.setTimeout(refreshExpiredSession, msUntilExpiry);
     }
 
-    const timeoutId = window.setTimeout(expireSession, msUntilExpiry);
     return () => {
-      window.clearTimeout(timeoutId);
+      cancelled = true;
+      if (retryId !== null) {
+        window.clearTimeout(retryId);
+      }
     };
-  }, [session]);
+  }, [applyRefreshError, applySessionResult, refreshFromServer, session]);
 
   useEffect(() => {
     let refreshInFlight = false;
@@ -300,9 +335,9 @@ export function AuthSessionProvider({
 
       refreshInFlight = true;
       lastInteractiveRefreshAt = now;
-      fetchAuthSession()
+      refreshFromServer()
         .then(applySessionResult)
-        .catch(applySessionError)
+        .catch(applyRefreshError)
         .finally(() => {
           refreshInFlight = false;
         });
@@ -321,7 +356,7 @@ export function AuthSessionProvider({
       window.removeEventListener('focus', refreshFromBrowserEvent);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [applySessionError, applySessionResult]);
+  }, [applyRefreshError, applySessionResult, refreshFromServer]);
 
   useEffect(() => {
     const previousSession = previousSessionRef.current;
@@ -334,21 +369,23 @@ export function AuthSessionProvider({
     previousSessionRef.current = nextSession;
   }, [session, status]);
 
+  const refresh = useCallback(async () => {
+    try {
+      const result = await refreshFromServer();
+      applySessionResult(result);
+    } catch (sessionError) {
+      applyRefreshError(sessionError);
+    }
+  }, [applyRefreshError, applySessionResult, refreshFromServer]);
+
   const value = useMemo<AuthSessionContextValue>(
     () => ({
       status,
       session,
       error,
-      refresh: async () => {
-        try {
-          const result = await fetchAuthSession();
-          applySessionResult(result);
-        } catch (sessionError) {
-          applySessionError(sessionError);
-        }
-      },
+      refresh,
     }),
-    [applySessionError, applySessionResult, error, session, status]
+    [error, refresh, session, status]
   );
 
   return (
