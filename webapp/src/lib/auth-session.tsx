@@ -41,6 +41,7 @@ type AuthSessionContextValue = {
 
 const AuthSessionContext = createContext<AuthSessionContextValue | null>(null);
 const INTERACTIVE_SESSION_REFRESH_MIN_INTERVAL_MS = 5_000;
+const SESSION_REFRESH_RETRY_INTERVAL_MS = 5_000;
 
 export function getSessionRefreshDelayMs(
   session: AuthenticatedBrowserSession,
@@ -48,8 +49,25 @@ export function getSessionRefreshDelayMs(
 ): number {
   const expiresAtMs = new Date(session.expiresAt).getTime();
   return Number.isFinite(expiresAtMs)
-    ? Math.max(30_000, Math.min(60_000, expiresAtMs - nowMs - 60_000))
+    ? Math.max(1_000, Math.min(60_000, expiresAtMs - nowMs - 60_000))
     : 60_000;
+}
+
+export function getSessionRefreshRetryDelayMs(
+  session: AuthenticatedBrowserSession,
+  nowMs = Date.now()
+): number | null {
+  const msUntilExpiry = getSessionExpiryDelayMs(session, nowMs);
+  if (msUntilExpiry === null) {
+    return SESSION_REFRESH_RETRY_INTERVAL_MS;
+  }
+  if (msUntilExpiry <= 0) {
+    return null;
+  }
+  return Math.min(
+    SESSION_REFRESH_RETRY_INTERVAL_MS,
+    Math.max(250, msUntilExpiry - 250)
+  );
 }
 
 export function getSessionExpiryDelayMs(
@@ -105,6 +123,22 @@ function sameBrowserSession(
     left.user.audience.length === right.user.audience.length &&
     left.user.audience.every((audience, index) => audience === right.user.audience[index])
   );
+}
+
+export function getFollowUpSessionRefreshDelayMs(
+  currentSession: AuthenticatedBrowserSession,
+  result: BrowserAuthSession,
+  nowMs = Date.now()
+): number | null {
+  return result.authenticated && sameBrowserSession(currentSession, result)
+    ? getSessionRefreshDelayMs(result, nowMs)
+    : null;
+}
+
+function readAuthSessionError(sessionError: unknown): string {
+  return sessionError instanceof Error
+    ? sessionError.message
+    : 'Unable to load auth session';
 }
 
 async function fetchAuthSession(signal?: AbortSignal): Promise<BrowserAuthSession> {
@@ -166,11 +200,7 @@ export function AuthSessionProvider({
   const applySessionError = useCallback((sessionError: unknown) => {
     setSession(null);
     setStatus('error');
-    setError(
-      sessionError instanceof Error
-        ? sessionError.message
-        : 'Unable to load auth session'
-    );
+    setError(readAuthSessionError(sessionError));
   }, []);
 
   useEffect(() => {
@@ -189,16 +219,48 @@ export function AuthSessionProvider({
   useEffect(() => {
     if (!session) return;
 
-    const timeoutId = window.setTimeout(() => {
-      fetchAuthSession()
-        .then(applySessionResult)
-        .catch(applySessionError);
-    }, getSessionRefreshDelayMs(session));
+    let cancelled = false;
+    let timeoutId: number | null = null;
+
+    const scheduleRefresh = (delayMs: number) => {
+      timeoutId = window.setTimeout(() => {
+        void fetchAuthSession()
+          .then(result => {
+            if (cancelled) return;
+
+            applySessionResult(result);
+            const followUpDelay = getFollowUpSessionRefreshDelayMs(
+              session,
+              result
+            );
+            if (followUpDelay !== null) {
+              scheduleRefresh(followUpDelay);
+            }
+          })
+          .catch(sessionError => {
+            if (cancelled) return;
+
+            // A background refresh failure must not discard a token that is
+            // still valid. Keep the current connection alive and retry before
+            // the independent expiry timer signs the session out.
+            setError(readAuthSessionError(sessionError));
+            const retryDelay = getSessionRefreshRetryDelayMs(session);
+            if (retryDelay !== null) {
+              scheduleRefresh(retryDelay);
+            }
+          });
+      }, delayMs);
+    };
+
+    scheduleRefresh(getSessionRefreshDelayMs(session));
 
     return () => {
-      window.clearTimeout(timeoutId);
+      cancelled = true;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
     };
-  }, [applySessionError, applySessionResult, session]);
+  }, [applySessionResult, session]);
 
   useEffect(() => {
     if (!session) return;

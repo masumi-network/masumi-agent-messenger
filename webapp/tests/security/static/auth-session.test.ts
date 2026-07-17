@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  getFollowUpSessionRefreshDelayMs,
   getSessionExpiryDelayMs,
   getSessionRefreshDelayMs,
+  getSessionRefreshRetryDelayMs,
   shouldClearUnlockedSessionMaterial,
   type AuthenticatedBrowserSession,
   type BrowserAuthSession,
@@ -79,7 +81,7 @@ describe('auth-session vault clearing', () => {
     expect(getSessionRefreshDelayMs(session, now)).toBe(60_000);
     expect(
       getSessionRefreshDelayMs(session, new Date('2026-04-15T11:59:45.000Z').getTime())
-    ).toBe(30_000);
+    ).toBe(1_000);
     expect(getSessionExpiryDelayMs(session, now)).toBe(600_000);
     expect(
       getSessionExpiryDelayMs(session, new Date('2026-04-15T12:00:01.000Z').getTime())
@@ -89,6 +91,54 @@ describe('auth-session vault clearing', () => {
         ...session,
         expiresAt: 'not-a-date',
       })
+    ).toBeNull();
+  });
+
+  it('keeps polling when the server returns the same valid token', () => {
+    const now = new Date('2026-04-15T11:50:00.000Z').getTime();
+    const session = buildSession();
+
+    expect(getFollowUpSessionRefreshDelayMs(session, session, now)).toBe(60_000);
+    expect(
+      getFollowUpSessionRefreshDelayMs(
+        session,
+        {
+          ...session,
+          idToken: 'refreshed-id-token',
+          expiresAt: '2026-04-15T13:00:00.000Z',
+        },
+        now
+      )
+    ).toBeNull();
+    expect(
+      getFollowUpSessionRefreshDelayMs(
+        session,
+        { authenticated: false },
+        now
+      )
+    ).toBeNull();
+  });
+
+  it('retries transient refresh failures without crossing token expiry', () => {
+    const session = buildSession();
+
+    expect(
+      getSessionRefreshRetryDelayMs(
+        session,
+        new Date('2026-04-15T11:59:45.000Z').getTime()
+      )
+    ).toBe(5_000);
+    expect(
+      getSessionRefreshRetryDelayMs(
+        session,
+        new Date('2026-04-15T11:59:59.900Z').getTime()
+      )
+    ).toBe(250);
+    expect(
+      getSessionRefreshRetryDelayMs(
+        session,
+        new Date('2026-04-15T12:00:01.000Z').getTime()
+      )
     ).toBeNull();
   });
 });
