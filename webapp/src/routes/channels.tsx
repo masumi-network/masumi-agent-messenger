@@ -51,6 +51,8 @@ import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell'
 import { reducers, type DbConnection } from '@/module_bindings';
 import type { Agent, Channel } from '@/module_bindings/types';
 import { normalizeInboxSlug } from '../../../shared/inbox-slug';
+import { useOidcSessionRecovery } from '@/hooks/use-oidc-session-recovery';
+import { isOidcTokenExpiredError } from '@/lib/session-recovery';
 
 export const Route = createFileRoute('/channels')({
   validateSearch: search => ({
@@ -197,7 +199,9 @@ function usePublicChannelPage() {
           if (cancelled) {
             return;
           }
-          setPageRows([]);
+          if (!isOidcTokenExpiredError(error)) {
+            setPageRows([]);
+          }
           setLoadingPage(false);
           setPageError(readPublicChannelPageError(error));
         });
@@ -219,6 +223,7 @@ function usePublicChannelPage() {
   const channels = useMemo(() => {
     return sortPublicChannels(pageRows);
   }, [pageRows]);
+  const recoveringSession = useOidcSessionRecovery(pageError);
 
   const goToNextPage = () => {
     const sortedPageRows = sortPublicChannels(pageRows);
@@ -245,8 +250,11 @@ function usePublicChannelPage() {
 
   return {
     channels,
-    ready: (!isAuthenticated || isActive) && !loadingPage,
-    error: pageError,
+    ready:
+      (!isAuthenticated || isActive) &&
+      !loadingPage &&
+      (!recoveringSession || pageRows.length > 0),
+    error: recoveringSession ? null : pageError,
     pageIndex,
     canPrevious: pageIndex > 0,
     canNext: pageRows.length >= PUBLIC_CHANNEL_PAGE_SIZE,

@@ -8,6 +8,8 @@ import {
   isLeaseRefreshHintMessage,
 } from './account-auth-lease';
 import { deferEffectStateUpdate } from './effect-state';
+import { useOidcSessionRecovery } from '@/hooks/use-oidc-session-recovery';
+import { isOidcTokenExpiredError } from './session-recovery';
 
 type ProcedureSnapshotState<Row> = {
   rows: Row[];
@@ -68,13 +70,13 @@ export function useProcedureSnapshot<Row>(
           const message = error instanceof Error ? error.message : null;
           const isLeaseError =
             isAccountAuthLeaseError(error) || isLeaseRefreshHintMessage(message);
-          setState({
-            rows: [],
+          setState(current => ({
+            rows: isOidcTokenExpiredError(error) ? current.rows : [],
             ready: false,
             error: isLeaseError
               ? describeAccountAuthLeaseRefreshError(error)
               : readProcedureError(error),
-          });
+          }));
         }
       });
 
@@ -83,5 +85,11 @@ export function useProcedureSnapshot<Row>(
     };
   }, [connection, isActive, loader, stableRefreshKey]);
 
-  return [state.rows, state.ready, state.error];
+  const recoveringSession = useOidcSessionRecovery(state.error);
+
+  return [
+    state.rows,
+    recoveringSession ? state.rows.length > 0 : state.ready,
+    recoveringSession ? null : state.error,
+  ];
 }

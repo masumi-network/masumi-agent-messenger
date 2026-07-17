@@ -3,6 +3,8 @@ import { useSpacetimeDB } from 'spacetimedb/tanstack';
 import type { DbConnection } from '@/module_bindings';
 import type { Channel, ChannelMessage } from '@/module_bindings/types';
 import { deferEffectStateUpdate } from './effect-state';
+import { useOidcSessionRecovery } from '@/hooks/use-oidc-session-recovery';
+import { isOidcTokenExpiredError } from './session-recovery';
 
 /**
  * Anonymous public-channel viewing.
@@ -69,7 +71,9 @@ export function usePublicChannelLookup(
           if (cancelled) {
             return;
           }
-          setChannel(null);
+          if (!isOidcTokenExpiredError(lookupError)) {
+            setChannel(null);
+          }
           setReady(false);
           setError(readPublicChannelMessagesError(lookupError));
         });
@@ -81,7 +85,13 @@ export function usePublicChannelLookup(
     };
   }, [connection, enabled, isActive, params.channelSlug]);
 
-  return [channel, ready, error];
+  const recoveringSession = useOidcSessionRecovery(error);
+
+  return [
+    channel,
+    recoveringSession ? channel !== null : ready,
+    recoveringSession ? null : error,
+  ];
 }
 
 export function usePublicChannelMessagesLookup(
@@ -133,7 +143,9 @@ export function usePublicChannelMessagesLookup(
           if (cancelled) {
             return;
           }
-          setMessages([]);
+          if (!isOidcTokenExpiredError(lookupError)) {
+            setMessages([]);
+          }
           setReady(false);
           setError(readPublicChannelMessagesError(lookupError));
         });
@@ -153,5 +165,12 @@ export function usePublicChannelMessagesLookup(
     reloadToken,
   ]);
 
-  return [messages, ready, error, reload];
+  const recoveringSession = useOidcSessionRecovery(error);
+
+  return [
+    messages,
+    recoveringSession ? messages.length > 0 : ready,
+    recoveringSession ? null : error,
+    reload,
+  ];
 }

@@ -84,6 +84,7 @@ import {
   isKeyVaultLockedError,
   isOidcTokenExpiredError,
 } from '@/lib/session-recovery';
+import { useOidcSessionRecovery } from '@/hooks/use-oidc-session-recovery';
 import { DbConnection, reducers, tables } from '@/module_bindings';
 import type {
   Agent,
@@ -1388,7 +1389,7 @@ function AuthenticatedChannelPageContent({
     return () => window.clearTimeout(timeout);
   }, [actionFeedback]);
 
-  const error =
+  const rawError =
     channelsError ??
     messagesError ??
     (auth.status === 'authenticated'
@@ -1398,6 +1399,8 @@ function AuthenticatedChannelPageContent({
         joinRequestsError ??
         historyError
       : null);
+  const recoveringSession = useOidcSessionRecovery(rawError);
+  const error = recoveringSession ? null : rawError;
   const authenticatedTablesReady =
     auth.status !== 'authenticated' ||
     (visible_channelsReady &&

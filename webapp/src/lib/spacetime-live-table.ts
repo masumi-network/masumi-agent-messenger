@@ -17,6 +17,7 @@ import {
   prepareSpacetimeSubscriptionQuery,
   type SpacetimeSubscriptionTableName,
 } from '../../../shared/spacetime-subscription-limits';
+import { useOidcSessionRecovery } from '@/hooks/use-oidc-session-recovery';
 
 type LiveTableName = Extract<keyof typeof tables, SpacetimeSubscriptionTableName>;
 type LiveTableQuery = Query<TypedTableDef>;
@@ -358,7 +359,13 @@ function useSharedLiveTable<Row>(
     };
   }, [accessorName, connection, enabled, isActive, kind, tableQuery]);
 
-  return [rows, ready, error];
+  const recoveringSession = useOidcSessionRecovery(error);
+
+  return [
+    rows,
+    recoveringSession ? rows.length > 0 : ready,
+    recoveringSession ? null : error,
+  ];
 }
 
 export function useLiveTable<Row>(

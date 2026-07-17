@@ -31,6 +31,7 @@ import type {
 } from '@/module_bindings/types';
 import { buildMasumiRegistrationSyncKey } from './actor-settings';
 import { isOidcTokenExpiredError } from '@/lib/session-recovery';
+import { useOidcSessionRecovery } from '@/hooks/use-oidc-session-recovery';
 
 type RefreshedWorkspaceAgentRegistration = {
   sourceSyncKey: string | null;
@@ -100,6 +101,9 @@ export function useWorkspaceShell(params?: {
   const refreshAuthSession = auth.refresh;
   const conn = useSpacetimeDB();
   const session = auth.status === 'authenticated' ? auth.session : null;
+  const rawConnectionError = conn.connectionError?.message ?? null;
+  const recoveringConnectionSession =
+    useOidcSessionRecovery(rawConnectionError);
   const upsertMasumiRegistrationReducer = useReducer(
     reducers.upsertMasumiRegistration
   );
@@ -396,7 +400,7 @@ export function useWorkspaceShell(params?: {
     session,
     conn,
     connected: conn.isActive,
-    connectionError: conn.connectionError?.message ?? null,
+    connectionError: recoveringConnectionSession ? null : rawConnectionError,
     inboxes,
     actors,
     contactRequests,

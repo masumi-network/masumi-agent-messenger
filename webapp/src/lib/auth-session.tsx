@@ -350,10 +350,14 @@ export function AuthSessionProvider({
     };
 
     window.addEventListener('focus', refreshFromBrowserEvent);
+    window.addEventListener('online', refreshFromBrowserEvent);
+    window.addEventListener('pageshow', refreshFromBrowserEvent);
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       window.removeEventListener('focus', refreshFromBrowserEvent);
+      window.removeEventListener('online', refreshFromBrowserEvent);
+      window.removeEventListener('pageshow', refreshFromBrowserEvent);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [applyRefreshError, applySessionResult, refreshFromServer]);

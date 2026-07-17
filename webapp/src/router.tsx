@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { createRouter as createTanStackRouter } from '@tanstack/react-router';
 import { QueryClient } from '@tanstack/react-query';
 import { setupRouterSsrQueryIntegration } from '@tanstack/react-router-ssr-query';
@@ -14,6 +14,7 @@ import { NotFoundPage } from './components/not-found-page';
 import { AuthSessionProvider, useAuthSession } from './lib/auth-session';
 import { buildScopedSpacetimeUri } from './lib/spacetime-connection-scope';
 import { KeyVaultProvider } from './hooks/use-key-vault';
+import { isOidcTokenExpiredError } from './lib/session-recovery';
 
 const HOST = import.meta.env.VITE_SPACETIMEDB_HOST ?? 'ws://localhost:3000';
 const DB_NAME =
@@ -60,7 +61,19 @@ export function AuthenticatedSpacetimeShell({
   const authenticatedSession =
     auth.status === 'authenticated' ? auth.session : null;
   const sessionToken = authenticatedSession?.idToken ?? null;
+  const refreshAuthSession = auth.refresh;
   const isServerRender = import.meta.env.SSR;
+  const onAuthenticatedConnectError = useCallback(
+    (_ctx: ErrorContext, err: Error) => {
+      if (!isPageExiting && isOidcTokenExpiredError(err)) {
+        void refreshAuthSession();
+      } else if (!isPageExiting) {
+        console.error('Error connecting to SpacetimeDB:', err);
+      }
+      spacetimeDBQueryClient.disconnect();
+    },
+    [refreshAuthSession]
+  );
 
   useEffect(() => {
     const handlePageHide = () => {
@@ -109,8 +122,8 @@ export function AuthenticatedSpacetimeShell({
       .withToken(sessionToken)
       .onConnect(onConnect)
       .onDisconnect(onDisconnect)
-      .onConnectError(onConnectError);
-  }, [connectionUri, sessionToken]);
+      .onConnectError(onAuthenticatedConnectError);
+  }, [connectionUri, onAuthenticatedConnectError, sessionToken]);
 
   const serverConnectionBuilder = useMemo(
     () =>
