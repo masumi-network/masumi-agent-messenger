@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 import {
   getKeyVaultStatus,
   initializeKeyVault,
@@ -19,7 +26,9 @@ export type UseKeyVaultResult = {
   handleSubmit: (passphrase: string) => Promise<void>;
 };
 
-export function useKeyVault(): UseKeyVaultResult {
+const KeyVaultContext = createContext<UseKeyVaultResult | null>(null);
+
+function useKeyVaultState(): UseKeyVaultResult {
   const auth = useAuthSession();
   const [initialized, setInitialized] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
@@ -28,17 +37,24 @@ export function useKeyVault(): UseKeyVaultResult {
   const [error, setError] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
 
-  const authenticatedSession = auth.status === 'authenticated' ? auth.session : null;
+  const authenticatedSession =
+    auth.status === 'authenticated' ? auth.session : null;
+  const ownerUserId = authenticatedSession
+    ? `${authenticatedSession.user.issuer}:${authenticatedSession.user.subject}`
+    : null;
+  const ownerEmail = authenticatedSession
+    ? normalizeEmail(authenticatedSession.user.email ?? '')
+    : null;
 
   const owner = useMemo<KeyVaultOwner | null>(
     () =>
-      authenticatedSession
+      ownerUserId && ownerEmail !== null
         ? {
-            userId: `${authenticatedSession.user.issuer}:${authenticatedSession.user.subject}`,
-            email: normalizeEmail(authenticatedSession.user.email ?? ''),
+            userId: ownerUserId,
+            email: ownerEmail,
           }
         : null,
-    [authenticatedSession]
+    [ownerEmail, ownerUserId]
   );
 
   useEffect(() => {
@@ -48,14 +64,26 @@ export function useKeyVault(): UseKeyVaultResult {
   }, []);
 
   useEffect(() => {
-    if (!hydrated || !owner) {
+    if (!hydrated) {
       return;
+    }
+
+    if (!owner) {
+      return deferEffectStateUpdate(() => {
+        setInitialized(false);
+        setUnlocked(false);
+        setLoading(false);
+        setError(null);
+      });
     }
 
     let cancelled = false;
     deferEffectStateUpdate(() => {
       if (!cancelled) {
+        setInitialized(false);
+        setUnlocked(false);
         setLoading(true);
+        setError(null);
       }
     });
     void getKeyVaultStatus(owner)
@@ -125,4 +153,25 @@ export function useKeyVault(): UseKeyVaultResult {
     error,
     handleSubmit,
   };
+}
+
+export function KeyVaultProvider({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const vault = useKeyVaultState();
+  return (
+    <KeyVaultContext.Provider value={vault}>
+      {children}
+    </KeyVaultContext.Provider>
+  );
+}
+
+export function useKeyVault(): UseKeyVaultResult {
+  const vault = useContext(KeyVaultContext);
+  if (!vault) {
+    throw new Error('useKeyVault must be used within KeyVaultProvider');
+  }
+  return vault;
 }

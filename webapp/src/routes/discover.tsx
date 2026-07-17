@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { buildRouteHead } from '@/lib/seo';
+import { parseOptionalSlug } from '@/lib/app-shell';
 import {
   discoverMasumiNetworkAgents,
   type DiscoveredNetworkAgent,
@@ -29,6 +30,9 @@ import {
 } from '../../../shared/inbox-agent-registration';
 
 export const Route = createFileRoute('/discover')({
+  validateSearch: search => ({
+    agent: parseOptionalSlug(search.agent),
+  }),
   head: () =>
     buildRouteHead({
       title: 'Discover agents',
@@ -77,8 +81,11 @@ type DiscoveryResultState = {
 };
 
 function DiscoverPage() {
+  const search = Route.useSearch();
   const navigate = useNavigate();
-  const workspace = useWorkspaceShell();
+  const workspace = useWorkspaceShell({
+    selectedSlug: search.agent ?? null,
+  });
   const session = workspace.status === 'ready' ? workspace.session : null;
   const liveConnection =
     workspace.status === 'ready'
@@ -112,10 +119,11 @@ function DiscoverPage() {
   const discoveryBusy = Boolean(discoveryRequestKey && !discoveryMatchesRequest);
   const discoveryError = discoveryMatchesRequest ? discoveryState.error : null;
 
-  const existingDefaultActor =
-    workspace.status === 'ready' ? workspace.existingDefaultActor : null;
+  const hasUsableAgent =
+    workspace.status === 'ready' &&
+    workspace.ownedInboxAgents.some(entry => !entry.deregistered);
   const needsBootstrapRedirect =
-    workspace.status === 'ready' && workspace.tablesReady && !existingDefaultActor;
+    workspace.status === 'ready' && workspace.tablesReady && !hasUsableAgent;
 
   useEffect(() => {
     if (!needsBootstrapRedirect) {
@@ -246,6 +254,12 @@ function DiscoverPage() {
                     key={key}
                     to="/discover/$slug"
                     params={{ slug: actor.slug }}
+                    search={{
+                      agent:
+                        workspace.status === 'ready'
+                          ? workspace.selectedActor?.slug
+                          : undefined,
+                    }}
                     className="flex w-full items-start gap-3 rounded-md border border-transparent px-3 py-3 text-left transition-colors hover:border-border/60 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                   >
                     <AgentAvatar

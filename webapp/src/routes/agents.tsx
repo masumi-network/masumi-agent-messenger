@@ -32,7 +32,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { describeActor } from '@/lib/agent-directory';
 import { getOrCreateAgentKeyPair, setActiveActorIdentity } from '@/lib/agent-session';
-import { buildWorkspaceSearch, describeLocalVaultRequirement } from '@/lib/app-shell';
+import {
+  buildWorkspaceSearch,
+  describeLocalVaultRequirement,
+  parseOptionalSlug,
+} from '@/lib/app-shell';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { buildRouteHead } from '@/lib/seo';
 import { useKeyVault } from '@/hooks/use-key-vault';
@@ -71,6 +75,9 @@ import {
 } from '../../../shared/message-format';
 
 export const Route = createFileRoute('/agents')({
+  validateSearch: search => ({
+    agent: parseOptionalSlug(search.agent),
+  }),
   head: () =>
     buildRouteHead({
       title: 'My agents',
@@ -116,13 +123,18 @@ function getManagedRegistrationLabel(
 }
 
 export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {}) {
+  const search = Route.useSearch();
   const navigate = useNavigate();
   const vault = useKeyVault();
-  const workspace = useWorkspaceShell();
+  const workspace = useWorkspaceShell({
+    selectedSlug: search.agent ?? null,
+  });
   const session = workspace.status === 'ready' ? workspace.session : null;
   const connected = workspace.status === 'ready' ? workspace.connected : false;
 
-  const [selectedOwnedAgentSlug, setSelectedOwnedAgentSlug] = useState<string | null>(null);
+  const [selectedOwnedAgentSlug, setSelectedOwnedAgentSlug] = useState<string | null>(
+    search.agent ?? null
+  );
   const [managedAgentTab, setManagedAgentTab] =
     useState<ManagedAgentDetailsTab>('profile');
   const [publicDescriptionDraft, setPublicDescriptionDraft] = useState('');
@@ -258,22 +270,22 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
     () => ownedAgentEntries.map(entry => entry.actor),
     [ownedAgentEntries]
   );
+  const activeWorkspaceAgentSlug =
+    workspace.status === 'ready'
+      ? workspace.selectedActor?.slug ?? null
+      : search.agent ?? null;
+  const activeWorkspaceAgentAvailable =
+    activeWorkspaceAgentSlug !== null &&
+    ownedAgents.some(actor => actor.slug === activeWorkspaceAgentSlug);
   useEffect(() => {
-    if (ownedAgents.length === 0 && selectedOwnedAgentSlug !== null) {
-      return deferEffectStateUpdate(() => {
-        setSelectedOwnedAgentSlug(null);
-      });
-    }
-
-    if (
-      selectedOwnedAgentSlug &&
-      !ownedAgents.some(actor => actor.slug === selectedOwnedAgentSlug)
-    ) {
-      return deferEffectStateUpdate(() => {
-        setSelectedOwnedAgentSlug(null);
-      });
-    }
-  }, [ownedAgents, selectedOwnedAgentSlug]);
+    return deferEffectStateUpdate(() => {
+      setSelectedOwnedAgentSlug(
+        activeWorkspaceAgentSlug && activeWorkspaceAgentAvailable
+          ? activeWorkspaceAgentSlug
+          : null
+      );
+    });
+  }, [activeWorkspaceAgentAvailable, activeWorkspaceAgentSlug]);
 
   const selectedOwnedAgentEntry = useMemo(
     () =>
@@ -309,7 +321,9 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
     writeAccess.canWrite &&
     Boolean(selectedOwnedAgent);
   const needsBootstrapRedirect =
-    workspace.status === 'ready' && workspace.tablesReady && !existingDefaultActor;
+    workspace.status === 'ready' &&
+    workspace.tablesReady &&
+    !workspace.ownedInboxAgents.some(entry => !entry.deregistered);
 
   useEffect(() => {
     if (!needsBootstrapRedirect) {
@@ -459,6 +473,11 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
       setSelectedOwnedAgentSlug(normalizedSlug);
       setShowCreateAgentDialog(false);
       setFeedback('Agent created. Export a backup to keep your keys safe.');
+      void navigate({
+        to: '/agents',
+        search: { agent: normalizedSlug },
+        replace: true,
+      });
     } catch (createError) {
       setError(
         createError instanceof Error
@@ -1052,9 +1071,25 @@ export function AgentsPage({ signInReturnTo = '/agents' }: AgentsPageProps = {})
                             ? `Hide settings for ${describeActor(actor)}`
                             : `Show settings for ${describeActor(actor)}`
                         }
-                        onClick={() =>
-                          setSelectedOwnedAgentSlug(isExpanded ? null : actor.slug)
-                        }
+                        onClick={() => {
+                          if (isExpanded) {
+                            setSelectedOwnedAgentSlug(null);
+                            return;
+                          }
+
+                          setSelectedOwnedAgentSlug(actor.slug);
+                          if (!entry.deregistered) {
+                            setActiveActorIdentity({
+                              email,
+                              slug: actor.slug,
+                              accountIdentifier: actor.slug,
+                            });
+                            void navigate({
+                              to: '/agents',
+                              search: { agent: actor.slug },
+                            });
+                          }
+                        }}
                         className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         <CaretDown

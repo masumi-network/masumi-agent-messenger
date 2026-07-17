@@ -374,7 +374,12 @@ function AuthenticatedChannelsPageContent({
           <AlertDescription className="space-y-3">
             <span className="block">Select or create an agent before joining channels.</span>
             <Button asChild variant="outline">
-              <Link to="/agents">My agents</Link>
+              <Link
+                to="/agents"
+                search={{ agent: undefined }}
+              >
+                My agents
+              </Link>
             </Button>
           </AlertDescription>
         </Alert>

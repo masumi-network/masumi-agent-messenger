@@ -4,6 +4,7 @@ export const Route = createFileRoute('/inboxes')({
   beforeLoad: () => {
     throw redirect({
       to: '/agents',
+      search: { agent: undefined },
     });
   },
   component: () => null,

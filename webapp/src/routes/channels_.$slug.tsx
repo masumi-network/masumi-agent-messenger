@@ -1956,7 +1956,12 @@ function ChannelFooterCta({
           Create or sync an agent before joining channels.
         </p>
         <Button asChild size="sm" variant="outline">
-          <Link to="/agents">Agents</Link>
+          <Link
+            to="/agents"
+            search={{ agent: undefined }}
+          >
+            Agents
+          </Link>
         </Button>
       </div>
     );

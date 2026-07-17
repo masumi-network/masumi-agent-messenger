@@ -66,17 +66,13 @@ import {
   clearPendingDeviceShareKeyMaterial,
   commitStoredAgentKeyRotation,
   exportInboxKeyShareSnapshot,
-  getKeyVaultStatus,
   getAgentKeyPairForEncryptionVersion,
   getOrCreateDeviceKeyMaterial,
-  initializeKeyVault,
   loadStoredAgentKeyPair,
   loadStoredDeviceKeyMaterial,
   previewStoredAgentKeyRotation,
   setActiveActorIdentity,
   type DeviceKeyMaterial,
-  type KeyVaultOwner,
-  unlockKeyVault,
 } from '@/lib/agent-session';
 import { describeActor } from '@/lib/agent-directory';
 import {
@@ -217,6 +213,7 @@ import {
   toActorIdentity,
 } from '@/features/workspace/actor-settings';
 import { useWorkspaceWriteAccess } from '@/features/workspace/use-write-access';
+import { useKeyVault } from '@/hooks/use-key-vault';
 
 const THREAD_LIST_PAGE_SIZE = 10;
 const THREAD_TIMELINE_PAGE_SIZE = 10;
@@ -1395,6 +1392,12 @@ function AuthenticatedInboxPage() {
   const activeWorkspaceTab = search.tab ?? 'inbox';
   const navigate = useNavigate();
   const conn = useSpacetimeDB();
+  const vault = useKeyVault();
+  const vaultInitialized = vault.initialized;
+  const vaultUnlocked = vault.unlocked;
+  const vaultLoading = vault.loading;
+  const vaultSubmitting = vault.submitting;
+  const vaultError = vault.error;
   const liveConnection = conn.getConnection() as DbConnection | null;
   const [hydrated, setHydrated] = useState(false);
   const connected = hydrated ? conn.isActive : false;
@@ -1448,11 +1451,6 @@ function AuthenticatedInboxPage() {
   const [composerInput, setComposerInput] = useState('');
   const [rotateSecret, setRotateSecret] = useState(false);
   const [decryptedMessageById, setDecryptedMessageById] = useState<DecryptedMap>({});
-  const [vaultInitialized, setVaultInitialized] = useState(false);
-  const [vaultUnlocked, setVaultUnlocked] = useState(false);
-  const [vaultLoading, setVaultLoading] = useState(true);
-  const [vaultSubmitting, setVaultSubmitting] = useState(false);
-  const [vaultError, setVaultError] = useState<string | null>(null);
   const [deviceActionBusy, setDeviceActionBusy] = useState(false);
   const [verifyingDeviceRequest, setVerifyingDeviceRequest] = useState(false);
   const [approvalActionRequestId, setApprovalActionRequestId] = useState<string | null>(null);
@@ -1490,16 +1488,6 @@ function AuthenticatedInboxPage() {
   const pagedThreadMessagesRef = useRef<Message[]>([]);
   const authenticatedSession =
     auth.status === 'authenticated' ? auth.session : null;
-  const keyVaultOwner = useMemo<KeyVaultOwner | null>(
-    () =>
-      authenticatedSession
-        ? {
-            userId: `${authenticatedSession.user.issuer}:${authenticatedSession.user.subject}`,
-            email: normalizeEmail(authenticatedSession.user.email ?? ''),
-          }
-        : null,
-    [authenticatedSession]
-  );
 
   useEffect(() => {
     return deferEffectStateUpdate(() => {
@@ -1521,43 +1509,6 @@ function AuthenticatedInboxPage() {
   useEffect(() => {
     pagedThreadMessagesRef.current = pagedThreadMessages;
   }, [pagedThreadMessages]);
-
-  useEffect(() => {
-    if (!hydrated || !keyVaultOwner) {
-      return;
-    }
-
-    let cancelled = false;
-    deferEffectStateUpdate(() => {
-      if (!cancelled) {
-        setVaultLoading(true);
-      }
-    });
-    void getKeyVaultStatus(keyVaultOwner)
-      .then(status => {
-        if (cancelled) return;
-        setVaultInitialized(status.initialized);
-        setVaultUnlocked(status.unlocked);
-        setVaultError(null);
-      })
-      .catch(vaultStatusError => {
-        if (cancelled) return;
-        setVaultError(
-          vaultStatusError instanceof Error
-            ? vaultStatusError.message
-            : 'Unable to inspect the local key vault'
-        );
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setVaultLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [hydrated, keyVaultOwner]);
 
   const addContactAllowlistEntryReducer = useReducer(reducers.addContactAllowlistEntry);
   const removeContactAllowlistEntryReducer = useReducer(reducers.removeContactAllowlistEntry);
@@ -2879,7 +2830,6 @@ function AuthenticatedInboxPage() {
       setLocalKeyIssue(null);
       setShowKeysRecoveryDialog(false);
       setSessionError(null);
-      setVaultError(null);
       setPendingDeviceShareRequest(null);
       setDeviceVerificationCode('');
       setCurrentDeviceId(null);
@@ -6005,33 +5955,8 @@ function AuthenticatedInboxPage() {
   }
 
   async function handleVaultSubmit(passphrase: string): Promise<void> {
-    setVaultSubmitting(true);
-    setVaultError(null);
-
-    try {
-      if (!keyVaultOwner) {
-        throw new Error('Masumi user identity is required before unlocking private keys.');
-      }
-      if (vaultInitialized) {
-        await unlockKeyVault(keyVaultOwner, passphrase);
-      } else {
-        await initializeKeyVault(keyVaultOwner, passphrase);
-        setVaultInitialized(true);
-      }
-      setVaultUnlocked(true);
-      setSessionError(null);
-    } catch (vaultUnlockError) {
-      setVaultError(
-        vaultUnlockError instanceof Error
-          ? vaultUnlockError.message
-          : 'Unable to unlock the local key vault'
-      );
-      throw vaultUnlockError instanceof Error
-        ? vaultUnlockError
-        : new Error('Unable to unlock the local key vault');
-    } finally {
-      setVaultSubmitting(false);
-    }
+    await vault.handleSubmit(passphrase);
+    setSessionError(null);
   }
 
   const selectedThreadTitle = selectedThread
@@ -6187,6 +6112,18 @@ function AuthenticatedInboxPage() {
             displayName: entry.actor.displayName,
             publicIdentity: entry.actor.publicIdentity,
           }))}
+        onSelectAgent={slug => {
+          setActiveActorIdentity({
+            email: normalizeEmail(authenticatedSession?.user.email ?? ''),
+            slug,
+            accountIdentifier: slug,
+          });
+          void navigate({
+            to: '/$slug',
+            params: { slug },
+            search: buildWorkspaceSearch({}),
+          });
+        }}
       >
       {displayInbox ? (
         <KeysRecoveryDialog

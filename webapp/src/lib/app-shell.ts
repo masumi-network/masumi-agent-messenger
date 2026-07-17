@@ -447,19 +447,28 @@ export function resolveWorkspaceSnapshot<
   const selectedEntry = params.selectedSlug
     ? ownedInboxAgents.find(entry => entry.actor.slug === params.selectedSlug)
     : undefined;
-  const selectedActor =
-    (isUsableOwnedInboxAgent(selectedEntry) ? selectedEntry.actor : null) ??
-    findUsableDefaultActor(ownedInboxAgents, existingDefaultActor);
+  const selectedActor = params.selectedSlug
+    ? isUsableOwnedInboxAgent(selectedEntry)
+      ? selectedEntry.actor
+      : null
+    : findUsableDefaultActor(ownedInboxAgents, existingDefaultActor);
   const shellInboxSlug = resolveShellInboxSlug(
     ownedInboxAgents,
     selectedActor?.slug ?? existingDefaultActor?.slug ?? null
   );
-  const approvalView = buildApprovalView({
-    contactRequests: params.contactRequests,
-    threadInvites: params.threadInvites ?? [],
-    ownedActors: ownedInboxAgents.map(entry => entry.actor),
-    selectedSlug: selectedActor?.slug,
-  });
+  const approvalView =
+    params.selectedSlug && !selectedActor
+      ? buildApprovalView({
+          contactRequests: [],
+          threadInvites: [],
+          ownedActors: [],
+        })
+      : buildApprovalView({
+          contactRequests: params.contactRequests,
+          threadInvites: params.threadInvites ?? [],
+          ownedActors: ownedInboxAgents.map(entry => entry.actor),
+          selectedSlug: selectedActor?.slug,
+        });
 
   return {
     email,

@@ -384,7 +384,17 @@ describe('app shell helpers', () => {
         },
       ],
       actors: ownedEntries.map(entry => entry.actor),
-      contactRequests: [],
+      contactRequests: [
+        {
+          id: 40n,
+          requesterAgentDbId: 99n,
+          requesterSlug: 'remote-agent',
+          targetAgentDbId: 2n,
+          targetSlug: 'current-agent',
+          status: { tag: 'Pending' },
+          updatedAt: { microsSinceUnixEpoch: 40n },
+        },
+      ],
       session: {
         user: {
           email: 'owner@example.com',
@@ -395,8 +405,10 @@ describe('app shell helpers', () => {
       selectedSlug: 'old-agent',
     });
 
-    expect(snapshot.selectedActor?.slug).toBe('current-agent');
+    expect(snapshot.selectedActor).toBeNull();
     expect(snapshot.shellInboxSlug).toBe('current-agent');
+    expect(snapshot.approvalView.pendingIncomingCount).toBe(0);
+    expect(snapshot.approvalView.incoming).toEqual([]);
   });
 
   it('keeps agents with pending deregistration out of active selection', () => {

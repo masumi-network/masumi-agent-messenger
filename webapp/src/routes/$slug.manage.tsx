@@ -29,9 +29,10 @@ function ManageInboxRedirectPage() {
 
     void navigate({
       to: '/agents',
+      search: { agent: params.slug },
       replace: true,
     });
-  }, [navigate, workspace]);
+  }, [navigate, params.slug, workspace]);
 
   return (
     <WorkspaceRouteShell

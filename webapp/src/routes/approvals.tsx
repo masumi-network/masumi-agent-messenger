@@ -11,7 +11,7 @@ import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell'
 
 export const Route = createFileRoute('/approvals')({
   validateSearch: search => ({
-    slug: parseOptionalSlug(search.slug),
+    agent: parseOptionalSlug(search.agent ?? search.slug),
   }),
   head: () =>
     buildRouteHead({
@@ -27,7 +27,7 @@ function ApprovalsPage() {
   const search = Route.useSearch();
   const navigate = useNavigate();
   const workspace = useWorkspaceShell({
-    selectedSlug: search.slug ?? null,
+    selectedSlug: search.agent ?? null,
   });
 
   useEffect(() => {
@@ -35,7 +35,12 @@ function ApprovalsPage() {
       return;
     }
 
-    const targetSlug = workspace.selectedActor?.slug ?? workspace.shellInboxSlug;
+    if (search.agent && !workspace.selectedActor) {
+      return;
+    }
+
+    const targetSlug =
+      workspace.selectedActor?.slug ?? workspace.shellInboxSlug;
     if (!targetSlug) {
       void navigate({
         to: '/',
@@ -50,7 +55,7 @@ function ApprovalsPage() {
       search: buildWorkspaceSearch({ tab: 'approvals' }),
       replace: true,
     });
-  }, [navigate, workspace]);
+  }, [navigate, search.agent, workspace]);
 
   return (
     <WorkspaceRouteShell

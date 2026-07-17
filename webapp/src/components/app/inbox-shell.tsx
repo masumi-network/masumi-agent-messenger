@@ -7,12 +7,17 @@ import {
   MagnifyingGlass,
   Moon,
   Plus,
+  ShieldCheck,
   Sun,
   Users,
   CaretLineLeft,
   CaretLineRight,
 } from '@phosphor-icons/react';
 import { AccountMenu } from '@/components/app/account-menu';
+import {
+  ActiveAgentSelector,
+  type ActiveAgentOption,
+} from '@/components/app/active-agent-selector';
 import { ConnectionStatus } from '@/components/thread/connection-status';
 import {
   Dialog,
@@ -34,13 +39,6 @@ import {
 import { useTheme } from '@/lib/theme';
 import { cn } from '@/lib/utils';
 
-type AgentOption = {
-  id?: bigint;
-  slug: string;
-  displayName?: string | null;
-  publicIdentity: string;
-};
-
 type InboxShellProps = {
   section: AppShellSection;
   title?: string;
@@ -53,7 +51,8 @@ type InboxShellProps = {
   selectedChannelSlug?: string | null;
   avatarName?: string;
   avatarIdentity?: string;
-  ownedAgents?: AgentOption[];
+  ownedAgents?: ActiveAgentOption[];
+  onSelectAgent: (slug: string) => void;
   children: React.ReactNode;
 };
 
@@ -79,6 +78,7 @@ export function InboxShell({
   avatarName,
   avatarIdentity,
   ownedAgents = [],
+  onSelectAgent,
   children,
 }: InboxShellProps) {
   const navigate = useNavigate();
@@ -141,6 +141,9 @@ export function InboxShell({
         onSelect: () => {
           void navigate({
             to: '/discover',
+            search: {
+              agent: currentInboxSlug ?? undefined,
+            },
           });
         },
       },
@@ -152,6 +155,24 @@ export function InboxShell({
         onSelect: () => {
           void navigate({
             to: '/agents',
+            search: {
+              agent: currentInboxSlug ?? undefined,
+            },
+          });
+        },
+      },
+      {
+        key: 'security',
+        label: 'Security',
+        Icon: ShieldCheck,
+        active: section === 'security',
+        onSelect: () => {
+          void navigate({
+            to: '/security',
+            search: {
+              agent: currentInboxSlug ?? undefined,
+              panel: undefined,
+            },
           });
         },
       },
@@ -176,11 +197,15 @@ export function InboxShell({
     <div className="flex h-full flex-col">
       <div className="px-3 pb-3 pt-4">
         <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
-          Workspace
+          Workspace agent
         </p>
-        <p className="mt-1 truncate font-mono text-sm font-medium text-foreground/90">
-          {currentInboxSlug ? `/${currentInboxSlug}` : 'No workspace'}
-        </p>
+        <div className="mt-2">
+          <ActiveAgentSelector
+            activeSlug={currentInboxSlug ?? null}
+            agents={ownedAgents}
+            onSelect={onSelectAgent}
+          />
+        </div>
       </div>
 
       <nav className="space-y-0.5 px-2">
@@ -318,7 +343,6 @@ export function InboxShell({
           avatarName={avatarName}
           avatarIdentity={avatarIdentity}
           currentInboxSlug={currentInboxSlug ?? undefined}
-          ownedAgents={ownedAgents}
         />
       </div>
     </div>
@@ -327,6 +351,13 @@ export function InboxShell({
   /* ── Collapsed sidebar rail (icons only) ── */
   const collapsedNav = (
     <div className="flex h-full flex-col items-center py-4">
+      <ActiveAgentSelector
+        activeSlug={currentInboxSlug ?? null}
+        agents={ownedAgents}
+        compact
+        onSelect={onSelectAgent}
+      />
+      <div className="my-3 h-px w-6 bg-border/70" />
       <nav className="space-y-1.5">
         {navItems.map((item) => (
           <Tooltip key={item.key}>
@@ -440,7 +471,6 @@ export function InboxShell({
           avatarName={avatarName}
           avatarIdentity={avatarIdentity}
           currentInboxSlug={currentInboxSlug ?? undefined}
-          ownedAgents={ownedAgents}
           iconOnly
         />
       </div>

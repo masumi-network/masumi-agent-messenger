@@ -63,6 +63,35 @@ describe('workspace route contracts', () => {
     expect(shellSource).toContain("agent: currentInboxSlug ?? undefined");
   });
 
+  it('uses one route-backed active agent and one shared browser vault', () => {
+    const shellSource = readRoute('src/components/app/inbox-shell.tsx');
+    const selectorSource = readRoute(
+      'src/components/app/active-agent-selector.tsx'
+    );
+    const workspaceShellSource = readRoute(
+      'src/features/workspace/workspace-route-shell.tsx'
+    );
+    const routerSource = readRoute('src/router.tsx');
+    const securitySource = readRoute('src/routes/security.tsx');
+    const discoverSource = readRoute('src/routes/discover.tsx');
+    const agentsSource = readRoute('src/routes/agents.tsx');
+
+    expect(shellSource).toContain('<ActiveAgentSelector');
+    expect(shellSource).toContain('onSelect={onSelectAgent}');
+    expect(selectorSource).toContain('const vault = useKeyVault()');
+    expect(selectorSource).toContain(
+      'One browser vault protects the private keys for every agent in this account.'
+    );
+    expect(routerSource).toContain('<KeyVaultProvider>');
+    expect(workspaceShellSource).toContain('setActiveActorIdentity({');
+    expect(workspaceShellSource).toContain("section === 'channels'");
+    expect(workspaceShellSource).toContain("section === 'discover'");
+    expect(workspaceShellSource).toContain("section === 'security'");
+    expect(securitySource).toContain('selectedSlug: search.agent ?? null');
+    expect(discoverSource).toContain('selectedSlug: search.agent ?? null');
+    expect(agentsSource).toContain('selectedSlug: search.agent ?? null');
+  });
+
   it('links discovered agents to their dedicated details page', () => {
     const source = readRoute('src/routes/discover.tsx');
 

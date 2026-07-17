@@ -1,19 +1,27 @@
 import { SignIn, Tray, WarningCircle } from '@phosphor-icons/react';
+import { useNavigate } from '@tanstack/react-router';
 import { buildLoginHref } from '@/lib/auth-session';
 import { InboxShell } from '@/components/app/inbox-shell';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { setActiveActorIdentity } from '@/lib/agent-session';
 import type {
   WorkspaceShellReadyState,
   WorkspaceShellState,
 } from './use-workspace-shell';
-import type { AppShellSection } from '@/lib/app-shell';
+import type {
+  AppShellSection,
+  SecurityPanel,
+} from '@/lib/app-shell';
 
 type WorkspaceRouteShellProps = {
   workspace: WorkspaceShellState;
   section: AppShellSection;
   title?: string;
   selectedChannelSlug?: string | null;
+  selectedDiscoverSlug?: string | null;
+  securityPanel?: SecurityPanel;
   signInReturnTo: string;
   signedOutDescription: string;
   signedOutTitle?: string;
@@ -27,11 +35,15 @@ export function WorkspaceRouteShell({
   section,
   title,
   selectedChannelSlug,
+  selectedDiscoverSlug,
+  securityPanel,
   signInReturnTo,
   signedOutDescription,
   signedOutTitle,
   children,
 }: WorkspaceRouteShellProps) {
+  const navigate = useNavigate();
+
   if (workspace.status === 'loading') {
     return (
       <main className="space-y-5 p-4 md:p-6">
@@ -125,27 +137,116 @@ export function WorkspaceRouteShell({
     return null;
   }
 
+  const usableAgents = workspace.ownedInboxAgents.filter(
+    entry => !entry.deregistered
+  );
+  const selectionUnavailable =
+    workspace.tablesReady &&
+    usableAgents.length > 0 &&
+    !workspace.selectedActor;
+  const handleSelectAgent = (slug: string) => {
+    setActiveActorIdentity({
+      email: workspace.email,
+      slug,
+      accountIdentifier: slug,
+    });
+
+    if (section === 'channels') {
+      if (selectedChannelSlug) {
+        void navigate({
+          to: '/channels/$slug',
+          params: { slug: selectedChannelSlug },
+          search: { agent: slug },
+        });
+      } else {
+        void navigate({
+          to: '/channels',
+          search: { agent: slug, tab: 'mine' },
+        });
+      }
+      return;
+    }
+
+    if (section === 'discover') {
+      if (selectedDiscoverSlug) {
+        void navigate({
+          to: '/discover/$slug',
+          params: { slug: selectedDiscoverSlug },
+          search: { agent: slug },
+        });
+      } else {
+        void navigate({
+          to: '/discover',
+          search: { agent: slug },
+        });
+      }
+      return;
+    }
+
+    if (section === 'agents') {
+      void navigate({
+        to: '/agents',
+        search: { agent: slug },
+      });
+      return;
+    }
+
+    if (section === 'security') {
+      void navigate({
+        to: '/security',
+        search: {
+          agent: slug,
+          panel: securityPanel,
+        },
+      });
+      return;
+    }
+
+    void navigate({
+      to: '/$slug',
+      params: { slug },
+      search: {
+        thread: undefined,
+        compose: undefined,
+        lookup: undefined,
+        tab: undefined,
+      },
+    });
+  };
+
   return (
     <InboxShell
       section={section}
       title={title}
       sessionEmail={workspace.session.user.email ?? ''}
-      currentInboxSlug={workspace.selectedActor?.slug ?? workspace.shellInboxSlug}
+      currentInboxSlug={workspace.selectedActor?.slug ?? null}
       connected={workspace.connected}
       connectionError={workspace.connectionError}
       pendingApprovals={workspace.approvalView.pendingIncomingCount}
       channelNavEntries={workspace.channelNavEntries}
       selectedChannelSlug={selectedChannelSlug}
-      ownedAgents={workspace.ownedInboxAgents
-        .filter(entry => !entry.deregistered)
+      ownedAgents={usableAgents
         .map(entry => ({
           id: entry.actor.id,
           slug: entry.actor.slug,
           displayName: entry.actor.displayName,
           publicIdentity: entry.actor.publicIdentity,
         }))}
+      onSelectAgent={handleSelectAgent}
     >
-      {typeof children === 'function' ? children(workspace) : children}
+      {selectionUnavailable ? (
+        <Alert variant="destructive">
+          <AlertTitle>Agent unavailable</AlertTitle>
+          <AlertDescription>
+            This agent is not available for the signed-in account. Select an
+            active agent from the workspace selector to continue.
+          </AlertDescription>
+        </Alert>
+      ) : typeof children === 'function' ? (
+        children(workspace)
+      ) : (
+        children
+      )}
     </InboxShell>
   );
 }

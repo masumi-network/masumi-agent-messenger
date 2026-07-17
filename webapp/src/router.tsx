@@ -13,6 +13,7 @@ import { DbConnection, ErrorContext } from './module_bindings';
 import { NotFoundPage } from './components/not-found-page';
 import { AuthSessionProvider, useAuthSession } from './lib/auth-session';
 import { buildScopedSpacetimeUri } from './lib/spacetime-connection-scope';
+import { KeyVaultProvider } from './hooks/use-key-vault';
 
 const HOST = import.meta.env.VITE_SPACETIMEDB_HOST ?? 'ws://localhost:3000';
 const DB_NAME =
@@ -147,7 +148,9 @@ function AppProviders({ children }: { children: React.ReactNode }) {
   return (
     <ThemeProvider>
       <AuthSessionProvider>
-        <AuthenticatedSpacetimeShell>{children}</AuthenticatedSpacetimeShell>
+        <KeyVaultProvider>
+          <AuthenticatedSpacetimeShell>{children}</AuthenticatedSpacetimeShell>
+        </KeyVaultProvider>
       </AuthSessionProvider>
     </ThemeProvider>
   );

@@ -17,7 +17,12 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { parseSecurityPanel, buildWorkspaceSearch, type SecurityPanel } from '@/lib/app-shell';
+import {
+  parseOptionalSlug,
+  parseSecurityPanel,
+  buildWorkspaceSearch,
+  type SecurityPanel,
+} from '@/lib/app-shell';
 import { buildRouteHead } from '@/lib/seo';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useKeyVault } from '@/hooks/use-key-vault';
@@ -37,6 +42,7 @@ import {
 
 export const Route = createFileRoute('/security')({
   validateSearch: search => ({
+    agent: parseOptionalSlug(search.agent),
     panel: parseSecurityPanel(search.panel),
   }),
   head: () =>
@@ -52,7 +58,9 @@ export const Route = createFileRoute('/security')({
 function SecurityPage() {
   const search = Route.useSearch();
   const navigate = useNavigate();
-  const workspace = useWorkspaceShell();
+  const workspace = useWorkspaceShell({
+    selectedSlug: search.agent ?? null,
+  });
   const vault = useKeyVault();
   const [userRequestedVaultDialog, setUserRequestedVaultDialog] = useState(false);
   const showVaultDialog = vault.unlocked ? false : userRequestedVaultDialog;
@@ -73,12 +81,10 @@ function SecurityPage() {
       'visible_device_key_bundles'
     );
 
-  const existingDefaultActor =
-    workspace.status === 'ready' ? workspace.existingDefaultActor : null;
+  const activeActor =
+    workspace.status === 'ready' ? workspace.selectedActor : null;
   const email =
     workspace.status === 'ready' ? workspace.email : '';
-  const shellInboxSlug =
-    workspace.status === 'ready' ? workspace.shellInboxSlug : null;
   const liveConnection =
     workspace.status === 'ready'
       ? ((workspace.conn.getConnection() ?? null) as SecurityLiveConnection | null)
@@ -92,14 +98,14 @@ function SecurityPage() {
     inbox: workspace.status === 'ready' ? workspace.ownedInbox : null,
     connectionIdentity:
       workspace.status === 'ready' ? workspace.conn.identity ?? null : null,
-    hasActor: Boolean(existingDefaultActor),
+    hasActor: Boolean(activeActor),
   });
 
   const ownedDevices =
-    existingDefaultActor === null
+    activeActor === null
       ? []
       : devices
-          .filter(device => device.accountId === existingDefaultActor.accountId)
+          .filter(device => device.accountId === activeActor.accountId)
           .sort((left, right) => left.deviceId.localeCompare(right.deviceId));
   const routeTablesReady =
     workspace.status === 'ready' &&
@@ -114,11 +120,17 @@ function SecurityPage() {
   const handlePanelChange = (nextPanel: SecurityPanel) => {
     void navigate({
       to: '/security',
-      search: { panel: nextPanel },
+      search: {
+        agent: activeActor?.slug,
+        panel: nextPanel,
+      },
     });
   };
+  const hasUsableAgent =
+    workspace.status === 'ready' &&
+    workspace.ownedInboxAgents.some(entry => !entry.deregistered);
   const needsBootstrapRedirect =
-    workspace.status === 'ready' && workspace.tablesReady && !existingDefaultActor;
+    workspace.status === 'ready' && workspace.tablesReady && !hasUsableAgent;
 
   useEffect(() => {
     if (!needsBootstrapRedirect) {
@@ -132,7 +144,7 @@ function SecurityPage() {
   }, [navigate, needsBootstrapRedirect]);
 
   const security = useSecurityRecovery({
-    existingDefaultActor,
+    existingDefaultActor: activeActor,
     email,
     liveConnection,
     canWrite: writeAccess.canWrite,
@@ -151,7 +163,10 @@ function SecurityPage() {
           onClick: () =>
             void navigate({
               to: '/security',
-              search: { panel: 'recovery' },
+              search: {
+                agent: activeActor?.slug,
+                panel: 'recovery',
+              },
             }),
         }
       : {
@@ -159,7 +174,10 @@ function SecurityPage() {
           onClick: () =>
             void navigate({
               to: '/security',
-              search: { panel: 'backups' },
+              search: {
+                agent: activeActor?.slug,
+                panel: 'backups',
+              },
             }),
         };
 
@@ -168,6 +186,7 @@ function SecurityPage() {
       workspace={workspace}
       section="security"
       title="Security"
+      securityPanel={panel}
       signInReturnTo="/security"
       signedOutDescription="Sign in to manage security settings."
     >
@@ -212,7 +231,7 @@ function SecurityPage() {
             </div>
           ) : null}
 
-          {existingDefaultActor ? (
+          {activeActor ? (
             <div className="space-y-6">
               <section className="grid gap-4">
                 <Card className="border-border">
@@ -226,9 +245,9 @@ function SecurityPage() {
                     <div className="grid gap-3 md:grid-cols-3">
                       <div className="rounded-md border border-border px-4 py-4">
                         <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground">
-                          Default inbox
+                          Active agent
                         </p>
-                        <p className="mt-2 font-mono text-sm">/{existingDefaultActor.slug}</p>
+                        <p className="mt-2 font-mono text-sm">/{activeActor.slug}</p>
                       </div>
                       <div className="rounded-md border border-border px-4 py-4">
                         <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground">
@@ -335,11 +354,11 @@ function SecurityPage() {
                             }}
                             errorMessage={security.error}
                             onOverrideKeys={
-                              shellInboxSlug
+                              activeActor
                                 ? () =>
                                     navigate({
                                       to: '/$slug',
-                                      params: { slug: shellInboxSlug },
+                                      params: { slug: activeActor.slug },
                                       search: buildWorkspaceSearch({}),
                                     })
                                 : undefined
@@ -373,11 +392,11 @@ function SecurityPage() {
                             }}
                             errorMessage={security.error}
                             onOverrideKeys={
-                              shellInboxSlug
+                              activeActor
                                 ? () =>
                                     navigate({
                                       to: '/$slug',
-                                      params: { slug: shellInboxSlug },
+                                      params: { slug: activeActor.slug },
                                       search: buildWorkspaceSearch({}),
                                     })
                                 : undefined

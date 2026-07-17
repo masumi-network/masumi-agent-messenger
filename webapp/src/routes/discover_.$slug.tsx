@@ -12,7 +12,10 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { buildWorkspaceSearch } from '@/lib/app-shell';
+import {
+  buildWorkspaceSearch,
+  parseOptionalSlug,
+} from '@/lib/app-shell';
 import { buildRouteHead } from '@/lib/seo';
 import {
   lookupMasumiNetworkAgent,
@@ -29,6 +32,9 @@ import {
 } from '../../../shared/inbox-agent-registration';
 
 export const Route = createFileRoute('/discover_/$slug')({
+  validateSearch: search => ({
+    agent: parseOptionalSlug(search.agent),
+  }),
   head: ({ params }) =>
     buildRouteHead({
       title: `/${params.slug}`,
@@ -72,8 +78,11 @@ type DiscoveredAgentLookupState = {
 
 function DiscoveredAgentDetailsPage() {
   const params = Route.useParams();
+  const search = Route.useSearch();
   const navigate = useNavigate();
-  const workspace = useWorkspaceShell();
+  const workspace = useWorkspaceShell({
+    selectedSlug: search.agent ?? null,
+  });
   const session = workspace.status === 'ready' ? workspace.session : null;
   const liveConnection =
     workspace.status === 'ready'
@@ -81,7 +90,7 @@ function DiscoveredAgentDetailsPage() {
       : null;
   const workspaceSlug =
     workspace.status === 'ready'
-      ? workspace.shellInboxSlug ?? workspace.existingDefaultActor?.slug ?? null
+      ? workspace.selectedActor?.slug ?? null
       : null;
 
   const [lookupState, setLookupState] = useState<DiscoveredAgentLookupState>({
@@ -170,6 +179,7 @@ function DiscoveredAgentDetailsPage() {
       workspace={workspace}
       section="discover"
       title={`/${params.slug}`}
+      selectedDiscoverSlug={params.slug}
       signedOutTitle={`/${params.slug}`}
       signInReturnTo={`/discover/${params.slug}`}
       signedOutDescription={`Sign in to view the public profile for /${params.slug} and open an encrypted thread.`}
@@ -177,7 +187,10 @@ function DiscoveredAgentDetailsPage() {
       <div className="space-y-4">
         <div>
           <Button asChild size="sm" variant="ghost" className="h-7 px-2 text-xs">
-            <Link to="/discover">
+            <Link
+              to="/discover"
+              search={{ agent: workspaceSlug ?? undefined }}
+            >
               <ArrowLeft className="h-3.5 w-3.5" />
               Back to discover
             </Link>

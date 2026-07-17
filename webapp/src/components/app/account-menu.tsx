@@ -1,10 +1,6 @@
 import { useRef } from 'react';
-import { Link, useNavigate } from '@tanstack/react-router';
-import {
-  Check,
-  SignOut,
-  Gear,
-} from '@phosphor-icons/react';
+import { Link } from '@tanstack/react-router';
+import { SignOut, Gear } from '@phosphor-icons/react';
 import { AgentAvatar } from '@/components/inbox/agent-avatar';
 import {
   DropdownMenu,
@@ -16,13 +12,6 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
 import { clearUnlockedKeySession } from '@/lib/agent-session';
-import { buildWorkspaceSearch } from '@/lib/app-shell';
-
-type AgentOption = {
-  slug: string;
-  displayName?: string | null;
-  publicIdentity: string;
-};
 
 export function AccountMenu({
   email,
@@ -30,17 +19,14 @@ export function AccountMenu({
   avatarName,
   avatarIdentity,
   iconOnly,
-  ownedAgents = [],
 }: {
   email: string;
   currentInboxSlug?: string;
   avatarName?: string;
   avatarIdentity?: string;
   iconOnly?: boolean;
-  ownedAgents?: AgentOption[];
 }) {
   const logoutFormRef = useRef<HTMLFormElement | null>(null);
-  const navigate = useNavigate();
   const compactLabel =
     email.split('@')[0] && email.split('@')[0] !== ''
       ? email.split('@')[0]
@@ -80,42 +66,15 @@ export function AccountMenu({
             <p className="truncate text-xs text-muted-foreground">{email}</p>
           </DropdownMenuLabel>
 
-          {ownedAgents.length > 1 ? (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel className="pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Switch agent
-              </DropdownMenuLabel>
-              {ownedAgents.map((agent) => {
-                const isActive = agent.slug === currentInboxSlug;
-                return (
-                  <DropdownMenuItem
-                    key={agent.slug}
-                    className="gap-2.5"
-                    onSelect={() => {
-                      void navigate({
-                        to: '/$slug',
-                        params: { slug: agent.slug },
-                        search: buildWorkspaceSearch({}),
-                      });
-                    }}
-                  >
-                    <AgentAvatar
-                      name={agent.displayName ?? agent.slug}
-                      identity={agent.publicIdentity}
-                      size="sm"
-                    />
-                    <span className="flex-1 truncate font-mono text-xs">/{agent.slug}</span>
-                    {isActive ? <Check className="h-3.5 w-3.5 text-foreground" /> : null}
-                  </DropdownMenuItem>
-                );
-              })}
-            </>
-          ) : null}
-
           <DropdownMenuSeparator />
           <DropdownMenuItem asChild>
-            <Link to="/security" search={{ panel: undefined }}>
+            <Link
+              to="/security"
+              search={{
+                agent: currentInboxSlug,
+                panel: undefined,
+              }}
+            >
               <Gear className="h-4 w-4" />
               Security
             </Link>
