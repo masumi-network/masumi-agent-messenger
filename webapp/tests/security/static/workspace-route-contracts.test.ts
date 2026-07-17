@@ -77,8 +77,13 @@ describe('workspace route contracts', () => {
     const agentsSource = readRoute('src/routes/agents.tsx');
 
     expect(shellSource).toContain('<ActiveAgentSelector');
-    expect(shellSource).toContain('onSelect={onSelectAgent}');
+    expect(shellSource).toContain('variant="header"');
+    expect(shellSource).toContain('onSelect={handleSelectAgent}');
+    expect(shellSource).toContain('useTransition()');
+    expect(shellSource).toContain('role="status" aria-live="polite"');
     expect(selectorSource).toContain('const vault = useKeyVault()');
+    expect(selectorSource).toContain('<DropdownMenuRadioGroup');
+    expect(selectorSource).toContain('aria-busy={isSwitching}');
     expect(selectorSource).toContain(
       'One browser vault protects the private keys for every agent in this account.'
     );

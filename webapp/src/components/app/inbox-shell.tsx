@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState, useTransition } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import {
   ChatText,
@@ -52,7 +52,7 @@ type InboxShellProps = {
   avatarName?: string;
   avatarIdentity?: string;
   ownedAgents?: ActiveAgentOption[];
-  onSelectAgent: (slug: string) => void;
+  onSelectAgent: (slug: string) => Promise<void>;
   children: React.ReactNode;
 };
 
@@ -85,6 +85,9 @@ export function InboxShell({
   const { theme, toggleTheme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [switchingToSlug, setSwitchingToSlug] = useState<string | null>(null);
+  const [isSwitchingAgent, startAgentSwitch] = useTransition();
+  const pendingSwitchSlug = isSwitchingAgent ? switchingToSlug : null;
   const channelApprovalCount = useMemo(
     () =>
       channelNavEntries.reduce(
@@ -93,6 +96,29 @@ export function InboxShell({
       ),
     [channelNavEntries]
   );
+  const handleSelectAgent = useCallback(
+    (slug: string) => {
+      if (slug === currentInboxSlug || pendingSwitchSlug) {
+        return;
+      }
+
+      setSwitchingToSlug(slug);
+      setMobileOpen(false);
+      startAgentSwitch(async () => {
+        await onSelectAgent(slug);
+      });
+    },
+    [currentInboxSlug, onSelectAgent, pendingSwitchSlug]
+  );
+  const handleManageAgents = useCallback(() => {
+    setMobileOpen(false);
+    void navigate({
+      to: '/agents',
+      search: {
+        agent: currentInboxSlug ?? undefined,
+      },
+    });
+  }, [currentInboxSlug, navigate]);
 
   const navItems = useMemo<NavItem[]>(
     () => [
@@ -196,14 +222,16 @@ export function InboxShell({
   const expandedNav = (
     <div className="flex h-full flex-col">
       <div className="px-3 pb-3 pt-4">
-        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+        <p className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/70 lg:text-[10px]">
           Workspace agent
         </p>
         <div className="mt-2">
           <ActiveAgentSelector
             activeSlug={currentInboxSlug ?? null}
             agents={ownedAgents}
-            onSelect={onSelectAgent}
+            switchingToSlug={pendingSwitchSlug}
+            onSelect={handleSelectAgent}
+            onManageAgents={handleManageAgents}
           />
         </div>
       </div>
@@ -214,7 +242,7 @@ export function InboxShell({
             type="button"
             key={item.key}
             className={cn(
-              'group relative flex h-9 w-full items-center gap-2.5 rounded-md px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              'group relative flex h-11 w-full items-center gap-2.5 rounded-md px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-9',
               item.active
                 ? 'bg-primary/10 text-foreground'
                 : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
@@ -242,7 +270,7 @@ export function InboxShell({
             ) : null}
             <span className="animate-soft-fade">{item.label}</span>
             {item.count && item.count > 0 ? (
-              <span className="ml-auto rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground">
+              <span className="ml-auto rounded-full bg-primary px-1.5 py-0.5 text-sm font-semibold text-primary-foreground lg:text-[10px]">
                 {item.count}
               </span>
             ) : null}
@@ -252,7 +280,7 @@ export function InboxShell({
 
       <div className="mt-5 min-h-0 flex-1 overflow-y-auto px-2">
         <div className="mb-1.5 flex items-center justify-between px-2">
-          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+          <p className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/70 lg:text-[10px]">
             Channels
           </p>
           <Tooltip>
@@ -260,7 +288,7 @@ export function InboxShell({
               <button
                 type="button"
                 aria-label="Add channel"
-                className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-6 lg:w-6"
                 onClick={() => {
                   void navigate({
                     to: '/channels',
@@ -282,7 +310,7 @@ export function InboxShell({
         </div>
 
         {channelNavEntries.length === 0 ? (
-          <p className="px-2 py-2 text-xs text-muted-foreground">
+          <p className="px-2 py-2 text-sm text-muted-foreground">
             No joined channels
           </p>
         ) : (
@@ -294,7 +322,7 @@ export function InboxShell({
                   type="button"
                   key={entry.channelId.toString()}
                   className={cn(
-                    'group relative flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                    'group relative flex h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-8',
                     active
                       ? 'bg-primary/10 text-foreground'
                       : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
@@ -322,11 +350,11 @@ export function InboxShell({
                     {entry.title?.trim() || entry.slug}
                   </span>
                   {entry.pendingApprovals > 0 ? (
-                    <span className="shrink-0 rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground">
+                    <span className="shrink-0 rounded-full bg-primary px-1.5 py-0.5 text-sm font-semibold text-primary-foreground lg:text-[10px]">
                       {entry.pendingApprovals}
                     </span>
                   ) : entry.isAdmin ? (
-                    <span className="shrink-0 rounded-full border border-border/70 bg-muted/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    <span className="shrink-0 rounded-full border border-border/70 bg-muted/60 px-1.5 py-0.5 text-sm text-muted-foreground lg:text-[10px]">
                       admin
                     </span>
                   ) : null}
@@ -354,8 +382,10 @@ export function InboxShell({
       <ActiveAgentSelector
         activeSlug={currentInboxSlug ?? null}
         agents={ownedAgents}
-        compact
-        onSelect={onSelectAgent}
+        variant="rail"
+        switchingToSlug={pendingSwitchSlug}
+        onSelect={handleSelectAgent}
+        onManageAgents={handleManageAgents}
       />
       <div className="my-3 h-px w-6 bg-border/70" />
       <nav className="space-y-1.5">
@@ -493,7 +523,7 @@ export function InboxShell({
               onClick={() => setSidebarExpanded(!sidebarExpanded)}
               aria-label={sidebarExpanded ? 'Collapse sidebar' : 'Expand sidebar'}
               className={cn(
-                'flex h-12 shrink-0 items-center border-b border-border/40 text-muted-foreground transition-colors hover:text-foreground',
+                'flex h-12 shrink-0 items-center border-b border-border/40 text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
                 sidebarExpanded ? 'justify-end px-3' : 'justify-center'
               )}
             >
@@ -514,7 +544,7 @@ export function InboxShell({
                 <DialogTrigger asChild>
                   <Button
                     variant="ghost"
-                    className="h-8 w-8 rounded-md p-0 lg:hidden"
+                    className="h-11 w-11 rounded-md p-0 lg:hidden"
                   >
                     <List className="h-4 w-4" />
                     <span className="sr-only">Open navigation</span>
@@ -534,11 +564,19 @@ export function InboxShell({
                   {shellTitle}
                 </h1>
               </div>
+              <ActiveAgentSelector
+                activeSlug={currentInboxSlug ?? null}
+                agents={ownedAgents}
+                variant="header"
+                switchingToSlug={pendingSwitchSlug}
+                onSelect={handleSelectAgent}
+                onManageAgents={handleManageAgents}
+              />
               <button
                 type="button"
                 onClick={toggleTheme}
                 aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-                className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-8 lg:w-8"
               >
                 {theme === 'dark' ? (
                   <Sun className="h-4 w-4" />
@@ -547,9 +585,21 @@ export function InboxShell({
                 )}
               </button>
             </div>
+            <p className="sr-only" role="status" aria-live="polite">
+              {pendingSwitchSlug
+                ? `Switching workspace to agent ${pendingSwitchSlug}`
+                : currentInboxSlug
+                  ? `Active workspace agent is ${currentInboxSlug}`
+                  : 'No active workspace agent selected'}
+            </p>
           </header>
 
-          <main key={section} className="animate-soft-enter flex-1 overflow-auto px-4 py-5 md:px-6 md:py-6">{children}</main>
+          <main
+            key={`${section}:${currentInboxSlug ?? 'none'}`}
+            className="animate-soft-enter flex-1 overflow-auto px-4 py-5 md:px-6 md:py-6"
+          >
+            {children}
+          </main>
         </div>
       </div>
 

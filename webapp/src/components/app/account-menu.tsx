@@ -51,19 +51,27 @@ export function AccountMenu({
               />
             </button>
           ) : (
-            <Button variant="ghost" size="sm" className="w-full justify-start gap-2.5 px-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-11 w-full justify-start gap-2.5 px-2 lg:h-9"
+            >
               <AgentAvatar
                 name={identityLabel}
                 identity={identity}
                 size="sm"
               />
-              <span className="truncate text-left font-mono text-xs">{compactLabel}</span>
+              <span className="truncate text-left font-mono text-sm lg:text-xs">
+                {compactLabel}
+              </span>
             </Button>
           )}
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-60">
           <DropdownMenuLabel className="py-2">
-            <p className="truncate text-xs text-muted-foreground">{email}</p>
+            <p className="truncate text-sm text-muted-foreground lg:text-xs">
+              {email}
+            </p>
           </DropdownMenuLabel>
 
           <DropdownMenuSeparator />

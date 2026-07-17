@@ -6112,13 +6112,13 @@ function AuthenticatedInboxPage() {
             displayName: entry.actor.displayName,
             publicIdentity: entry.actor.publicIdentity,
           }))}
-        onSelectAgent={slug => {
+        onSelectAgent={async slug => {
           setActiveActorIdentity({
             email: normalizeEmail(authenticatedSession?.user.email ?? ''),
             slug,
             accountIdentifier: slug,
           });
-          void navigate({
+          await navigate({
             to: '/$slug',
             params: { slug },
             search: buildWorkspaceSearch({}),

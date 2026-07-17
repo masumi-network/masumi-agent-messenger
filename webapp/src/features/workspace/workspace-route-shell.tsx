@@ -144,7 +144,7 @@ export function WorkspaceRouteShell({
     workspace.tablesReady &&
     usableAgents.length > 0 &&
     !workspace.selectedActor;
-  const handleSelectAgent = (slug: string) => {
+  const handleSelectAgent = async (slug: string) => {
     setActiveActorIdentity({
       email: workspace.email,
       slug,
@@ -153,13 +153,13 @@ export function WorkspaceRouteShell({
 
     if (section === 'channels') {
       if (selectedChannelSlug) {
-        void navigate({
+        await navigate({
           to: '/channels/$slug',
           params: { slug: selectedChannelSlug },
           search: { agent: slug },
         });
       } else {
-        void navigate({
+        await navigate({
           to: '/channels',
           search: { agent: slug, tab: 'mine' },
         });
@@ -169,13 +169,13 @@ export function WorkspaceRouteShell({
 
     if (section === 'discover') {
       if (selectedDiscoverSlug) {
-        void navigate({
+        await navigate({
           to: '/discover/$slug',
           params: { slug: selectedDiscoverSlug },
           search: { agent: slug },
         });
       } else {
-        void navigate({
+        await navigate({
           to: '/discover',
           search: { agent: slug },
         });
@@ -184,7 +184,7 @@ export function WorkspaceRouteShell({
     }
 
     if (section === 'agents') {
-      void navigate({
+      await navigate({
         to: '/agents',
         search: { agent: slug },
       });
@@ -192,7 +192,7 @@ export function WorkspaceRouteShell({
     }
 
     if (section === 'security') {
-      void navigate({
+      await navigate({
         to: '/security',
         search: {
           agent: slug,
@@ -202,7 +202,7 @@ export function WorkspaceRouteShell({
       return;
     }
 
-    void navigate({
+    await navigate({
       to: '/$slug',
       params: { slug },
       search: {
@@ -235,11 +235,12 @@ export function WorkspaceRouteShell({
       onSelectAgent={handleSelectAgent}
     >
       {selectionUnavailable ? (
-        <Alert variant="destructive">
+        <Alert variant="warning">
+          <WarningCircle aria-hidden />
           <AlertTitle>Agent unavailable</AlertTitle>
           <AlertDescription>
-            This agent is not available for the signed-in account. Select an
-            active agent from the workspace selector to continue.
+            This workspace is not available for the signed-in account. Choose
+            an agent from the selector in the header to continue.
           </AlertDescription>
         </Alert>
       ) : typeof children === 'function' ? (

@@ -216,9 +216,20 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      scroll-behavior: auto !important;
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+      transition-delay: 0ms !important;
+      transition-duration: 1ms !important;
+    }
+
     .animate-soft-enter,
     .animate-soft-subtle,
     .animate-soft-fade,
+    .animate-soft-slow,
     .animate-shimmer,
     .hover-soft-lift,
     .hover-soft-lift:hover {
