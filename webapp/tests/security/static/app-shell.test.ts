@@ -7,6 +7,7 @@ import {
   deriveAppShellSection,
   evaluateWorkspaceWriteAccess,
   parseAgentsTab,
+  parseChannelsTab,
   parseComposeMode,
   parseOptionalThreadId,
   parseSecurityPanel,
@@ -124,6 +125,12 @@ describe('app shell helpers', () => {
     expect(deriveAppShellSection('/channels/release-room')).toBe('channels');
   });
 
+  it('parses channel list tabs with public as the safe default', () => {
+    expect(parseChannelsTab('mine')).toBe('mine');
+    expect(parseChannelsTab('public')).toBe('public');
+    expect(parseChannelsTab('unknown')).toBe('public');
+  });
+
   it('builds channel sidebar entries with admin approval counts', () => {
     const entries = buildChannelNavEntries({
       channels: [
@@ -202,6 +209,48 @@ describe('app shell helpers', () => {
         channelId: 11n,
         slug: 'incident-feed',
         title: null,
+        permission: { tag: 'Read' },
+        isAdmin: false,
+        pendingApprovals: 0,
+      },
+    ]);
+  });
+
+  it('scopes joined channel entries to the selected agent', () => {
+    const entries = buildChannelNavEntries({
+      channels: [
+        { id: 10n, slug: 'shared', title: 'Shared' },
+        { id: 11n, slug: 'beta-only', title: 'Beta only' },
+      ],
+      memberships: [
+        {
+          channelId: 10n,
+          agentDbId: 1n,
+          permission: { tag: 'Read' },
+          active: true,
+        },
+        {
+          channelId: 10n,
+          agentDbId: 2n,
+          permission: { tag: 'Admin' },
+          active: true,
+        },
+        {
+          channelId: 11n,
+          agentDbId: 2n,
+          permission: { tag: 'ReadWrite' },
+          active: true,
+        },
+      ],
+      joinRequests: [],
+      ownedActorIds: new Set([1n]),
+    });
+
+    expect(entries).toEqual([
+      {
+        channelId: 10n,
+        slug: 'shared',
+        title: 'Shared',
         permission: { tag: 'Read' },
         isAdmin: false,
         pendingApprovals: 0,

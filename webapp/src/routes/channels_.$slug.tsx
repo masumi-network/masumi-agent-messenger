@@ -74,6 +74,7 @@ import {
   matchesPublishedActorKeys,
   toActorIdentity,
 } from '@/features/workspace/actor-settings';
+import { parseOptionalSlug } from '@/lib/app-shell';
 import { useWorkspaceShell } from '@/features/workspace/use-workspace-shell';
 import { WorkspaceRouteShell } from '@/features/workspace/workspace-route-shell';
 import { DbConnection, reducers, tables } from '@/module_bindings';
@@ -92,8 +93,6 @@ import {
 } from '../../../shared/channel-crypto';
 import { fromHex, toHex } from '../../../shared/crypto-utils';
 import { randomSenderMessageId } from '../../../shared/agent-crypto';
-import { normalizeEmail } from '../../../shared/inbox-slug';
-import { isDeregisteringOrDeregisteredInboxAgentState } from '../../../shared/inbox-agent-registration';
 import {
   formatEncryptedMessageBody,
   normalizeEncryptedMessagePayload,
@@ -107,6 +106,9 @@ const CHANNEL_HISTORY_PAGE_SIZE = 10;
 const CHANNEL_MEMBER_PAGE_SIZE = 10;
 
 export const Route = createFileRoute('/channels_/$slug')({
+  validateSearch: search => ({
+    agent: parseOptionalSlug(search.agent),
+  }),
   head: ({ params }) =>
     buildRouteHead({
       title: `#${params.slug}`,
@@ -142,19 +144,6 @@ type ChannelAccessMode = 'public' | 'approval_required';
 
 type CombinedChannelMessage = ChannelMessageRow;
 
-function compareBigint(left: bigint, right: bigint): number {
-  if (left < right) return -1;
-  if (left > right) return 1;
-  return 0;
-}
-
-function channelPermissionRank(permission: { tag: string }): number {
-  if (permission.tag === 'Admin') return 3;
-  if (permission.tag === 'ReadWrite') return 2;
-  if (permission.tag === 'Read') return 1;
-  return 0;
-}
-
 function describePermission(permission: { tag: string }): string {
   if (permission.tag === 'Admin') return 'Admin';
   if (permission.tag === 'ReadWrite') return 'Write';
@@ -184,72 +173,6 @@ function toPublicChannelDetails(channel: Channel): ChannelPageDetails {
     discoverable: channel.discoverable,
     lastMessageId: channel.lastMessageId,
   };
-}
-
-function pickPreferredChannelActor(params: {
-  actors: Agent[];
-  normalizedSessionEmail: string;
-  channelId: bigint;
-  memberships: ChannelMember[];
-  joinRequests: ChannelJoinRequest[];
-}): Agent | null {
-  const defaultActor =
-    params.actors.find(
-      actor => actor.isDefault && actor.email === params.normalizedSessionEmail
-    ) ?? null;
-  const ownedActors = defaultActor
-    ? params.actors.filter(actor => actor.accountId === defaultActor.accountId)
-    : params.actors.filter(actor => actor.email === params.normalizedSessionEmail);
-  const usableOwnedActors = ownedActors.filter(
-    actor => !isDeregisteringOrDeregisteredInboxAgentState(actor.masumiRegistrationState?.tag)
-  );
-  const ownedActorsById = new Map(usableOwnedActors.map(actor => [actor.id, actor]));
-
-  const memberActorId = params.memberships
-    .filter(
-      membership =>
-        membership.channelId === params.channelId &&
-        membership.active &&
-        ownedActorsById.has(membership.agentDbId)
-    )
-    .sort((left, right) => {
-      const permissionOrder =
-        channelPermissionRank(right.permission) - channelPermissionRank(left.permission);
-      if (permissionOrder !== 0) return permissionOrder;
-      if (left.agentDbId === defaultActor?.id) return -1;
-      if (right.agentDbId === defaultActor?.id) return 1;
-      return compareBigint(left.agentDbId, right.agentDbId);
-    })[0]?.agentDbId;
-
-  if (memberActorId !== undefined) {
-    return ownedActorsById.get(memberActorId) ?? null;
-  }
-
-  const pendingRequestActorId = params.joinRequests
-    .filter(
-      request =>
-        request.channelId === params.channelId &&
-        request.status.tag === 'Pending' &&
-        ownedActorsById.has(request.requesterAgentDbId)
-    )
-    .sort((left, right) => {
-      if (left.requesterAgentDbId === defaultActor?.id) return -1;
-      if (right.requesterAgentDbId === defaultActor?.id) return 1;
-      return compareBigint(left.id, right.id);
-    })[0]?.requesterAgentDbId;
-
-  if (pendingRequestActorId !== undefined) {
-    return ownedActorsById.get(pendingRequestActorId) ?? null;
-  }
-
-  return (
-    (defaultActor &&
-      !isDeregisteringOrDeregisteredInboxAgentState(defaultActor.masumiRegistrationState?.tag)
-      ? defaultActor
-      : null) ??
-    usableOwnedActors[0] ??
-    null
-  );
 }
 
 function toSignatureInput(message: {
@@ -325,17 +248,24 @@ function senderDisplayName(identity: string): string {
 
 function ChannelPage() {
   const { slug } = Route.useParams();
+  const search = Route.useSearch();
   const auth = useAuthSession();
 
   if (auth.status === 'authenticated') {
-    return <AuthenticatedChannelPage slug={slug} />;
+    return <AuthenticatedChannelPage slug={slug} selectedSlug={search.agent ?? null} />;
   }
 
   return <PublicChannelPageContent slug={slug} />;
 }
 
-function AuthenticatedChannelPage({ slug }: { slug: string }) {
-  const workspace = useWorkspaceShell();
+function AuthenticatedChannelPage({
+  slug,
+  selectedSlug,
+}: {
+  slug: string;
+  selectedSlug: string | null;
+}) {
+  const workspace = useWorkspaceShell({ selectedSlug });
 
   return (
     <WorkspaceRouteShell
@@ -346,7 +276,12 @@ function AuthenticatedChannelPage({ slug }: { slug: string }) {
       signInReturnTo={`/channels/${slug}`}
       signedOutDescription="Sign in to join channels, post messages, and review access requests."
     >
-      <AuthenticatedChannelPageContent embedded />
+      {readyWorkspace => (
+        <AuthenticatedChannelPageContent
+          embedded
+          activeActor={readyWorkspace.selectedActor}
+        />
+      )}
     </WorkspaceRouteShell>
   );
 }
@@ -493,7 +428,7 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
     <main className="mx-auto flex h-screen w-full max-w-5xl flex-col overflow-hidden">
       <div className="flex items-center justify-between gap-2 border-b bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/60 md:px-8">
         <Button asChild variant="ghost" size="sm" className="-ml-2">
-          <Link to="/channels">
+          <Link to="/channels" search={{ agent: undefined, tab: 'public' }}>
             <ArrowLeft size={16} />
             Channels
           </Link>
@@ -661,7 +596,13 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
   );
 }
 
-function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: boolean }) {
+function AuthenticatedChannelPageContent({
+  embedded = false,
+  activeActor,
+}: {
+  embedded?: boolean;
+  activeActor: Agent | null;
+}) {
   const { slug } = Route.useParams();
   const auth = useAuthSession();
   const connectionState = useSpacetimeDB();
@@ -783,21 +724,6 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
   const [feedUnseenCount, setFeedUnseenCount] = useState(0);
 
   const authenticatedSession = auth.status === 'authenticated' ? auth.session : null;
-  const normalizedSessionEmail = useMemo(
-    () => normalizeEmail(authenticatedSession?.user.email ?? ''),
-    [authenticatedSession?.user.email]
-  );
-  const activeActor = useMemo(
-    () =>
-      pickPreferredChannelActor({
-        actors,
-        normalizedSessionEmail,
-        channelId,
-        memberships,
-        joinRequests,
-      }),
-    [actors, channelId, joinRequests, memberships, normalizedSessionEmail]
-  );
   const membership = useMemo(
     () =>
       activeActor
@@ -1326,14 +1252,10 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
     const freshMemberships = Array.from(
       connection.db.visible_channel_memberships.iter()
     ) as ChannelMember[];
-    const freshJoinRequests = await readPendingChannelJoinRequests(connection);
-    const freshActor = pickPreferredChannelActor({
-      actors: freshActors,
-      normalizedSessionEmail,
-      channelId: freshChannelId,
-      memberships: freshMemberships,
-      joinRequests: freshJoinRequests,
-    });
+    const freshActor =
+      activeActor === null
+        ? null
+        : freshActors.find(actor => actor.id === activeActor.id) ?? null;
     if (!freshActor) {
       throw new Error('No active agent is available for this session.');
     }
@@ -1470,7 +1392,10 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
       {embedded ? null : (
         <div className="flex items-center justify-between gap-2 border-b bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/60 md:px-8">
           <Button asChild variant="ghost" size="sm" className="-ml-2">
-            <Link to="/channels">
+            <Link
+              to="/channels"
+              search={{ agent: activeActor?.slug, tab: 'mine' }}
+            >
               <ArrowLeft size={16} />
               Channels
             </Link>
@@ -1646,7 +1571,10 @@ function AuthenticatedChannelPageContent({ embedded = false }: { embedded?: bool
                           ) : null}
                           <DropdownMenuSeparator />
                           <DropdownMenuItem asChild>
-                            <Link to="/channels">
+                            <Link
+                              to="/channels"
+                              search={{ agent: activeActor?.slug, tab: 'mine' }}
+                            >
                               <ArrowLeft size={14} />
                               All channels
                             </Link>

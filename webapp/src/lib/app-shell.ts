@@ -200,9 +200,14 @@ export function resolveDashboardModal(params: {
 }
 
 export type AgentsTab = 'discover' | 'agents';
+export type ChannelsTab = 'public' | 'mine';
 
 export function parseAgentsTab(value: unknown): AgentsTab {
   return value === 'agents' || value === 'register' ? 'agents' : 'discover';
+}
+
+export function parseChannelsTab(value: unknown): ChannelsTab {
+  return value === 'mine' ? 'mine' : 'public';
 }
 
 export function deriveAppShellSection(pathname: string): AppShellSection {

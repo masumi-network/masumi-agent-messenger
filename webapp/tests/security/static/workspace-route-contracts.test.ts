@@ -49,6 +49,20 @@ describe('workspace route contracts', () => {
     expect(source).toContain('Register new agent');
   });
 
+  it('scopes channel lists and actions to the selected workspace agent', () => {
+    const listSource = readRoute('src/routes/channels.tsx');
+    const detailSource = readRoute('src/routes/channels_.$slug.tsx');
+    const shellSource = readRoute('src/components/app/inbox-shell.tsx');
+
+    expect(listSource).toContain("value=\"public\"");
+    expect(listSource).toContain("value=\"mine\"");
+    expect(listSource).toContain('<CreateChannelDialog');
+    expect(listSource).toContain('selectedSlug: search.agent ?? null');
+    expect(detailSource).toContain('selectedSlug={search.agent ?? null}');
+    expect(detailSource).toContain('activeActor={readyWorkspace.selectedActor}');
+    expect(shellSource).toContain("agent: currentInboxSlug ?? undefined");
+  });
+
   it('links discovered agents to their dedicated details page', () => {
     const source = readRoute('src/routes/discover.tsx');
 

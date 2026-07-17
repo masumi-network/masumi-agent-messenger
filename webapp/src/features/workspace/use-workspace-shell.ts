@@ -213,13 +213,11 @@ export function useWorkspaceShell(params?: {
         memberships: visible_channel_memberships,
         joinRequests: pendingChannelJoinRequests,
         ownedActorIds: new Set(
-          snapshot.ownedInboxAgents
-            .filter(entry => !entry.deregistered)
-            .map(entry => entry.actor.id)
+          snapshot.selectedActor ? [snapshot.selectedActor.id] : []
         ),
       }),
     [
-      snapshot.ownedInboxAgents,
+      snapshot.selectedActor,
       pendingChannelJoinRequests,
       visible_channel_memberships,
       visible_channels,

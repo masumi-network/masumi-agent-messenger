@@ -126,6 +126,10 @@ export function InboxShell({
         onSelect: () => {
           void navigate({
             to: '/channels',
+            search: {
+              agent: currentInboxSlug ?? undefined,
+              tab: 'public',
+            },
           });
         },
       },
@@ -233,7 +237,13 @@ export function InboxShell({
                 aria-label="Add channel"
                 className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => {
-                  void navigate({ to: '/channels' });
+                  void navigate({
+                    to: '/channels',
+                    search: {
+                      agent: currentInboxSlug ?? undefined,
+                      tab: 'mine',
+                    },
+                  });
                   setMobileOpen(false);
                 }}
               >
@@ -268,6 +278,9 @@ export function InboxShell({
                     void navigate({
                       to: '/channels/$slug',
                       params: { slug: entry.slug },
+                      search: {
+                        agent: currentInboxSlug ?? undefined,
+                      },
                     });
                     setMobileOpen(false);
                   }}
@@ -369,6 +382,9 @@ export function InboxShell({
                     void navigate({
                       to: '/channels/$slug',
                       params: { slug: entry.slug },
+                      search: {
+                        agent: currentInboxSlug ?? undefined,
+                      },
                     });
                   }}
                 >
@@ -400,7 +416,13 @@ export function InboxShell({
               aria-label="Add channel"
               className="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               onClick={() => {
-                void navigate({ to: '/channels' });
+                void navigate({
+                  to: '/channels',
+                  search: {
+                    agent: currentInboxSlug ?? undefined,
+                    tab: 'mine',
+                  },
+                });
               }}
             >
               <Plus className="h-4 w-4" />
