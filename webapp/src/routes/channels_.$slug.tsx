@@ -54,6 +54,7 @@ import {
   getChannelMessageSigningPublicKey,
   resolveChannelMessageSigningKeys,
 } from '@/lib/channel-signing-keys';
+import { isChannelFeedReady } from '@/lib/channel-feed-state';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { formatDayLabel } from '@/lib/format-relative-time';
 import { computeDayBoundaries, computeGroupedFlags } from '@/lib/group-messages';
@@ -331,7 +332,7 @@ function PublicChannelPageContent({ slug }: { slug: string }) {
   }, [channelId]);
 
   useEffect(() => {
-    if (channel && liveMessagesReady) {
+    if (channel?.accessMode === 'public' && liveMessagesReady) {
       reloadMessages();
     }
   }, [channel, liveMessagesReady, liveMessagesRefreshKey, reloadMessages]);
@@ -1361,8 +1362,12 @@ function AuthenticatedChannelPageContent({
       membershipsReady &&
       joinRequestsReady);
   const pageReady = channelsReady && authenticatedTablesReady;
-  const channelMessagesReady =
-    messagesReady && (auth.status !== 'authenticated' || historyReady);
+  const channelMessagesReady = isChannelFeedReady({
+    accessMode: channel?.accessMode ?? null,
+    historyReady,
+    publicMessagesReady: messagesReady,
+    canReadAuthenticatedHistory: canReadChannelHistory,
+  });
 
   const timelineMeta = useMemo(
     () =>
