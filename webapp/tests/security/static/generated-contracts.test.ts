@@ -549,10 +549,12 @@ describe('generated and source security contracts (post-rework)', () => {
     expect(generatedTypes).not.toContain('masumiVerified');
     expect(generatedTypes).toContain('agentIdentifier: __t.option(__t.string())');
 
-    for (const route of [registerRoute, syncRoute, deregisterRoute]) {
+    for (const route of [registerRoute, deregisterRoute]) {
       expect(route).toContain('masumiRegistrationOutcomeToHttpStatus');
       expect(route).toContain('resolveTrustedOwnedRegistrationSubjectForSession');
     }
+    expect(syncRoute).toContain('masumiRegistrationSyncOutcomeToHttpStatus');
+    expect(syncRoute).toContain('resolveTrustedOwnedRegistrationSubjectForSession');
     for (const route of [registerRoute, syncRoute]) {
       expect(route).toContain('createMasumiRegistrationOperationalFailureResponse');
     }

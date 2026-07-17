@@ -11,7 +11,7 @@ import {
   assertSameOriginUnsafeRequest,
 } from '@/lib/security';
 import {
-  masumiRegistrationOutcomeToHttpStatus,
+  masumiRegistrationSyncOutcomeToHttpStatus,
   type SerializedMasumiActorRegistrationSubject,
   type SerializedMasumiRegistrationResponse,
 } from '../../../shared/inbox-agent-registration';
@@ -54,7 +54,7 @@ function registrationResponse(
 ): Response {
   return jsonResponse(
     body,
-    masumiRegistrationOutcomeToHttpStatus(body.registration.status),
+    masumiRegistrationSyncOutcomeToHttpStatus(body.registration.status),
     cookies
   );
 }

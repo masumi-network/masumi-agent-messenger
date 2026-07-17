@@ -88,6 +88,18 @@ export function masumiRegistrationOutcomeToHttpStatus(
   }
 }
 
+export function masumiRegistrationSyncOutcomeToHttpStatus(
+  outcome: MasumiRegistrationOutcome
+): number {
+  // A sync that finds no managed registration is a successful absence check,
+  // not a missing web route. Keep 404 for resources that callers requested
+  // directly; the workspace refresh treats this structured "skipped" result
+  // as a valid snapshot.
+  return outcome === 'skipped'
+    ? 200
+    : masumiRegistrationOutcomeToHttpStatus(outcome);
+}
+
 export type MasumiActorRegistrationMetadata = {
   masumiRegistrationNetwork?: string;
   masumiInboxAgentId?: string;

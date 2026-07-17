@@ -25,6 +25,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Textarea } from '@/components/ui/textarea';
 import { buildLoginHref, useAuthSession } from '@/lib/auth-session';
+import { waitForVisibleChannelBySlug } from '@/lib/channel-creation';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import { buildRouteHead } from '@/lib/seo';
 import { readAllOwnedAgents } from '@/lib/spacetime-procedure-reads';
@@ -289,6 +290,7 @@ function PublicChannelsPageContent() {
 function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boolean }) {
   const auth = useAuthSession();
   const navigate = useNavigate();
+  const connectionState = useSpacetimeDB();
   const createChannelReducer = useReducer(reducers.createChannel);
   const publicChannelPage = usePublicChannelPage();
   const [accountSignals] = useLiveTable<AccountChangeSignal>(
@@ -353,12 +355,18 @@ function AuthenticatedChannelsPageContent({ embedded = false }: { embedded?: boo
           defaultPermission: undefined,
         })
       );
-      setDraftSlug('');
-      setDraftTitle('');
-      setDraftDescription('');
-      setDraftAccessMode('public');
-      setDraftDiscoverable(true);
-      void navigate({
+
+      const connection = connectionState.getConnection?.() as DbConnection | null;
+      if (!connection) {
+        throw new Error(
+          `Channel /${createdSlug} was created, but the inbox disconnected before it could be opened.`
+        );
+      }
+      await waitForVisibleChannelBySlug({
+        connection,
+        slug: createdSlug,
+      });
+      await navigate({
         to: '/channels/$slug',
         params: { slug: createdSlug },
       });
