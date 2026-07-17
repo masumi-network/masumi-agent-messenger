@@ -7,7 +7,6 @@ import {
   MagnifyingGlass,
   Moon,
   Plus,
-  ShieldCheck,
   Sun,
   Users,
   CaretLineLeft,
@@ -15,6 +14,7 @@ import {
   CaretDown,
   CaretUp,
   DotsThree,
+  GearSix,
 } from '@phosphor-icons/react';
 import { AccountMenu } from '@/components/app/account-menu';
 import {
@@ -209,6 +209,11 @@ export function InboxShell({
           });
         },
       },
+    ],
+    [channelApprovalCount, currentInboxSlug, navigate, pendingApprovals, section]
+  );
+  const utilityNavItems = useMemo<NavItem[]>(
+    () => [
       {
         key: 'agents',
         label: 'My agents',
@@ -225,8 +230,8 @@ export function InboxShell({
       },
       {
         key: 'security',
-        label: 'Security',
-        Icon: ShieldCheck,
+        label: 'Security settings',
+        Icon: GearSix,
         active: section === 'security',
         onSelect: () => {
           void navigate({
@@ -239,7 +244,7 @@ export function InboxShell({
         },
       },
     ],
-    [channelApprovalCount, currentInboxSlug, navigate, pendingApprovals, section]
+    [currentInboxSlug, navigate, section]
   );
 
   const shellTitle =
@@ -443,13 +448,53 @@ export function InboxShell({
         ) : null}
       </div>
 
-      <div className="mt-auto p-2">
-        <AccountMenu
-          email={sessionEmail}
-          avatarName={avatarName}
-          avatarIdentity={avatarIdentity}
-          currentInboxSlug={currentInboxSlug ?? undefined}
-        />
+      <div className="mt-auto shrink-0 border-t border-border/60 px-2 pb-2 pt-2">
+        <nav aria-label="Account navigation" className="space-y-0.5">
+          {utilityNavItems.map(item => (
+            <button
+              type="button"
+              key={item.key}
+              className={cn(
+                'group relative flex h-11 w-full items-center gap-2.5 rounded-md px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-9',
+                item.active
+                  ? 'bg-primary/10 text-foreground'
+                  : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+              )}
+              onClick={() => {
+                item.onSelect();
+                setMobileOpen(false);
+              }}
+            >
+              {item.active ? (
+                <span
+                  aria-hidden
+                  className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r-full bg-primary"
+                />
+              ) : null}
+              {item.Icon ? (
+                <item.Icon
+                  aria-hidden
+                  className={cn(
+                    'size-4 shrink-0 transition-colors',
+                    item.active
+                      ? 'text-primary'
+                      : 'text-muted-foreground group-hover:text-foreground'
+                  )}
+                />
+              ) : null}
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="mt-1.5 border-t border-border/50 pt-1.5">
+          <AccountMenu
+            email={sessionEmail}
+            avatarName={avatarName}
+            avatarIdentity={avatarIdentity}
+            activeAgentSlug={currentInboxSlug ?? undefined}
+            agentCount={ownedAgents.length}
+          />
+        </div>
       </div>
     </div>
   );
@@ -592,12 +637,43 @@ export function InboxShell({
         </Tooltip>
       </div>
 
-      <div className="mt-auto pb-2">
+      <div className="mt-auto flex flex-col items-center gap-1.5 pb-2">
+        <div className="mb-1 h-px w-6 bg-border/70" />
+        {utilityNavItems.map(item => (
+          <Tooltip key={item.key}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={item.label}
+                className={cn(
+                  'relative flex size-9 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  item.active
+                    ? 'bg-primary/10 text-primary'
+                    : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+                )}
+                onClick={() => item.onSelect()}
+              >
+                {item.active ? (
+                  <span
+                    aria-hidden
+                    className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r-full bg-primary"
+                  />
+                ) : null}
+                {item.Icon ? <item.Icon aria-hidden className="size-4" /> : null}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>
+              {item.label}
+            </TooltipContent>
+          </Tooltip>
+        ))}
+        <div className="my-1 h-px w-6 bg-border/70" />
         <AccountMenu
           email={sessionEmail}
           avatarName={avatarName}
           avatarIdentity={avatarIdentity}
-          currentInboxSlug={currentInboxSlug ?? undefined}
+          activeAgentSlug={currentInboxSlug ?? undefined}
+          agentCount={ownedAgents.length}
           iconOnly
         />
       </div>
@@ -661,13 +737,15 @@ export function InboxShell({
                   {shellTitle}
                 </h1>
               </div>
-              <ActiveAgentSelector
-                activeSlug={currentInboxSlug ?? null}
-                agents={ownedAgents}
-                variant="header"
-                onSelect={handleSelectAgent}
-                onManageAgents={handleManageAgents}
-              />
+              <div className="lg:hidden">
+                <ActiveAgentSelector
+                  activeSlug={currentInboxSlug ?? null}
+                  agents={ownedAgents}
+                  variant="header"
+                  onSelect={handleSelectAgent}
+                  onManageAgents={handleManageAgents}
+                />
+              </div>
               <button
                 type="button"
                 onClick={toggleTheme}

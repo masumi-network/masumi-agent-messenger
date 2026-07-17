@@ -78,7 +78,11 @@ describe('workspace route contracts', () => {
 
     expect(shellSource).toContain('<ActiveAgentSelector');
     expect(shellSource).toContain('variant="header"');
+    expect(shellSource).toContain('<div className="lg:hidden">');
     expect(shellSource).toContain('onSelect={handleSelectAgent}');
+    expect(shellSource).toContain('const utilityNavItems');
+    expect(shellSource).toContain('aria-label="Account navigation"');
+    expect(shellSource).toContain("label: 'Security settings'");
     expect(shellSource).not.toContain('useTransition()');
     expect(shellSource).not.toContain('key={`${section}:');
     expect(shellSource).toContain('role="status" aria-live="polite"');
@@ -99,6 +103,19 @@ describe('workspace route contracts', () => {
     expect(securitySource).toContain('selectedSlug: search.agent ?? null');
     expect(discoverSource).toContain('selectedSlug: search.agent ?? null');
     expect(agentsSource).toContain('selectedSlug: search.agent ?? null');
+  });
+
+  it('keeps account details and logout distinct from workspace navigation', () => {
+    const accountMenuSource = readRoute(
+      'src/components/app/account-menu.tsx'
+    );
+
+    expect(accountMenuSource).toContain('Signed-in account');
+    expect(accountMenuSource).toContain('Active agent');
+    expect(accountMenuSource).toContain('Available agents');
+    expect(accountMenuSource).toContain('Log out');
+    expect(accountMenuSource).toContain('Lock the vault and end this session');
+    expect(accountMenuSource).not.toContain('to="/security"');
   });
 
   it('links discovered agents to their dedicated details page', () => {
