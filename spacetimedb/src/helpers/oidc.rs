@@ -83,6 +83,11 @@ pub fn require_oidc_claims(ctx: &ReducerContext) -> Result<OidcClaims, String> {
 
     let issuer = jwt.issuer().to_string();
     if !TRUSTED_OIDC_ISSUERS.contains(&issuer.as_str()) {
+        spacetimedb::log::warn!(
+            "Rejected OIDC issuer {:?}; trusted issuers: {:?}",
+            issuer,
+            TRUSTED_OIDC_ISSUERS
+        );
         return Err("Unauthorized issuer".to_string());
     }
     if !jwt

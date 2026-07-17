@@ -12,6 +12,7 @@ import {
 import { DbConnection, ErrorContext } from './module_bindings';
 import { NotFoundPage } from './components/not-found-page';
 import { AuthSessionProvider, useAuthSession } from './lib/auth-session';
+import { buildScopedSpacetimeUri } from './lib/spacetime-connection-scope';
 
 const HOST = import.meta.env.VITE_SPACETIMEDB_HOST ?? 'ws://localhost:3000';
 const DB_NAME =
@@ -65,7 +66,10 @@ function AuthenticatedSpacetimeShell({
     queryClient.removeQueries({ queryKey: ['spacetimedb'] });
   }, [auth.status]);
 
-  const connectionUri = useMemo(() => (sessionToken ? HOST : null), [sessionToken]);
+  const connectionUri = useMemo(
+    () => (sessionToken ? buildScopedSpacetimeUri(HOST, sessionToken) : null),
+    [sessionToken]
+  );
 
   useEffect(() => {
     if (!sessionToken) return;
@@ -111,7 +115,7 @@ function AuthenticatedSpacetimeShell({
   return (
     <SpacetimeDBProvider
       connectionBuilder={connectionBuilder}
-      key={sessionToken}
+      key={connectionUri}
     >
       {children}
     </SpacetimeDBProvider>
