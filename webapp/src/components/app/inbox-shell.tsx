@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, useTransition } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import {
   ChatText,
@@ -12,6 +12,9 @@ import {
   Users,
   CaretLineLeft,
   CaretLineRight,
+  CaretDown,
+  CaretUp,
+  DotsThree,
 } from '@phosphor-icons/react';
 import { AccountMenu } from '@/components/app/account-menu';
 import {
@@ -52,7 +55,7 @@ type InboxShellProps = {
   avatarName?: string;
   avatarIdentity?: string;
   ownedAgents?: ActiveAgentOption[];
-  onSelectAgent: (slug: string) => Promise<void>;
+  onSelectAgent: (slug: string) => void;
   children: React.ReactNode;
 };
 
@@ -64,6 +67,34 @@ type NavItem = {
   count?: number;
   onSelect: () => void;
 };
+
+const CHANNEL_PREVIEW_COUNT = 4;
+
+function getChannelPreview(
+  entries: ChannelNavEntry[],
+  selectedSlug: string | null
+): ChannelNavEntry[] {
+  const preview = entries.slice(0, CHANNEL_PREVIEW_COUNT);
+  const selected = selectedSlug
+    ? entries.find(entry => entry.slug === selectedSlug)
+    : null;
+
+  if (
+    !selected ||
+    preview.some(entry => entry.channelId === selected.channelId)
+  ) {
+    return preview;
+  }
+
+  return [...entries.slice(0, CHANNEL_PREVIEW_COUNT - 1), selected];
+}
+
+function describeChannelPermission(entry: ChannelNavEntry): string {
+  if (entry.isAdmin) return 'Admin';
+  if (entry.permission.tag === 'ReadWrite') return 'Can post';
+  if (entry.permission.tag === 'Read') return 'Read only';
+  return 'Joined';
+}
 
 export function InboxShell({
   section,
@@ -85,9 +116,7 @@ export function InboxShell({
   const { theme, toggleTheme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
-  const [switchingToSlug, setSwitchingToSlug] = useState<string | null>(null);
-  const [isSwitchingAgent, startAgentSwitch] = useTransition();
-  const pendingSwitchSlug = isSwitchingAgent ? switchingToSlug : null;
+  const [channelsExpanded, setChannelsExpanded] = useState(false);
   const channelApprovalCount = useMemo(
     () =>
       channelNavEntries.reduce(
@@ -96,21 +125,28 @@ export function InboxShell({
       ),
     [channelNavEntries]
   );
-  const handleSelectAgent = useCallback(
-    (slug: string) => {
-      if (slug === currentInboxSlug || pendingSwitchSlug) {
-        return;
-      }
-
-      setSwitchingToSlug(slug);
-      setMobileOpen(false);
-      startAgentSwitch(async () => {
-        await onSelectAgent(slug);
-      });
-    },
-    [currentInboxSlug, onSelectAgent, pendingSwitchSlug]
+  const channelPreview = getChannelPreview(
+    channelNavEntries,
+    selectedChannelSlug
   );
-  const handleManageAgents = useCallback(() => {
+  const renderExpandedChannelList =
+    channelsExpanded && (sidebarExpanded || mobileOpen);
+  const visibleChannelEntries = renderExpandedChannelList
+    ? channelNavEntries
+    : channelPreview;
+  const channelListHasOverflow =
+    channelNavEntries.length > CHANNEL_PREVIEW_COUNT;
+
+  function handleSelectAgent(slug: string) {
+    if (slug === currentInboxSlug) {
+      return;
+    }
+
+    setMobileOpen(false);
+    onSelectAgent(slug);
+  }
+
+  function handleManageAgents() {
     setMobileOpen(false);
     void navigate({
       to: '/agents',
@@ -118,7 +154,7 @@ export function InboxShell({
         agent: currentInboxSlug ?? undefined,
       },
     });
-  }, [currentInboxSlug, navigate]);
+  }
 
   const navItems = useMemo<NavItem[]>(
     () => [
@@ -229,7 +265,6 @@ export function InboxShell({
           <ActiveAgentSelector
             activeSlug={currentInboxSlug ?? null}
             agents={ownedAgents}
-            switchingToSlug={pendingSwitchSlug}
             onSelect={handleSelectAgent}
             onManageAgents={handleManageAgents}
           />
@@ -278,11 +313,19 @@ export function InboxShell({
         ))}
       </nav>
 
-      <div className="mt-5 min-h-0 flex-1 overflow-y-auto px-2">
-        <div className="mb-1.5 flex items-center justify-between px-2">
-          <p className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/70 lg:text-[10px]">
-            Channels
-          </p>
+      <div className="mt-5 flex min-h-0 flex-1 flex-col px-2">
+        <div className="mb-2 flex items-start justify-between gap-2 px-2">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/70 lg:text-[10px]">
+              Channels
+            </p>
+            {channelNavEntries.length > 0 ? (
+              <p className="mt-0.5 truncate text-sm text-muted-foreground lg:text-[11px]">
+                {channelNavEntries.length} joined
+                {currentInboxSlug ? ` by /${currentInboxSlug}` : ''}
+              </p>
+            ) : null}
+          </div>
           <Tooltip>
             <TooltipTrigger asChild>
               <button
@@ -300,7 +343,7 @@ export function InboxShell({
                   setMobileOpen(false);
                 }}
               >
-                <Plus className="h-3.5 w-3.5" />
+                <Plus className="size-3.5 shrink-0" />
               </button>
             </TooltipTrigger>
             <TooltipContent side="right" sideOffset={8}>
@@ -314,15 +357,24 @@ export function InboxShell({
             No joined channels
           </p>
         ) : (
-          <div className="space-y-0.5">
-            {channelNavEntries.map(entry => {
+          <div
+            className={cn(
+              'space-y-0.5',
+              channelsExpanded &&
+                'min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain pr-1'
+            )}
+          >
+            {visibleChannelEntries.map(entry => {
               const active = selectedChannelSlug === entry.slug;
+              const subtitle =
+                entry.description?.trim() || `#${entry.slug}`;
+              const permissionLabel = describeChannelPermission(entry);
               return (
                 <button
                   type="button"
                   key={entry.channelId.toString()}
                   className={cn(
-                    'group relative flex h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-8',
+                    'group relative flex min-h-14 w-full min-w-0 items-start gap-2.5 rounded-md px-2.5 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                     active
                       ? 'bg-primary/10 text-foreground'
                       : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
@@ -338,24 +390,31 @@ export function InboxShell({
                     setMobileOpen(false);
                   }}
                 >
-                  <Hash
+                  <span
                     className={cn(
-                      'h-3.5 w-3.5 shrink-0 transition-colors',
+                      'mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-muted/70 transition-colors',
                       active
-                        ? 'text-primary'
+                        ? 'text-primary ring-1 ring-primary/15'
                         : 'text-muted-foreground/70 group-hover:text-foreground'
                     )}
-                  />
-                  <span className="min-w-0 flex-1 truncate">
-                    {entry.title?.trim() || entry.slug}
+                    aria-hidden
+                  >
+                    <Hash
+                      className="block size-4 shrink-0"
+                      weight={active ? 'bold' : 'regular'}
+                    />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">
+                      {entry.title?.trim() || entry.slug}
+                    </span>
+                    <span className="mt-0.5 block truncate text-sm leading-snug text-muted-foreground lg:text-xs">
+                      {subtitle} · {permissionLabel}
+                    </span>
                   </span>
                   {entry.pendingApprovals > 0 ? (
-                    <span className="shrink-0 rounded-full bg-primary px-1.5 py-0.5 text-sm font-semibold text-primary-foreground lg:text-[10px]">
+                    <span className="shrink-0 rounded-full bg-primary px-1.5 py-0.5 text-sm font-semibold leading-none text-primary-foreground lg:text-[10px]">
                       {entry.pendingApprovals}
-                    </span>
-                  ) : entry.isAdmin ? (
-                    <span className="shrink-0 rounded-full border border-border/70 bg-muted/60 px-1.5 py-0.5 text-sm text-muted-foreground lg:text-[10px]">
-                      admin
                     </span>
                   ) : null}
                 </button>
@@ -363,6 +422,25 @@ export function InboxShell({
             })}
           </div>
         )}
+        {channelListHasOverflow ? (
+          <button
+            type="button"
+            aria-expanded={channelsExpanded}
+            className="mt-1 flex h-11 shrink-0 items-center justify-between rounded-md px-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:h-8 lg:text-xs"
+            onClick={() => setChannelsExpanded(expanded => !expanded)}
+          >
+            <span>
+              {channelsExpanded
+                ? 'Show fewer'
+                : `Show all ${channelNavEntries.length} channels`}
+            </span>
+            {channelsExpanded ? (
+              <CaretUp className="size-3.5 shrink-0" weight="bold" />
+            ) : (
+              <CaretDown className="size-3.5 shrink-0" weight="bold" />
+            )}
+          </button>
+        ) : null}
       </div>
 
       <div className="mt-auto p-2">
@@ -383,7 +461,6 @@ export function InboxShell({
         activeSlug={currentInboxSlug ?? null}
         agents={ownedAgents}
         variant="rail"
-        switchingToSlug={pendingSwitchSlug}
         onSelect={handleSelectAgent}
         onManageAgents={handleManageAgents}
       />
@@ -424,7 +501,7 @@ export function InboxShell({
 
       <div className="mt-3 space-y-1.5">
         <div className="mx-auto h-px w-6 bg-border/70" />
-        {channelNavEntries.slice(0, 8).map(entry => {
+        {channelPreview.map(entry => {
           const active = selectedChannelSlug === entry.slug;
           const label = entry.title?.trim() || entry.slug;
           return (
@@ -470,6 +547,26 @@ export function InboxShell({
             </Tooltip>
           );
         })}
+        {channelListHasOverflow ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={`Show all ${channelNavEntries.length} channels`}
+                className="flex size-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => {
+                  setSidebarExpanded(true);
+                  setChannelsExpanded(true);
+                }}
+              >
+                <DotsThree className="size-4 shrink-0" weight="bold" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={8}>
+              Show all {channelNavEntries.length} channels
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
         <Tooltip>
           <TooltipTrigger asChild>
             <button
@@ -513,8 +610,8 @@ export function InboxShell({
         {/* Desktop sidebar */}
         <aside
           className={cn(
-            'hidden h-screen shrink-0 overflow-hidden border-r border-border/50 bg-background transition-[width] duration-200 ease-in-out lg:block',
-            sidebarExpanded ? 'w-[220px]' : 'w-[52px]'
+            'hidden h-screen shrink-0 overflow-hidden border-r border-border/50 bg-background lg:block',
+            sidebarExpanded ? 'w-[252px]' : 'w-[52px]'
           )}
         >
           <div className="flex h-full flex-col">
@@ -538,7 +635,7 @@ export function InboxShell({
         </aside>
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-20 border-b border-border/50 bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/60">
+          <header className="sticky top-0 z-20 border-b border-border/50 bg-background/95">
             <div className="flex min-h-14 items-center gap-3 px-4 py-3 md:px-6">
               <Dialog open={mobileOpen} onOpenChange={setMobileOpen}>
                 <DialogTrigger asChild>
@@ -568,7 +665,6 @@ export function InboxShell({
                 activeSlug={currentInboxSlug ?? null}
                 agents={ownedAgents}
                 variant="header"
-                switchingToSlug={pendingSwitchSlug}
                 onSelect={handleSelectAgent}
                 onManageAgents={handleManageAgents}
               />
@@ -586,18 +682,13 @@ export function InboxShell({
               </button>
             </div>
             <p className="sr-only" role="status" aria-live="polite">
-              {pendingSwitchSlug
-                ? `Switching workspace to agent ${pendingSwitchSlug}`
-                : currentInboxSlug
-                  ? `Active workspace agent is ${currentInboxSlug}`
-                  : 'No active workspace agent selected'}
+              {currentInboxSlug
+                ? `Active workspace agent is ${currentInboxSlug}`
+                : 'No active workspace agent selected'}
             </p>
           </header>
 
-          <main
-            key={`${section}:${currentInboxSlug ?? 'none'}`}
-            className="animate-soft-enter flex-1 overflow-auto px-4 py-5 md:px-6 md:py-6"
-          >
+          <main className="animate-soft-enter flex-1 overflow-auto px-4 py-5 md:px-6 md:py-6">
             {children}
           </main>
         </div>

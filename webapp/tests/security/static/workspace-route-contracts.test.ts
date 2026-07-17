@@ -79,11 +79,15 @@ describe('workspace route contracts', () => {
     expect(shellSource).toContain('<ActiveAgentSelector');
     expect(shellSource).toContain('variant="header"');
     expect(shellSource).toContain('onSelect={handleSelectAgent}');
-    expect(shellSource).toContain('useTransition()');
+    expect(shellSource).not.toContain('useTransition()');
+    expect(shellSource).not.toContain('key={`${section}:');
     expect(shellSource).toContain('role="status" aria-live="polite"');
+    expect(shellSource).toContain('const CHANNEL_PREVIEW_COUNT = 4');
+    expect(shellSource).toContain('aria-expanded={channelsExpanded}');
     expect(selectorSource).toContain('const vault = useKeyVault()');
     expect(selectorSource).toContain('<DropdownMenuRadioGroup');
-    expect(selectorSource).toContain('aria-busy={isSwitching}');
+    expect(selectorSource).toContain('function VaultStatusIcon');
+    expect(selectorSource).not.toContain('disabled={isSwitching}');
     expect(selectorSource).toContain(
       'One browser vault protects the private keys for every agent in this account.'
     );

@@ -19,6 +19,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useKeyVault } from '@/hooks/use-key-vault';
+import { cn } from '@/lib/utils';
 
 export type ActiveAgentOption = {
   id?: bigint;
@@ -29,18 +30,49 @@ export type ActiveAgentOption = {
 
 export type ActiveAgentSelectorVariant = 'sidebar' | 'rail' | 'header';
 
+type VaultVisualState = 'loading' | 'unlocked' | 'locked';
+
+function VaultStatusIcon({
+  state,
+  className,
+}: {
+  state: VaultVisualState;
+  className?: string;
+}) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        'inline-flex size-4 shrink-0 items-center justify-center',
+        state === 'loading'
+          ? 'animate-spin text-muted-foreground motion-reduce:animate-none'
+          : state === 'unlocked'
+            ? 'text-emerald-600 dark:text-emerald-400'
+            : 'text-amber-600 dark:text-amber-400',
+        className
+      )}
+    >
+      {state === 'loading' ? (
+        <CircleNotch className="block size-3.5 shrink-0" weight="bold" />
+      ) : state === 'unlocked' ? (
+        <LockOpen className="block size-3.5 shrink-0" weight="bold" />
+      ) : (
+        <Lock className="block size-3.5 shrink-0" weight="bold" />
+      )}
+    </span>
+  );
+}
+
 export function ActiveAgentSelector({
   activeSlug,
   agents,
   variant = 'sidebar',
-  switchingToSlug = null,
   onSelect,
   onManageAgents,
 }: {
   activeSlug: string | null;
   agents: ActiveAgentOption[];
   variant?: ActiveAgentSelectorVariant;
-  switchingToSlug?: string | null;
   onSelect: (slug: string) => void;
   onManageAgents?: () => void;
 }) {
@@ -48,8 +80,6 @@ export function ActiveAgentSelector({
   const [vaultDialogOpen, setVaultDialogOpen] = useState(false);
   const activeAgent =
     agents.find(agent => agent.slug === activeSlug) ?? null;
-  const switchingAgent =
-    agents.find(agent => agent.slug === switchingToSlug) ?? null;
   const activeName =
     activeAgent?.displayName?.trim() || activeAgent?.slug || 'Select agent';
   const vaultLabel = vault.loading
@@ -59,108 +89,62 @@ export function ActiveAgentSelector({
       : vault.initialized
         ? 'Vault locked'
         : 'Vault not created';
-  const isSwitching = switchingToSlug !== null;
+  const vaultVisualState: VaultVisualState = vault.loading
+    ? 'loading'
+    : vault.unlocked
+      ? 'unlocked'
+      : 'locked';
   const isRail = variant === 'rail';
   const isHeader = variant === 'header';
-  const visibleSlug = switchingToSlug ?? activeAgent?.slug ?? null;
-  const triggerLabel = isSwitching
-    ? `Switching to /${switchingToSlug}`
-    : activeAgent
-      ? `Acting as /${activeAgent.slug}`
-      : 'Select active agent';
-
-  const statusIcon = vault.loading ? (
-    <CircleNotch
-      aria-hidden
-      className="h-3.5 w-3.5 animate-spin text-muted-foreground motion-reduce:animate-none"
-    />
-  ) : vault.unlocked ? (
-    <LockOpen
-      aria-hidden
-      className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400"
-    />
-  ) : (
-    <Lock
-      aria-hidden
-      className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400"
-    />
-  );
+  const triggerLabel = activeAgent
+    ? `Acting as /${activeAgent.slug}`
+    : 'Select active agent';
 
   return (
     <>
       <DropdownMenu>
-        <DropdownMenuTrigger asChild disabled={isSwitching}>
+        <DropdownMenuTrigger asChild>
           {isRail ? (
             <button
               type="button"
               aria-label={`${triggerLabel}. ${vaultLabel}. Switch active agent`}
-              aria-busy={isSwitching}
-              title={`${triggerLabel} — ${vaultLabel}`}
-              className="relative flex h-10 w-10 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-70"
+              title={`${triggerLabel} · ${vaultLabel}`}
+              className="relative flex size-10 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <AgentAvatar
-                name={
-                  isSwitching
-                    ? switchingAgent?.displayName?.trim() ||
-                      switchingToSlug ||
-                      activeName
-                    : activeName
-                }
-                identity={
-                  switchingAgent?.publicIdentity ??
-                  activeAgent?.publicIdentity ??
-                  activeSlug ??
-                  'agent'
-                }
+                name={activeName}
+                identity={activeAgent?.publicIdentity ?? activeSlug ?? 'agent'}
                 size="md"
               />
-              <span className="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-background ring-1 ring-border">
-                {statusIcon}
+              <span className="absolute -bottom-0.5 -right-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-background ring-1 ring-border">
+                <VaultStatusIcon state={vaultVisualState} />
               </span>
             </button>
           ) : isHeader ? (
             <button
               type="button"
               aria-label={`${triggerLabel}. ${vaultLabel}. Switch active agent`}
-              aria-busy={isSwitching}
-              className="flex h-11 min-w-0 max-w-[11rem] items-center gap-2 rounded-lg border border-border/70 bg-card/70 px-2.5 text-left shadow-xs transition-[background-color,border-color,box-shadow] hover:border-border hover:bg-muted/50 hover:shadow-soft-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-70 sm:max-w-[15rem] lg:h-9"
+              className="flex h-11 min-w-0 max-w-[11rem] items-center gap-2 rounded-lg border border-border/70 bg-card/70 px-2.5 text-left shadow-xs transition-[background-color,border-color,box-shadow] hover:border-border hover:bg-muted/50 hover:shadow-soft-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:max-w-[15rem] lg:h-9"
             >
               <AgentAvatar
-                name={
-                  isSwitching
-                    ? switchingAgent?.displayName?.trim() ||
-                      switchingToSlug ||
-                      activeName
-                    : activeName
-                }
-                identity={
-                  switchingAgent?.publicIdentity ??
-                  activeAgent?.publicIdentity ??
-                  activeSlug ??
-                  'agent'
-                }
+                name={activeName}
+                identity={activeAgent?.publicIdentity ?? activeSlug ?? 'agent'}
                 size="sm"
               />
               <span className="min-w-0 flex-1">
                 <span className="hidden text-[11px] font-medium leading-none text-muted-foreground xl:block">
-                  {isSwitching ? 'Switching agent' : 'Acting as'}
+                  Acting as
                 </span>
                 <span className="block truncate font-mono text-sm font-medium leading-tight">
-                  {visibleSlug ? `/${visibleSlug}` : 'Select agent'}
+                  {activeAgent ? `/${activeAgent.slug}` : 'Select agent'}
                 </span>
               </span>
               <span className="flex shrink-0 items-center gap-1">
-                {isSwitching ? (
-                  <CircleNotch
-                    aria-hidden
-                    className="h-3.5 w-3.5 animate-spin text-muted-foreground motion-reduce:animate-none"
-                  />
-                ) : (
-                  statusIcon
-                )}
+                <VaultStatusIcon state={vaultVisualState} />
                 <CaretDown
                   aria-hidden
-                  className="hidden h-3 w-3 text-muted-foreground sm:block"
+                  className="hidden size-3 shrink-0 sm:block"
+                  weight="bold"
                 />
               </span>
             </button>
@@ -168,51 +152,29 @@ export function ActiveAgentSelector({
             <button
               type="button"
               aria-label={`${triggerLabel}. ${vaultLabel}. Switch active agent`}
-              aria-busy={isSwitching}
-              className="flex min-h-11 w-full items-center gap-2.5 rounded-lg border border-border/70 bg-card/60 px-2.5 py-2 text-left shadow-xs transition-[background-color,border-color,box-shadow] hover:border-border hover:bg-muted/50 hover:shadow-soft-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-70"
+              className="flex min-h-11 w-full items-center gap-2.5 rounded-lg border border-border/70 bg-card/60 px-2.5 py-2 text-left shadow-xs transition-[background-color,border-color,box-shadow] hover:border-border hover:bg-muted/50 hover:shadow-soft-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <AgentAvatar
-                name={
-                  isSwitching
-                    ? switchingAgent?.displayName?.trim() ||
-                      switchingToSlug ||
-                      activeName
-                    : activeName
-                }
-                identity={
-                  switchingAgent?.publicIdentity ??
-                  activeAgent?.publicIdentity ??
-                  activeSlug ??
-                  'agent'
-                }
+                name={activeName}
+                identity={activeAgent?.publicIdentity ?? activeSlug ?? 'agent'}
                 size="md"
               />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-medium">
-                  {isSwitching
-                    ? switchingAgent?.displayName?.trim() || switchingToSlug
-                    : activeName}
+                  {activeName}
                 </span>
                 <span className="flex items-center gap-1.5 truncate text-sm text-muted-foreground lg:text-xs">
-                  {statusIcon}
-                  {isSwitching
-                    ? `Switching to /${switchingToSlug}`
-                    : activeAgent
-                      ? `/${activeAgent.slug} · ${vaultLabel}`
-                      : vaultLabel}
+                  <VaultStatusIcon state={vaultVisualState} />
+                  {activeAgent
+                    ? `/${activeAgent.slug} · ${vaultLabel}`
+                    : vaultLabel}
                 </span>
               </span>
-              {isSwitching ? (
-                <CircleNotch
-                  aria-hidden
-                  className="h-4 w-4 shrink-0 animate-spin text-muted-foreground motion-reduce:animate-none"
-                />
-              ) : (
-                <CaretDown
-                  aria-hidden
-                  className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-                />
-              )}
+              <CaretDown
+                aria-hidden
+                className="size-3.5 shrink-0 text-muted-foreground"
+                weight="bold"
+              />
             </button>
           )}
         </DropdownMenuTrigger>
@@ -245,7 +207,6 @@ export function ActiveAgentSelector({
                   <DropdownMenuRadioItem
                     key={agent.slug}
                     value={agent.slug}
-                    disabled={isSwitching}
                     className="min-h-11 gap-2.5 py-2 pl-8"
                   >
                     <AgentAvatar
@@ -272,10 +233,7 @@ export function ActiveAgentSelector({
               className="flex min-h-11 items-center gap-2.5 px-2.5 py-2 text-sm"
               role="status"
             >
-              <LockOpen
-                aria-hidden
-                className="h-4 w-4 text-emerald-600 dark:text-emerald-400"
-              />
+              <VaultStatusIcon state="unlocked" />
               <span className="min-w-0 flex-1">
                 <span className="block font-medium">Vault unlocked</span>
                 <span className="block text-sm text-muted-foreground lg:text-xs">
@@ -289,17 +247,7 @@ export function ActiveAgentSelector({
               className="min-h-11 gap-2.5"
               onSelect={() => setVaultDialogOpen(true)}
             >
-              {vault.loading ? (
-                <CircleNotch
-                  aria-hidden
-                  className="animate-spin text-muted-foreground motion-reduce:animate-none"
-                />
-              ) : (
-                <Lock
-                  aria-hidden
-                  className="text-amber-600 dark:text-amber-400"
-                />
-              )}
+              <VaultStatusIcon state={vaultVisualState} />
               <span className="min-w-0 flex-1">
                 <span className="block font-medium">{vaultLabel}</span>
                 <span className="block text-sm text-muted-foreground lg:text-xs">
@@ -317,7 +265,7 @@ export function ActiveAgentSelector({
                 className="min-h-11 gap-2.5"
                 onSelect={onManageAgents}
               >
-                <Users aria-hidden />
+                <Users className="size-4 shrink-0" aria-hidden />
                 <span className="font-medium">Manage agents</span>
               </DropdownMenuItem>
             </>

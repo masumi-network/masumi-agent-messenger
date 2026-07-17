@@ -144,7 +144,7 @@ export function WorkspaceRouteShell({
     workspace.tablesReady &&
     usableAgents.length > 0 &&
     !workspace.selectedActor;
-  const handleSelectAgent = async (slug: string) => {
+  const handleSelectAgent = (slug: string) => {
     setActiveActorIdentity({
       email: workspace.email,
       slug,
@@ -153,13 +153,13 @@ export function WorkspaceRouteShell({
 
     if (section === 'channels') {
       if (selectedChannelSlug) {
-        await navigate({
+        void navigate({
           to: '/channels/$slug',
           params: { slug: selectedChannelSlug },
           search: { agent: slug },
         });
       } else {
-        await navigate({
+        void navigate({
           to: '/channels',
           search: { agent: slug, tab: 'mine' },
         });
@@ -169,13 +169,13 @@ export function WorkspaceRouteShell({
 
     if (section === 'discover') {
       if (selectedDiscoverSlug) {
-        await navigate({
+        void navigate({
           to: '/discover/$slug',
           params: { slug: selectedDiscoverSlug },
           search: { agent: slug },
         });
       } else {
-        await navigate({
+        void navigate({
           to: '/discover',
           search: { agent: slug },
         });
@@ -184,7 +184,7 @@ export function WorkspaceRouteShell({
     }
 
     if (section === 'agents') {
-      await navigate({
+      void navigate({
         to: '/agents',
         search: { agent: slug },
       });
@@ -192,7 +192,7 @@ export function WorkspaceRouteShell({
     }
 
     if (section === 'security') {
-      await navigate({
+      void navigate({
         to: '/security',
         search: {
           agent: slug,
@@ -202,7 +202,7 @@ export function WorkspaceRouteShell({
       return;
     }
 
-    await navigate({
+    void navigate({
       to: '/$slug',
       params: { slug },
       search: {

@@ -22,6 +22,7 @@ export type ChannelNavEntry = {
   channelId: bigint;
   slug: string;
   title: string | null;
+  description: string | null;
   permission: ChannelPermissionTag;
   isAdmin: boolean;
   pendingApprovals: number;
@@ -31,6 +32,7 @@ type ChannelNavChannelLike = {
   id: bigint;
   slug: string;
   title?: string | null;
+  description?: string | null;
 };
 
 type ChannelNavMembershipLike = {
@@ -85,6 +87,7 @@ export function buildChannelNavEntries<
       channelId: membership.channelId,
       slug: channel.slug,
       title: channel.title ?? null,
+      description: channel.description ?? null,
       permission: membership.permission,
       isAdmin: membership.permission.tag === 'Admin',
       pendingApprovals: existing?.pendingApprovals ?? 0,
