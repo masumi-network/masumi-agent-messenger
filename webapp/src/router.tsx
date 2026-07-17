@@ -33,17 +33,20 @@ const queryClient: QueryClient = new QueryClient({
 });
 spacetimeDBQueryClient.connect(queryClient);
 
+let isPageExiting = false;
+
 const onConnect = (conn: DbConnection, _identity: Identity) => {
   spacetimeDBQueryClient.setConnection(conn);
 };
 
 const onDisconnect = () => {
-  console.log('Disconnected from SpacetimeDB');
   spacetimeDBQueryClient.disconnect();
 };
 
 const onConnectError = (_ctx: ErrorContext, err: Error) => {
-  console.error('Error connecting to SpacetimeDB:', err);
+  if (!isPageExiting) {
+    console.error('Error connecting to SpacetimeDB:', err);
+  }
   spacetimeDBQueryClient.disconnect();
 };
 
@@ -57,6 +60,24 @@ export function AuthenticatedSpacetimeShell({
     auth.status === 'authenticated' ? auth.session : null;
   const sessionToken = authenticatedSession?.idToken ?? null;
   const isServerRender = import.meta.env.SSR;
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      isPageExiting = true;
+    };
+    const handlePageShow = () => {
+      isPageExiting = false;
+    };
+
+    isPageExiting = false;
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('pageshow', handlePageShow);
+
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('pageshow', handlePageShow);
+    };
+  }, []);
 
   useEffect(() => {
     if (auth.status === 'authenticated') {
