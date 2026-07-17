@@ -47,9 +47,14 @@ import {
   getOrCreatePendingBootstrapKeyPair,
   hasPendingBootstrapKeyPair,
   loadPendingBootstrapKeyPair,
+  loadStoredAgentKeyPair,
   setActiveActorIdentity,
   setStoredAgentKeyPair,
 } from '@/lib/agent-session';
+import {
+  keyBundleMatchesAgentKeyPair,
+  resolveExistingActorKeySource,
+} from '@/lib/bootstrap-key-reconciliation';
 import { resolveWorkspaceSnapshot } from '@/lib/app-shell';
 import { deferEffectStateUpdate } from '@/lib/effect-state';
 import {
@@ -114,23 +119,6 @@ async function readAgentCurrentKeyBundle(
   return bundles[0] ?? null;
 }
 
-function keyBundleMatchesBootstrapKeys(
-  bundle: AgentKeyBundle,
-  params: {
-    encryptionPublicKey: string;
-    encryptionKeyVersion: number;
-    signingPublicKey: string;
-    signingKeyVersion: number;
-  }
-): boolean {
-  return (
-    bundle.encryptionPublicKey === params.encryptionPublicKey &&
-    bundle.keyBundleVersion === params.encryptionKeyVersion &&
-    bundle.signingPublicKey === params.signingPublicKey &&
-    bundle.keyBundleVersion === params.signingKeyVersion
-  );
-}
-
 async function waitForBootstrapRows(params: {
   connection: DbConnection;
   email: string;
@@ -158,7 +146,21 @@ async function waitForBootstrapRows(params: {
       ? await readAgentCurrentKeyBundle(params.connection, actor)
       : null;
 
-    if (inbox && actor && keyBundle && keyBundleMatchesBootstrapKeys(keyBundle, params)) {
+    if (
+      inbox &&
+      actor &&
+      keyBundle &&
+      keyBundleMatchesAgentKeyPair(keyBundle, {
+        encryption: {
+          publicKey: params.encryptionPublicKey,
+          keyVersion: params.encryptionKeyVersion,
+        },
+        signing: {
+          publicKey: params.signingPublicKey,
+          keyVersion: params.signingKeyVersion,
+        },
+      })
+    ) {
       return { inbox, actor };
     }
 
@@ -411,7 +413,50 @@ function AuthenticatedHome({
         deviceId: device.deviceId,
       });
 
-      if (!defaultActor) {
+      if (defaultActor) {
+        const currentBundle = await readAgentCurrentKeyBundle(connection, defaultActor);
+        if (!currentBundle) {
+          throw new Error(
+            `Could not load the published keys for /${defaultActor.slug}.`
+          );
+        }
+        const identity = {
+          email,
+          slug: defaultActor.slug,
+        };
+        const storedKeyPair = await loadStoredAgentKeyPair(identity);
+        const keySource = resolveExistingActorKeySource({
+          bundle: currentBundle,
+          pending: keyPair,
+          stored: storedKeyPair,
+        });
+
+        if (keySource === 'missing') {
+          throw new Error(
+            `/${defaultActor.slug} already exists, but its published keys do not match the pending setup keys or this vault. Restore the existing key backup or import the keys from an authorized device; setup will not overwrite them.`
+          );
+        }
+
+        if (keySource === 'stored') {
+          setFinalizing(true);
+          setBootstrapStage('finalize');
+          await clearPendingBootstrapKeyPair(email);
+
+          if (!componentMountedRef.current) {
+            return;
+          }
+
+          setFinalizing(false);
+          setPendingBootstrapExists(false);
+          setActiveActorIdentity(identity);
+          setResolvedBootstrapSlug(defaultActor.slug);
+          console.info(
+            '[masumi bootstrap] cleared stale pending keys and restored the existing inbox',
+            identity
+          );
+          return;
+        }
+      } else {
         await Promise.resolve(
           connection.reducers.upsertAccountFromOidcIdentity({
             displayName: session.user.name?.trim() || undefined,

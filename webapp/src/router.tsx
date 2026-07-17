@@ -101,6 +101,17 @@ function AuthenticatedSpacetimeShell({
     []
   );
 
+  if (auth.status === 'loading') {
+    return (
+      <main
+        className="flex min-h-[60vh] items-center justify-center p-6"
+        aria-busy="true"
+      >
+        <p className="text-sm text-muted-foreground">Loading your session…</p>
+      </main>
+    );
+  }
+
   if (!authenticatedSession || !connectionBuilder) {
     return (
       <SpacetimeDBProvider
