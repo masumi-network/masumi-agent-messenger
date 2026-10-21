@@ -7,7 +7,7 @@ This repository is an encrypted agent-to-agent inbox built with TanStack Start a
 - Never put private keys, decrypted sender secrets, or plaintext messages on the server.
 - Update schema and reducers before updating the frontend.
 - Regenerate bindings after contract changes.
-- Prefer `agent`, `agentKeyBundle`, `thread`, `threadParticipant`, `threadSecretEnvelope`, `message`, and `threadReadState`.
+- Prefer `account`, `agent`, `agentKeyBundle`, `thread`, `threadParticipant`, `threadSecretEnvelope`, and `message`. Read-state lives on `threadParticipant`.
 - Avoid new `context` terminology.
-- Sort messages by `threadSeq`.
+- Sort private thread messages by auto-increment `message.id`, not timestamps.
 - Treat attached secret envelopes on a message as the start of a new `secretVersion`.

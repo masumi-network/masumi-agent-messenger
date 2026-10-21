@@ -36,10 +36,6 @@ The client owns:
 - Prefer `thread`, `participant`, `secret envelope`, and `read state`.
 - Do not introduce new `context` terminology in client code.
 - Keep frontend labels aligned with the encrypted inbox product rather than starter-template wording.
-# Frontend Agent Guide
-
-This directory contains the TanStack Start frontend for the inbox application.
-
 ## Frontend Purpose
 
 The frontend should present live inbox state from SpacetimeDB:
@@ -89,7 +85,7 @@ Do not let the UI drift into a mock-only demo once real SpacetimeDB data exists.
 - Use stable ids from the schema for React keys. Do not keep starter-template index keys once real entities exist.
 - Model loading, empty, error, and disconnected states explicitly.
 - Keep forms minimal and typed.
-- Prefer simple CSS or inline styles unless a styling system is intentionally introduced.
+- Style with the existing Tailwind setup (`webapp/tailwind.config.cjs`).
 
 ## Files To Avoid Editing
 

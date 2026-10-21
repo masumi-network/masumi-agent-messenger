@@ -8,7 +8,7 @@
 - Frontend package: `webapp/`
 - Frontend application: `webapp/src/`
 - SpacetimeDB module: `spacetimedb/`
-- CLI scaffold: `cli/`
+- CLI package: `cli/` (supported product client, see `cli/AGENTS.md`)
 - Generated client bindings: `webapp/src/module_bindings/`
 - Generated route tree: `webapp/src/routeTree.gen.ts`
 
@@ -51,10 +51,10 @@ Do not patch only one side of the app when the contract clearly changed.
 - Reducers are transactional and deterministic.
 - Reducers do not return data to callers.
 - Trust `ctx.sender`, not client-provided identity arguments.
-- Use object parameters for reducers.
-- Put indexes in the first `table()` argument.
+- Call reducers with object arguments from the TS bindings (the Rust module takes positional args).
+- Declare indexes in the `#[spacetimedb::table(...)]` attribute.
 - Keep index accessors globally unique across the module.
-- Use `0n` placeholders for auto-increment `u64` primary keys, except direct-thread first-message flows where the client-generated thread id is intentionally signed before the reducer runs.
+- Use `0` placeholders for auto-increment `u64` primary keys, except direct-thread first-message flows where the client-generated thread id is intentionally signed before the reducer runs.
 - Do not hand-edit `webapp/src/module_bindings/`; regenerate them.
 
 ## Encryption Rules
@@ -70,7 +70,7 @@ Do not patch only one side of the app when the contract clearly changed.
 
 - `webapp/src/module_bindings/`: generated, never hand-edit
 - `webapp/src/routeTree.gen.ts`: generated, never hand-edit
-- `spacetimedb/dist/`: build output
+- `spacetimedb/target/`: Rust build output
 
 ## Useful Commands
 

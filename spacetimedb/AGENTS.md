@@ -37,7 +37,7 @@ The backend must not perform encryption, decryption, or private-key handling.
 - Do not add server-side "trust" bits to the schema — the trust decision lives with the peer's client.
 - Agent encryption and signing keys intentionally rotate together as one `agent_key_bundle` tuple. When the CLI / webapp observes a peer key rotation, inbound signatures still verify against `agent_key_bundle` history and the receiver auto-confirms the observed tuple locally; sender-owned imported key material is gated separately before sending. Server reducers must keep making the rotation visible (via `agent` and `agent_key_bundle` rows) so clients can detect it.
 - Device source attribution is account-trusted after OIDC succeeds. Device-share reducers infer the displayed source from an approved device public-key tuple, but they intentionally do not require per-device proof/signature material.
-- Channels are the documented exception — see `CLAUDE.md` "Channel exception: trust is enforced device-side."
+- Channels use the same client-side trust model. See the `CLAUDE.md` section "Channels — same trust model, different surface".
 
 ## Schema (28 tables)
 
@@ -77,34 +77,18 @@ No `public: true` tables; client reads go through auth-gated `#[view(public)]` f
 ```
 src/
 ├── lib.rs               # entry; declares modules + crate-level allow lints
-├── constants.rs         # 16 enums + length/lifetime/rate-limit/page-size constants
+├── constants.rs         # enums + length/lifetime/rate-limit/page-size constants
 ├── tables/
 │   ├── mod.rs           # `mod <name>_def;` + `pub use <name>_def::*;` for all 28 tables
 │   └── <table>_def.rs   # one per table; `_def` suffix avoids module/trait name collision
-├── helpers/
-│   ├── mod.rs
-│   ├── time.rs
-│   ├── slug.rs
-│   ├── validate.rs
-│   ├── oidc.rs
-│   ├── auth_lease.rs
-│   ├── scheduling.rs
-│   ├── rate_limit.rs
-│   ├── thread_fanout.rs
-│   ├── threads.rs
-│   ├── channels.rs
-│   ├── contacts.rs
-│   ├── envelopes.rs
-│   ├── accounts.rs
-│   ├── agents.rs
-│   └── devices.rs
+├── helpers/             # one file per shared concern (validate, oidc, auth_lease, rate_limit, fan-out, domain helpers)
 └── operations/
-    ├── identity/        # 10 reducers + client_connected lifecycle
-    ├── threads/         # 10 reducers (5 fan-out, 2 caller-only, 3 other)
-    ├── channels/        # 9 reducers (no fan-out)
-    ├── contacts/        # 4 reducers
+    ├── identity/        # identity reducers + client_connected lifecycle
+    ├── threads/         # thread reducers (see Fan-out Contract)
+    ├── channels/        # channel reducers
+    ├── contacts/        # contact reducers
     ├── system/          # expire_scheduled dispatcher
-    ├── views/           # 15 views + auth.rs gate helper
+    ├── views/           # views + auth.rs gate helper
     └── procedures/      # request/response reads, enabled via Rust SDK `unstable`
 ```
 
@@ -145,7 +129,7 @@ visible when changing channel fanout behavior.
 
 - Use `#[view(accessor = ..., public)]` on a function taking `&ViewContext` (auth-aware) or `&AnonymousViewContext` (no caller).
 - Caller auth in views: `caller_account_id(ctx)` (in `operations::views::auth`) returns `None` when the lease is missing or inactive — short-circuit by returning `Vec::new()`.
-- Bound output. Live-subscribable views must cap (top-25 most recent threads, top-25 messages per thread). Older history goes through procedures.
+- Bound output. Live-subscribable views must cap their rows; the caps are the `MAX_VISIBLE_*` constants in `constants.rs`. Thread and message history goes through procedures.
 - Avoid full `.iter()` in views unless the table is known to be small.
 - Use procedures for paged/history reads or anonymous lookup flows that should not be live subscriptions. Keep public procedures bounded and rate-limited where possible.
 
