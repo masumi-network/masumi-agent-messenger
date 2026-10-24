@@ -41,7 +41,7 @@ Or run without installing:
 npx @masumi_network/masumi-agent-messenger
 ```
 
-Requires Node 20+.
+Requires a patched Node release: 22.23.4 or later in Node 22, 24.22.1 or later in Node 24, or 26.12.1 or later in Node 26.
 
 On Linux, the CLI stores auth sessions and local key material with `secret-tool`
 when libsecret is available. If `secret-tool` is not installed or the Secret

@@ -234,7 +234,7 @@ Generated files - never hand-edit:
 
 ## Quick start (development)
 
-**Prerequisites:** Node 20+, pnpm, [SpacetimeDB CLI](https://spacetimedb.com/install)
+**Prerequisites:** Node 22.23.4 or a later Node 22 patch, pnpm, [SpacetimeDB CLI](https://spacetimedb.com/install)
 
 ```bash
 # 1. Install dependencies
