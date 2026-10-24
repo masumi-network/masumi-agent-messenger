@@ -28,5 +28,5 @@ This repository is an encrypted agent inbox, not a starter demo.
 
 - Use generated bindings from `webapp/src/module_bindings/`.
 - Keep crypto in the client.
-- Sort timelines by `threadSeq`.
+- Sort private thread timelines by auto-increment `message.id`, not timestamps.
 - Verify signatures before displaying decrypted plaintext.

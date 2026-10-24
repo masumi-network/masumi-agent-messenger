@@ -25,7 +25,7 @@ When backend and frontend both change:
 
 - Reducers are deterministic and do not return data.
 - Use `ctx.sender` as the trusted identity source.
-- Use object params and `0n` placeholders for auto-increment ids.
+- Call reducers with object arguments from the TS bindings. Use `0` placeholders for auto-increment `u64` ids in the Rust module.
 - Keep index accessors globally unique.
 - Never hand-edit generated bindings.
 
@@ -41,7 +41,7 @@ When backend and frontend both change:
 
 ## Peer Key Trust Rules
 
-The trust model after the rework is **sender-gated**, not receiver-gated. Server-side rotation is permissive; the trust gates run on the sender's own machine.
+The trust model is **sender-gated**, not receiver-gated. Server-side rotation is permissive; the trust gates run on the sender's own machine.
 
 - The server is NOT a trust anchor for peer agent keys. `rotateAgentKeys` only requires a valid OIDC token plus account ownership. It does not check device-approval status. A compromised OIDC session can publish attacker-controlled keys under a legitimate agent slug.
 - Clients still pin each peer's known `(encryptionKeyVersion, signingKeyVersion, encryptionPublicKey, signingPublicKey)` tuple locally on first observation. The pinned tuple is used to detect and surface rotation events.
@@ -71,10 +71,6 @@ The `lookupMasumiInboxAgentBySlug` / `getMasumiNetworkAgentChatBlock` checks tha
 - The substantive trust posture still holds: peer key pinning, signature verification, and recipient-side contact policies are enforced regardless of the registry check. The registry guard is a convenience to fail fast on known-bad peers, not a security boundary.
 
 Do not tighten these catches into hard failures without also re-evaluating how an offline or degraded registry should affect the send path.
-# masumi-agent-messenger Claude Guide
-
-This repository is an agent-to-agent messaging and inbox application.
-
 ## Project Shape
 
 - Frontend: TanStack Start in `webapp/src/`
@@ -127,7 +123,7 @@ Do not change only the UI or only the backend when the feature clearly requires 
 - Use `0` placeholder for auto-increment `u64` ids on insert (the runtime overwrites it). The intentional exception is direct-thread creation with an attached first message: the client supplies a stable high-bit thread id because that id is already bound into the signed message payload.
 - Regenerate bindings after changing tables, reducers, or exported backend types.
 
-## Domain model (post-rework)
+## Domain model
 
 The schema lives in `spacetimedb/src/tables/*.rs` (28 tables). Core domain:
 
@@ -149,14 +145,14 @@ pnpm run spacetime:generate        # regenerates TS bindings
 pnpm run build
 ```
 
-## Post-rework wire-protocol notes
+## Wire-protocol notes
 
-The rework changed several on-the-wire shapes in ways that are not backwards compatible. Pre-rework rows and signatures will not validate or deserialize against the new schema. Dev DB (`masumi-messenger-dev-hlq5a`) is the only target — there is no migration path from older data; wipe the DB before publishing.
+Rows and signatures from the older schema do not validate or deserialize against the current schema. Dev DB (`masumi-messenger-dev-hlq5a`) is the only target. There is no migration path from older data, so wipe the DB before publishing.
 
 - **Message signature payload**: `senderSeq` removed; `senderMessageId` is mandatory and always included in the signed payload. The earlier client-side rejection of the legacy `1n` sentinel was dropped — only `0n` is rejected (mirrors the server's `sender_message_id == 0` reject in `helpers/messages.rs`). See `shared/agent-crypto.ts:buildMessageSignaturePayload` and `randomSenderMessageId`.
 - **Key version type**: `encryptionKeyVersion`, `signingKeyVersion`, `secretVersion` are `number` (was prefix-string `enc-vN`/`sig-vN`). See `shared/agent-crypto.ts:normalizeVersion`. The first sender secret in a thread is `secretVersion = 1`; use `firstOrNextSecretVersion` rather than `nextKeyVersion(undefined)` for the first publish.
 - **Thread/channel ordering**: server-side `next_thread_seq` / `next_channel_seq` and derived `lastMessageSeq` were removed. Private thread and channel timelines sort by their auto-increment message `id`; sender-local counters stay on membership rows and are not persisted on messages.
-- **Cryptographic byte caps**: `MAX_MESSAGE_CIPHERTEXT_BYTES = 144 KiB`, `AES_GCM_IV_BYTES = 12`, `SIGNATURE_BYTES = 64`, `MAX_WRAPPED_SECRET_CIPHERTEXT_BYTES = 48`, `MAX_DEVICE_BUNDLE_CIPHERTEXT_BYTES = 3 MiB`. Defined in `spacetimedb/src/constants.rs` and mirrored in `shared/message-limits.ts` via the `ensure*Bytes` helpers wired into the prepare/encrypt paths.
+- **Cryptographic byte caps**: `MAX_MESSAGE_CIPHERTEXT_BYTES`, `AES_GCM_IV_BYTES`, `SIGNATURE_BYTES`, `MAX_WRAPPED_SECRET_CIPHERTEXT_BYTES`, `MAX_DEVICE_BUNDLE_CIPHERTEXT_BYTES`. Read the current values in `spacetimedb/src/constants.rs` (server) and `shared/message-limits.ts` (client). The client enforces them through the `ensure*Bytes` helpers in the prepare/encrypt paths.
 - **Channel access mode**: collapsed to a binary enum (`Public`, `ApprovalRequired`). The pre-rework per-permission `--public-join-permission read|read_write` flag is gone; direct public joins use the channel's `default_permission`, approval seats the requested permission, and later changes use `update_channel_member_permission`.
 - **SpacetimeDB live subscriptions**: SpacetimeDB 2.1 rejects `LIMIT` in subscription SQL, so `shared/spacetime-subscription-limits.ts` exposes `prepareSpacetimeSubscriptionQuery` which only validates the table is in the allowlist and strips trailing `;`/comments — it does NOT cap row counts. Per-table caps live on the server (bounded views + paged procedures).
 - **Reducer/table renames** worth being aware of: `inbox*` → `account*`; `mark_thread_read` + `set_thread_archived` → `update_thread_read_state`; `set_channel_member_permission` → `update_channel_member_permission`; `request_direct_contact_with_first_message` → `request_direct_contact` (still atomic: it creates the direct thread, stores the first hidden message, and attaches the initial secret envelopes before approval). The CLI service shim formerly called `createInboxIdentity` is now `createAgent` in `cli/src/services/inbox-management.ts`.
