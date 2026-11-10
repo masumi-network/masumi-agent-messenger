@@ -9,56 +9,31 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as SecurityRouteImport } from './routes/security'
-import { Route as InboxesRouteImport } from './routes/inboxes'
-import { Route as DiscoverRouteImport } from './routes/discover'
-import { Route as ChannelsRouteImport } from './routes/channels'
-import { Route as ApprovalsRouteImport } from './routes/approvals'
-import { Route as AgentsRouteImport } from './routes/agents'
-import { Route as SlugRouteImport } from './routes/$slug'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as DiscoverSlugRouteImport } from './routes/discover_.$slug'
-import { Route as ChannelsSlugRouteImport } from './routes/channels_.$slug'
-import { Route as AuthSessionRouteImport } from './routes/auth.session'
-import { Route as AuthLogoutRouteImport } from './routes/auth.logout'
-import { Route as AuthLoginRouteImport } from './routes/auth.login'
-import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
-import { Route as SlugPublicRouteImport } from './routes/$slug.public'
+import { Route as SlugRouteImport } from './routes/$slug'
+import { Route as AgentsRouteImport } from './routes/agents'
+import { Route as ApprovalsRouteImport } from './routes/approvals'
+import { Route as ChannelsRouteImport } from './routes/channels'
+import { Route as DiscoverRouteImport } from './routes/discover'
+import { Route as InboxesRouteImport } from './routes/inboxes'
+import { Route as SecurityRouteImport } from './routes/security'
 import { Route as SlugManageRouteImport } from './routes/$slug.manage'
-import { Route as ApiMasumiInboxAgentSyncRouteImport } from './routes/api.masumi.inbox-agent.sync'
-import { Route as ApiMasumiInboxAgentRegisterRouteImport } from './routes/api.masumi.inbox-agent.register'
-import { Route as ApiMasumiInboxAgentFindAgentsRouteImport } from './routes/api.masumi.inbox-agent.find-agents'
-import { Route as ApiMasumiInboxAgentDeregisterRouteImport } from './routes/api.masumi.inbox-agent.deregister'
+import { Route as SlugPublicRouteImport } from './routes/$slug.public'
+import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
+import { Route as AuthLoginRouteImport } from './routes/auth.login'
+import { Route as AuthLogoutRouteImport } from './routes/auth.logout'
+import { Route as AuthSessionRouteImport } from './routes/auth.session'
+import { Route as ChannelsSlugRouteImport } from './routes/channels_.$slug'
+import { Route as DiscoverSlugRouteImport } from './routes/discover_.$slug'
 import { Route as ApiMasumiInboxAgentCreditsRouteImport } from './routes/api.masumi.inbox-agent.credits'
+import { Route as ApiMasumiInboxAgentDeregisterRouteImport } from './routes/api.masumi.inbox-agent.deregister'
+import { Route as ApiMasumiInboxAgentFindAgentsRouteImport } from './routes/api.masumi.inbox-agent.find-agents'
+import { Route as ApiMasumiInboxAgentRegisterRouteImport } from './routes/api.masumi.inbox-agent.register'
+import { Route as ApiMasumiInboxAgentSyncRouteImport } from './routes/api.masumi.inbox-agent.sync'
 
-const SecurityRoute = SecurityRouteImport.update({
-  id: '/security',
-  path: '/security',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const InboxesRoute = InboxesRouteImport.update({
-  id: '/inboxes',
-  path: '/inboxes',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DiscoverRoute = DiscoverRouteImport.update({
-  id: '/discover',
-  path: '/discover',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ChannelsRoute = ChannelsRouteImport.update({
-  id: '/channels',
-  path: '/channels',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApprovalsRoute = ApprovalsRouteImport.update({
-  id: '/approvals',
-  path: '/approvals',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AgentsRoute = AgentsRouteImport.update({
-  id: '/agents',
-  path: '/agents',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SlugRoute = SlugRouteImport.update({
@@ -66,29 +41,49 @@ const SlugRoute = SlugRouteImport.update({
   path: '/$slug',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const AgentsRoute = AgentsRouteImport.update({
+  id: '/agents',
+  path: '/agents',
   getParentRoute: () => rootRouteImport,
 } as any)
-const DiscoverSlugRoute = DiscoverSlugRouteImport.update({
-  id: '/discover_/$slug',
-  path: '/discover/$slug',
+const ApprovalsRoute = ApprovalsRouteImport.update({
+  id: '/approvals',
+  path: '/approvals',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ChannelsSlugRoute = ChannelsSlugRouteImport.update({
-  id: '/channels_/$slug',
-  path: '/channels/$slug',
+const ChannelsRoute = ChannelsRouteImport.update({
+  id: '/channels',
+  path: '/channels',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AuthSessionRoute = AuthSessionRouteImport.update({
-  id: '/auth/session',
-  path: '/auth/session',
+const DiscoverRoute = DiscoverRouteImport.update({
+  id: '/discover',
+  path: '/discover',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AuthLogoutRoute = AuthLogoutRouteImport.update({
-  id: '/auth/logout',
-  path: '/auth/logout',
+const InboxesRoute = InboxesRouteImport.update({
+  id: '/inboxes',
+  path: '/inboxes',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SecurityRoute = SecurityRouteImport.update({
+  id: '/security',
+  path: '/security',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SlugManageRoute = SlugManageRouteImport.update({
+  id: '/manage',
+  path: '/manage',
+  getParentRoute: () => SlugRoute,
+} as any)
+const SlugPublicRoute = SlugPublicRouteImport.update({
+  id: '/public',
+  path: '/public',
+  getParentRoute: () => SlugRoute,
+} as any)
+const AuthCallbackRoute = AuthCallbackRouteImport.update({
+  id: '/auth/callback',
+  path: '/auth/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthLoginRoute = AuthLoginRouteImport.update({
@@ -96,36 +91,30 @@ const AuthLoginRoute = AuthLoginRouteImport.update({
   path: '/auth/login',
   getParentRoute: () => rootRouteImport,
 } as any)
-const AuthCallbackRoute = AuthCallbackRouteImport.update({
-  id: '/auth/callback',
-  path: '/auth/callback',
+const AuthLogoutRoute = AuthLogoutRouteImport.update({
+  id: '/auth/logout',
+  path: '/auth/logout',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SlugPublicRoute = SlugPublicRouteImport.update({
-  id: '/public',
-  path: '/public',
-  getParentRoute: () => SlugRoute,
-} as any)
-const SlugManageRoute = SlugManageRouteImport.update({
-  id: '/manage',
-  path: '/manage',
-  getParentRoute: () => SlugRoute,
-} as any)
-const ApiMasumiInboxAgentSyncRoute = ApiMasumiInboxAgentSyncRouteImport.update({
-  id: '/api/masumi/inbox-agent/sync',
-  path: '/api/masumi/inbox-agent/sync',
+const AuthSessionRoute = AuthSessionRouteImport.update({
+  id: '/auth/session',
+  path: '/auth/session',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApiMasumiInboxAgentRegisterRoute =
-  ApiMasumiInboxAgentRegisterRouteImport.update({
-    id: '/api/masumi/inbox-agent/register',
-    path: '/api/masumi/inbox-agent/register',
-    getParentRoute: () => rootRouteImport,
-  } as any)
-const ApiMasumiInboxAgentFindAgentsRoute =
-  ApiMasumiInboxAgentFindAgentsRouteImport.update({
-    id: '/api/masumi/inbox-agent/find-agents',
-    path: '/api/masumi/inbox-agent/find-agents',
+const ChannelsSlugRoute = ChannelsSlugRouteImport.update({
+  id: '/channels_/$slug',
+  path: '/channels/$slug',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DiscoverSlugRoute = DiscoverSlugRouteImport.update({
+  id: '/discover_/$slug',
+  path: '/discover/$slug',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiMasumiInboxAgentCreditsRoute =
+  ApiMasumiInboxAgentCreditsRouteImport.update({
+    id: '/api/masumi/inbox-agent/credits',
+    path: '/api/masumi/inbox-agent/credits',
     getParentRoute: () => rootRouteImport,
   } as any)
 const ApiMasumiInboxAgentDeregisterRoute =
@@ -134,12 +123,23 @@ const ApiMasumiInboxAgentDeregisterRoute =
     path: '/api/masumi/inbox-agent/deregister',
     getParentRoute: () => rootRouteImport,
   } as any)
-const ApiMasumiInboxAgentCreditsRoute =
-  ApiMasumiInboxAgentCreditsRouteImport.update({
-    id: '/api/masumi/inbox-agent/credits',
-    path: '/api/masumi/inbox-agent/credits',
+const ApiMasumiInboxAgentFindAgentsRoute =
+  ApiMasumiInboxAgentFindAgentsRouteImport.update({
+    id: '/api/masumi/inbox-agent/find-agents',
+    path: '/api/masumi/inbox-agent/find-agents',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiMasumiInboxAgentRegisterRoute =
+  ApiMasumiInboxAgentRegisterRouteImport.update({
+    id: '/api/masumi/inbox-agent/register',
+    path: '/api/masumi/inbox-agent/register',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiMasumiInboxAgentSyncRoute = ApiMasumiInboxAgentSyncRouteImport.update({
+  id: '/api/masumi/inbox-agent/sync',
+  path: '/api/masumi/inbox-agent/sync',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -307,46 +307,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/security': {
-      id: '/security'
-      path: '/security'
-      fullPath: '/security'
-      preLoaderRoute: typeof SecurityRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/inboxes': {
-      id: '/inboxes'
-      path: '/inboxes'
-      fullPath: '/inboxes'
-      preLoaderRoute: typeof InboxesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/discover': {
-      id: '/discover'
-      path: '/discover'
-      fullPath: '/discover'
-      preLoaderRoute: typeof DiscoverRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/channels': {
-      id: '/channels'
-      path: '/channels'
-      fullPath: '/channels'
-      preLoaderRoute: typeof ChannelsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/approvals': {
-      id: '/approvals'
-      path: '/approvals'
-      fullPath: '/approvals'
-      preLoaderRoute: typeof ApprovalsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/agents': {
-      id: '/agents'
-      path: '/agents'
-      fullPath: '/agents'
-      preLoaderRoute: typeof AgentsRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/$slug': {
@@ -356,39 +321,67 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SlugRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/agents': {
+      id: '/agents'
+      path: '/agents'
+      fullPath: '/agents'
+      preLoaderRoute: typeof AgentsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/discover_/$slug': {
-      id: '/discover_/$slug'
-      path: '/discover/$slug'
-      fullPath: '/discover/$slug'
-      preLoaderRoute: typeof DiscoverSlugRouteImport
+    '/approvals': {
+      id: '/approvals'
+      path: '/approvals'
+      fullPath: '/approvals'
+      preLoaderRoute: typeof ApprovalsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/channels_/$slug': {
-      id: '/channels_/$slug'
-      path: '/channels/$slug'
-      fullPath: '/channels/$slug'
-      preLoaderRoute: typeof ChannelsSlugRouteImport
+    '/channels': {
+      id: '/channels'
+      path: '/channels'
+      fullPath: '/channels'
+      preLoaderRoute: typeof ChannelsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/auth/session': {
-      id: '/auth/session'
-      path: '/auth/session'
-      fullPath: '/auth/session'
-      preLoaderRoute: typeof AuthSessionRouteImport
+    '/discover': {
+      id: '/discover'
+      path: '/discover'
+      fullPath: '/discover'
+      preLoaderRoute: typeof DiscoverRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/auth/logout': {
-      id: '/auth/logout'
-      path: '/auth/logout'
-      fullPath: '/auth/logout'
-      preLoaderRoute: typeof AuthLogoutRouteImport
+    '/inboxes': {
+      id: '/inboxes'
+      path: '/inboxes'
+      fullPath: '/inboxes'
+      preLoaderRoute: typeof InboxesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/security': {
+      id: '/security'
+      path: '/security'
+      fullPath: '/security'
+      preLoaderRoute: typeof SecurityRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$slug/manage': {
+      id: '/$slug/manage'
+      path: '/manage'
+      fullPath: '/$slug/manage'
+      preLoaderRoute: typeof SlugManageRouteImport
+      parentRoute: typeof SlugRoute
+    }
+    '/$slug/public': {
+      id: '/$slug/public'
+      path: '/public'
+      fullPath: '/$slug/public'
+      preLoaderRoute: typeof SlugPublicRouteImport
+      parentRoute: typeof SlugRoute
+    }
+    '/auth/callback': {
+      id: '/auth/callback'
+      path: '/auth/callback'
+      fullPath: '/auth/callback'
+      preLoaderRoute: typeof AuthCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/auth/login': {
@@ -398,46 +391,39 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthLoginRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/auth/callback': {
-      id: '/auth/callback'
-      path: '/auth/callback'
-      fullPath: '/auth/callback'
-      preLoaderRoute: typeof AuthCallbackRouteImport
+    '/auth/logout': {
+      id: '/auth/logout'
+      path: '/auth/logout'
+      fullPath: '/auth/logout'
+      preLoaderRoute: typeof AuthLogoutRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/$slug/public': {
-      id: '/$slug/public'
-      path: '/public'
-      fullPath: '/$slug/public'
-      preLoaderRoute: typeof SlugPublicRouteImport
-      parentRoute: typeof SlugRoute
-    }
-    '/$slug/manage': {
-      id: '/$slug/manage'
-      path: '/manage'
-      fullPath: '/$slug/manage'
-      preLoaderRoute: typeof SlugManageRouteImport
-      parentRoute: typeof SlugRoute
-    }
-    '/api/masumi/inbox-agent/sync': {
-      id: '/api/masumi/inbox-agent/sync'
-      path: '/api/masumi/inbox-agent/sync'
-      fullPath: '/api/masumi/inbox-agent/sync'
-      preLoaderRoute: typeof ApiMasumiInboxAgentSyncRouteImport
+    '/auth/session': {
+      id: '/auth/session'
+      path: '/auth/session'
+      fullPath: '/auth/session'
+      preLoaderRoute: typeof AuthSessionRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/masumi/inbox-agent/register': {
-      id: '/api/masumi/inbox-agent/register'
-      path: '/api/masumi/inbox-agent/register'
-      fullPath: '/api/masumi/inbox-agent/register'
-      preLoaderRoute: typeof ApiMasumiInboxAgentRegisterRouteImport
+    '/channels_/$slug': {
+      id: '/channels_/$slug'
+      path: '/channels/$slug'
+      fullPath: '/channels/$slug'
+      preLoaderRoute: typeof ChannelsSlugRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/masumi/inbox-agent/find-agents': {
-      id: '/api/masumi/inbox-agent/find-agents'
-      path: '/api/masumi/inbox-agent/find-agents'
-      fullPath: '/api/masumi/inbox-agent/find-agents'
-      preLoaderRoute: typeof ApiMasumiInboxAgentFindAgentsRouteImport
+    '/discover_/$slug': {
+      id: '/discover_/$slug'
+      path: '/discover/$slug'
+      fullPath: '/discover/$slug'
+      preLoaderRoute: typeof DiscoverSlugRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/masumi/inbox-agent/credits': {
+      id: '/api/masumi/inbox-agent/credits'
+      path: '/api/masumi/inbox-agent/credits'
+      fullPath: '/api/masumi/inbox-agent/credits'
+      preLoaderRoute: typeof ApiMasumiInboxAgentCreditsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/masumi/inbox-agent/deregister': {
@@ -447,11 +433,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiMasumiInboxAgentDeregisterRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/masumi/inbox-agent/credits': {
-      id: '/api/masumi/inbox-agent/credits'
-      path: '/api/masumi/inbox-agent/credits'
-      fullPath: '/api/masumi/inbox-agent/credits'
-      preLoaderRoute: typeof ApiMasumiInboxAgentCreditsRouteImport
+    '/api/masumi/inbox-agent/find-agents': {
+      id: '/api/masumi/inbox-agent/find-agents'
+      path: '/api/masumi/inbox-agent/find-agents'
+      fullPath: '/api/masumi/inbox-agent/find-agents'
+      preLoaderRoute: typeof ApiMasumiInboxAgentFindAgentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/masumi/inbox-agent/register': {
+      id: '/api/masumi/inbox-agent/register'
+      path: '/api/masumi/inbox-agent/register'
+      fullPath: '/api/masumi/inbox-agent/register'
+      preLoaderRoute: typeof ApiMasumiInboxAgentRegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/masumi/inbox-agent/sync': {
+      id: '/api/masumi/inbox-agent/sync'
+      path: '/api/masumi/inbox-agent/sync'
+      fullPath: '/api/masumi/inbox-agent/sync'
+      preLoaderRoute: typeof ApiMasumiInboxAgentSyncRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
