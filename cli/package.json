@@ -76,8 +76,8 @@
     "@types/node": "^22.5.4",
     "@types/proper-lockfile": "^4.1.4",
     "@types/react": "^19.1.13",
-    "tsup": "^8.5.0",
-    "tsx": "^4.20.6",
+    "tsup": "^9.0.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.2",
     "vitest": "^4.1.12"
   }
