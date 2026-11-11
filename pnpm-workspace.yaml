@@ -8,13 +8,10 @@ allowBuilds:
 
 engineStrict: true
 
-minimumReleaseAgeExclude:
-  - minimatch@11.0.7
-
 overrides:
   # minimatch GHSA-g3hv-75wg-m249 is fixed only in 11.0.1. eslint, config-array
   # and typescript-estree still ask for ^10 and call only minimatch() and
   # Minimatch#match, which 11 keeps.
-  eslint>minimatch: ^11.0.7
-  '@eslint/config-array>minimatch': ^11.0.7
-  '@typescript-eslint/typescript-estree>minimatch': ^11.0.7
+  eslint>minimatch: ^11.0.5
+  '@eslint/config-array>minimatch': ^11.0.5
+  '@typescript-eslint/typescript-estree>minimatch': ^11.0.5
